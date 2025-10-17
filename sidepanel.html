@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<!-- Side panel UI for search, Ask, highlights, and settings. -->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Web Recall</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 10px;
+        min-width: 300px;
+      }
+      h2 {
+        margin-top: 0;
+      }
+      #query {
+        width: 100%;
+        padding: 6px;
+        box-sizing: border-box;
+      }
+      #searchBtn {
+        margin-top: 6px;
+        padding: 6px 12px;
+      }
+      #results {
+        margin-top: 12px;
+      }
+      .result {
+        margin-bottom: 12px;
+        padding-bottom: 12px;
+        border-bottom: 1px solid #eee;
+      }
+      .result a {
+        font-weight: bold;
+        text-decoration: none;
+        color: #0066cc;
+      }
+      .result a:hover {
+        text-decoration: underline;
+      }
+      .snippet {
+        font-size: 0.9em;
+        color: #444;
+      }
+    </style>
+  </head>
+  <body>
+    <div style="display:flex; align-items:center; justify-content:space-between;">
+      <h2 style="margin:0;">Web Recall</h2>
+      <div>
+        <div id="ollamaStatus" style="display:inline-block; font-size:0.9em; color:#666; margin-right:8px;">Ollama: <span id="ollamaIndicator">checking…</span></div>
+        <button id="settingsTopBtn" title="Settings">Settings</button>
+      </div>
+    </div>
+    <!-- Settings container sits directly below the header and toggles via the Settings button -->
+    <div id="settingsContainer" style="display:none; margin-top:8px; padding-top:8px; border-top:1px solid #eee;">
+      <!-- Models -->
+      <div style="margin-bottom: 8px; display:flex; flex-direction:column; gap:6px;">
+        <div>
+          <label for="embedModelSelect">Embedding model:</label>
+          <select id="embedModelSelect" style="width: 70%; margin-left: 6px;"></select>
+        </div>
+        <div>
+          <label for="summaryModelSelect">Summary model:</label>
+          <select id="summaryModelSelect" style="width: 70%; margin-left: 6px;"></select>
+        </div>
+        <div>
+          <label for="chatModelSelect">Chat model:</label>
+          <select id="chatModelSelect" style="width: 70%; margin-left: 28px;"></select>
+        </div>
+        <button id="refreshModelsBtn" style="margin-top: 4px; width: fit-content;">Refresh Models</button>
+      </div>
+      <!-- Feature toggles -->
+      <div style="margin:6px 0;">
+        <label for="logLevel">Log level:</label>
+        <select id="logLevel" style="margin-left:6px;">
+          <option value="debug">Debug</option>
+          <option value="info" selected>Info</option>
+          <option value="warn">Warn</option>
+          <option value="error">Error</option>
+        </select>
+        <label style="margin-left:10px;"><input type="checkbox" id="logFullBodies" /> Log full request/response bodies</label>
+        <button id="openLogsBtn" style="margin-left:8px;">Open Debug Logs…</button>
+      </div>
+      <!-- Provider Settings are rendered dynamically below (per provider) -->
+      <div style="margin: 6px 0;">
+        <label for="answerMode">Answer mode:</label>
+        <select id="answerMode" style="margin-left:6px;">
+          <option value="concise" selected>Concise</option>
+          <option value="detailed">Detailed</option>
+        </select>
+      </div>
+      <label style="display:block; margin-bottom:6px;">
+        <input type="checkbox" id="rewriteToggle" checked /> Enable query rewriting
+      </label>
+      <label style="display:block;">
+        <input type="checkbox" id="crossToggle" checked /> Enable cross-encoder re-ranking
+      </label>
+      <div style="margin:6px 0;">
+        <label style="margin-right:10px;"><input type="checkbox" id="enableTools" /> Enable tools (fetch_more, get_page_summary, search_memory)</label>
+        <label style="margin-left:10px;">Max tool steps: <input type="number" id="maxToolSteps" min="0" max="5" value="2" style="width:60px; margin-left:4px;" /></label>
+        <label style="margin-left:10px;">Tool timeout (ms): <input type="number" id="toolTimeoutMs" min="1000" step="500" value="10000" style="width:80px; margin-left:4px;" /></label>
+      </div>
+      <div style="margin:6px 0;">
+        <label><input type="checkbox" id="pauseToggle" /> Pause page capture</label>
+      </div>
+      <div style="margin-top:8px; font-size:0.9em;">
+        <div><strong>Calibration weights</strong> (0..1, auto-normalized)</div>
+        <label style="display:inline-block; margin-right:8px;">Sim weight: <input type="number" id="calibWSim" value="0.5" min="0" max="1" step="0.05" style="width:60px;" /></label>
+        <label style="display:inline-block;">LLM weight: <input type="number" id="calibWLLM" value="0.5" min="0" max="1" step="0.05" style="width:60px;" /></label>
+        <button id="saveCalibBtn" style="margin-left:8px;">Save</button>
+      </div>
+      <!-- Capture rules -->
+      <div style="margin-top:10px;">
+        <h4 style="margin:4px 0;">Capture rules</h4>
+        <div style="font-size:0.9em; color:#555;">One domain per line. Whitelist takes precedence when not empty.</div>
+        <div style="display:flex; gap:8px;">
+          <div style="flex:1;">
+            <div><label for="whitelist">Whitelist</label></div>
+            <textarea id="whitelist" rows="5" style="width:100%;"></textarea>
+          </div>
+          <div style="flex:1;">
+            <div><label for="blacklist">Blacklist</label></div>
+            <textarea id="blacklist" rows="5" style="width:100%;"></textarea>
+          </div>
+        </div>
+        <button id="saveRulesBtn" style="margin-top:6px;">Save rules</button>
+        <div style="margin-top:10px;">
+          <div style="font-size:0.9em; color:#555; margin-bottom:4px;">
+            Open the Memory Manager to view, search, and delete processed items.
+          </div>
+          <button id="manageMemoryBtn">Open Memory Manager…</button>
+        </div>
+      </div>
+    </div>
+    <input type="text" id="query" placeholder="Ask about what you've seen..." />
+    <button id="searchBtn">Search</button>
+    <button id="clearResultsBtn" style="margin-left:6px;">Clear Results</button>
+    <button id="toggleAdvancedBtn" style="margin-left:8px;">Advanced ▸</button>
+    <div id="advancedContainer" style="display:none; margin-top:8px; font-size:0.9em; padding:8px; border:1px solid #eee; border-radius:6px;">
+      <div style="margin-bottom:6px;">
+        <label style="margin-right:6px;">Domain:
+          <select id="domainFilter" style="min-width:180px;">
+            <option value="">Any</option>
+          </select>
+        </label>
+        <label style="margin-right:6px;">From: <input type="date" id="dateFrom" /></label>
+        <label style="margin-right:6px;">To: <input type="date" id="dateTo" /></label>
+      </div>
+      <div style="margin-bottom:6px;">
+        <label>Threshold: <input type="range" id="threshold" min="0" max="100" value="0" style="vertical-align:middle;" /> <span id="thresholdVal">0</span>%</label>
+      </div>
+      <div>
+        <label>Results: <input type="number" id="limitInput" value="10" min="1" max="50" style="width:60px;" /></label>
+      </div>
+    </div>
+    <button id="captureNowBtn" style="margin-left:8px;">Capture Now</button>
+    <button id="highlightsBtn" style="margin-left:6px;">Today's Highlights</button>
+    <button id="openHighlightsBtn" style="margin-left:6px;">Open Highlights Page</button>
+    <div id="results"></div>
+    <div id="highlight"></div>
+
+    <!-- Processing/Processed status -->
+    <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #eee;">
+      <div style="display:flex; align-items:center; justify-content:space-between;">
+        <h3 style="margin: 6px 0; font-size: 1em;">Status</h3>
+        <div>
+          <button id="retryAllBtn" style="font-size:0.9em;">Retry all failed</button>
+        </div>
+      </div>
+      <div>
+        <strong>Processing:</strong> <span id="pausedBadge" style="display:none; margin-left:6px; color:#b36b00; font-size:0.9em;">Paused</span>
+        <ul id="processingList" style="padding-left:18px; margin-top:6px;"></ul>
+      </div>
+      <div style="margin-top:8px;">
+        <strong>Recently saved:</strong>
+        <ul id="savedList" style="padding-left:18px; margin-top:6px;"></ul>
+      </div>
+    </div>
+
+    <!-- Chat question input -->
+    <div style="margin-top: 12px;">
+      <input type="text" id="question" placeholder="Ask a question about your browsing..." style="width: 100%; padding: 6px; box-sizing: border-box;" />
+      <button id="askBtn" style="margin-top: 6px;">Ask</button>
+      <div id="answer" style="margin-top: 10px;"></div>
+      <div id="askProgress" style="margin-top: 6px; font-size:0.9em; color:#666;"></div>
+      <div id="answerActions" style="margin-top: 6px;"></div>
+      <div id="sources" style="margin-top: 6px;"></div>
+      <div id="explain" style="margin-top: 6px;"></div>
+    </div>
+
+    <script src="logger.js"></script>
+    <script src="sidepanel.js"></script>
+    <div id="toast" style="position: fixed; bottom: 12px; right: 12px; background: #333; color: #fff; padding: 8px 12px; border-radius: 4px; opacity: 0; transition: opacity .2s; pointer-events: none;">Captured!</div>
+  </body>
+</html>

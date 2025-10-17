@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Web Memory Manager</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 12px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border-bottom: 1px solid #eee; padding: 6px; text-align: left; }
+      th { background: #f6f8fa; }
+      .actions button { margin-right: 6px; }
+      #toolbar { margin-bottom: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="toolbar">
+      <button id="refreshBtn">Refresh</button>
+      <label style="margin-left:8px;">Search: <input id="searchInput" placeholder="title or domain" /></label>
+      <button id="deleteSelectedBtn" style="margin-left:8px;">Delete selected</button>
+      <button id="backfillSelectedBtn" style="margin-left:8px;">Backfill selected</button>
+      <button id="exportBtn" style="margin-left:8px;">Export JSON</button>
+      <label style="margin-left:8px;">
+        Import JSON <input type="file" id="importInput" accept="application/json" />
+      </label>
+    </div>
+    <div id="importProgress" style="margin:8px 0; color:#555;"></div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:24px;"><input type="checkbox" id="selectAll"/></th>
+          <th id="thTitle" style="cursor:pointer;">Title</th>
+          <th id="thUrl" style="cursor:pointer;">URL</th>
+          <th id="thDate" style="cursor:pointer;">Date</th>
+          <th class="actions">Actions</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <script src="logger.js"></script>
+    <script src="manage.js"></script>
+  </body>
+  </html>

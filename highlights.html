@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Web Memory — Highlights</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 12px; }
+      .controls { display:flex; gap:12px; align-items:center; flex-wrap: wrap; margin-bottom: 10px; }
+      .date-card { border: 1px solid #eee; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+      .date-h { margin: 0 0 6px 0; font-size: 1.0em; }
+      .hl { white-space: pre-wrap; color: #222; }
+      .muted { color:#666; }
+      .pager { display:flex; gap:8px; align-items:center; margin-top: 8px; }
+      button { cursor: pointer; }
+      input, select { font: inherit; }
+    </style>
+  </head>
+  <body>
+    <h2 style="margin: 6px 0 10px 0;">Highlights</h2>
+    <div class="controls">
+      <label>From: <input type="date" id="fromDate" /></label>
+      <label>To: <input type="date" id="toDate" /></label>
+      <label>Days/page:
+        <select id="pageSize">
+          <option>7</option>
+          <option selected>14</option>
+          <option>30</option>
+          <option>60</option>
+        </select>
+      </label>
+      <button id="applyFilter">Apply</button>
+      <button id="backfillBtn">Backfill visible</button>
+      <span id="status" class="muted"></span>
+    </div>
+    <div id="list"></div>
+    <div class="pager">
+      <button id="prevBtn">Prev</button>
+      <span id="pageInfo" class="muted"></span>
+      <button id="nextBtn">Next</button>
+    </div>
+    <script src="logger.js"></script>
+    <script src="highlights.js"></script>
+  </body>
+  </html>
