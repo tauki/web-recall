@@ -11,7 +11,7 @@ Directory contents
 ------------------
 
 - `manifest.json`: MV3 manifest. Permissions include `activeTab`, `storage`,
-  `scripting`, `tabs`, `offscreen`, `contextMenus`; host permissions cover
+  `tabs`, `offscreen`, `contextMenus`; host permissions cover
   `http://localhost:11434/*`, `http://127.0.0.1:11434/*`, and `<all_urls>` for
   provider tests/page-scope operations. Default action opens the side panel.
 - `background.js`: Service worker handling capture queue, embeddings/chat,
@@ -31,11 +31,6 @@ Directory contents
   - `text.js`: text normalization/chunk helpers used by capture/background.
   - `logger.js`: shared logging façade for modules and UIs.
   - `offscreen.html/js`: performs heavier scoring/centroid work off main worker.
-
-## Validation & Release Notes
-
-- Manual regression coverage log: `docs/alpha-regression-log-template.md`
-- Alpha release note summarising scope/risks/follow-ups: `docs/alpha-release-note.md`
 
 Setup
 -----
@@ -162,4 +157,3 @@ Export/Import
 - Export creates a JSON object with `schemaVersion: 1`, `exportedAt`, optional `embeddingMeta { model, dim }`, and `pages: []`.
 - Import accepts legacy arrays or the v1 object. If a file declares a newer schemaVersion, you can still proceed; import is best‑effort.
 - Embedding compatibility: if stored embedding dimension differs from imported items, incompatible items/versions are skipped and reported after import. When no local metadata exists, the importer infers and persists the dimension from the first embedded item.
-
