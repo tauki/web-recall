@@ -1,27 +1,55 @@
 # Web Recall Privacy Statement
 
-_Last updated: 2025-10-11_
+_Last updated: 2026-04-08_
 
-We built Web Recall to respect your privacy. The extension is designed to run entirely on your device and does not send browsing data to any external service by default.
+Web Recall is designed to keep your browsing memory on your device. By default,
+the extension does not send your captured page content, search queries, or Ask
+history to us or to third-party analytics services.
 
-## Data collection
-- Web Recall does **not** collect or transmit personal information, browsing history, or usage analytics to us or to third parties.
-- All captured page text, embeddings, summaries, and highlights remain in your browser (IndexedDB/`chrome.storage`).
-- The only network connections the extension makes by default are to your own local Ollama server (`http://127.0.0.1:11434`) for embedding and chat requests.
+## Data stored locally
+- Captured page text, chunks, embeddings, summaries, highlights, and search
+  metadata are stored in your browser, primarily in IndexedDB.
+- Settings such as provider configuration, model choices, and feature flags are
+  stored in `chrome.storage.local`.
+- Web Recall does **not** ship usage analytics, advertising SDKs, or remote
+  telemetry.
 
-## Optional tool fetches
-- If you enable the “fetch more” tool for Ask, it may request a URL that has not yet been captured. That content is fetched directly from the source page and processed locally. You can control which domains are allowed via the built-in allowlist/denylist.
+## Network access
+- By default, model-backed features talk only to your configured Ollama server,
+  usually `http://localhost:11434` or `http://127.0.0.1:11434`.
+- If you switch the embedding provider to **In-browser**, the extension may
+  download the selected embedding model files from Hugging Face on first use.
+  After download, embeddings run locally in the browser.
+- If you point the chat or embedding provider to a remote host instead of a
+  local Ollama server, your prompts and retrieved context will be sent to that
+  host. Only use providers you trust.
+
+## Ask tools
+- Ask tools operate on captured pages already stored in memory.
+- `fetch_more` can expand additional text from a stored page that was already
+  returned by memory search, but it does not fetch arbitrary uncaptured URLs.
+- `search_memory` and `get_page_summary` operate only on locally stored data.
 
 ## Permissions rationale
-- Host permissions (`http://127.0.0.1:11434/*`, `<all_urls>`) are used only to communicate with your local Ollama server and to capture pages you visit. No remote services receive your data.
-- Other Chrome permissions (`sidePanel`, `activeTab`, `storage`, `scripting`, `tabs`, `offscreen`, `contextMenus`) enable the side panel UI, capture workflow, and local storage functionality.
+- Host permissions (`http://localhost:11434/*`, `http://127.0.0.1:11434/*`,
+  `<all_urls>`) are required for local model connectivity, page capture, manual
+  capture, and extension pages such as Manage, Logs, and Highlights.
+- Other Chrome permissions (`sidePanel`, `activeTab`, `storage`, `scripting`,
+  `tabs`, `offscreen`, `contextMenus`) support the side panel UI, content
+  capture, model/offscreen workflows, and local persistence.
 
 ## Third-party services
-- Web Recall does not integrate with external analytics or advertising services.
-- You control the Ollama server used for embeddings/chat; if you point it to a remote host, ensure you trust that server.
+- Web Recall does not integrate with external analytics or advertising
+  services.
+- The only third-party network dependency in the default product surface is the
+  optional Hugging Face model download used by the in-browser embedding
+  runtime.
 
 ## Changes to this statement
-We will update this document if privacy practices change. Review the latest version at: https://github.com/tauki/web-recall/blob/main/docs/privacy.md
+We will update this document if privacy practices change. Review the latest
+version at:
+https://github.com/tauki/web-recall/blob/main/privacy.md
 
 ## Contact
-For questions about privacy or security, open an issue at https://github.com/tauki/web-recall/issues
+For questions about privacy or security, open an issue at
+https://github.com/tauki/web-recall/issues
