@@ -58,11 +58,6 @@
   "web_accessible_resources": [
     {
       "resources": [
-        "dist/beta/ui/sidepanel/index.html",
-        "dist/beta/ui/manage/index.html",
-        "dist/beta/ui/highlights/index.html",
-        "dist/beta/ui/logs/index.html",
-        "dist/beta/offscreen/index.html",
         "dist/beta/transformers/*"
       ],
       "matches": ["<all_urls>"]

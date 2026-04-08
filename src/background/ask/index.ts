@@ -1,7 +1,7 @@
 import { storageManager } from '../storage/manager';
 import { searchStoredPages } from '../search/index';
 import { ToolsRuntime, type ToolMetric } from '../../shared/tools/index';
-import { callChat, callChatJson, ensureChatReady, getChatConfig, type ChatConfig } from '../providers/chat';
+import { callChat, callChatJson, getChatConfig, type ChatConfig } from '../providers/chat';
 import { getSettings } from '../settings/index';
 import { getCalibrationSnapshot } from '../calibration/index';
 
@@ -587,7 +587,6 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   const useToolAugmentation = enableTools;
   const requestId = options?.requestId;
   const config = await getChatConfig();
-  await ensureChatReady(config);
 
   sendProgress('Analyzing question…', requestId);
   const subQueries = queryRewriteEnabled ? await decomposeQuestion(normalized, config) : [normalized];

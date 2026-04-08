@@ -104,7 +104,7 @@ export class ToolsRuntime {
   }
   const value: FetchMoreArgs = { url };
   if (hasChunk) {
-    value.chunkIndex = Math.max(0, chunkValue ?? 0);
+    value.chunkIndex = Math.max(0, Math.trunc(chunkValue ?? 0));
   } else {
     let start = typeof startValue === 'number' ? startValue : 0;
     let end = typeof endValue === 'number' ? endValue : start + this.maxSlice;
@@ -142,7 +142,7 @@ export class ToolsRuntime {
     const ne = Math.max(ns, end | 0);
     let merged = false;
     for (const segment of arr) {
-      if (!(ne < segment.e - 50 || ns > segment.s + 50)) {
+      if (!(ne < segment.s - 50 || ns > segment.e + 50)) {
         segment.s = Math.min(segment.s, ns);
         segment.e = Math.max(segment.e, ne);
         segment.text = content.slice(segment.s, segment.e);

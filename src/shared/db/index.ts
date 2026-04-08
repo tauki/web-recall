@@ -157,16 +157,18 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
 export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>): Promise<void> {
   const existing = await getPageRecord(record.url);
   const now = Date.now();
+  const chunks = Array.isArray(record.chunks) ? record.chunks : [];
+  const hasEmbeddings = chunks.some((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0);
   const normalized: PageRecord = {
     url: record.url,
     title: record.title || record.url,
     text: record.text || '',
     timestamp: record.timestamp || now,
     manual: Boolean(record.manual),
-    chunks: Array.isArray(record.chunks) ? record.chunks : [],
+    chunks,
     createdAt: existing?.createdAt ?? record.createdAt ?? now,
     updatedAt: now,
-    lastEmbeddedAt: record.lastEmbeddedAt ?? existing?.lastEmbeddedAt ?? now,
+    lastEmbeddedAt: record.lastEmbeddedAt ?? existing?.lastEmbeddedAt ?? (hasEmbeddings ? now : undefined),
     summary: record.summary ?? existing?.summary
   };
   const db = await openDatabase();
@@ -328,16 +330,13 @@ export async function deletePages(urls: string[]): Promise<number> {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(PAGES_STORE, 'readwrite');
     const store = tx.objectStore(PAGES_STORE);
-    let completed = 0;
     for (const url of urls) {
       const req = store.delete(url);
-      req.onsuccess = () => {
-        completed += 1;
-        if (completed === urls.length) resolve(completed);
-      };
       req.onerror = () => reject(req.error);
     }
+    tx.oncomplete = () => resolve(urls.length);
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('delete transaction aborted'));
   });
 }
 

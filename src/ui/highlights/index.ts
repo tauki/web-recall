@@ -179,10 +179,28 @@ async function fetchHighlight(date: string, target: HTMLElement): Promise<void> 
     const response = await sendRuntimeMessage<{ highlight: { text: string; entries?: Array<{ title: string; url: string }> } }>({ type: 'GET_HIGHLIGHTS', date });
     const summary = response.highlight?.text || '(No highlight)';
     const entries = response.highlight?.entries || [];
-    const list = entries
-      .map((entry, index) => `<div>${index + 1}. <a href="${entry.url}" target="_blank" rel="noreferrer">${entry.title}</a></div>`)
-      .join('');
-    target.innerHTML = `<p style="margin:0 0 6px 0;">${summary}</p>${list || '<div>No detailed entries yet.</div>'}`;
+    target.textContent = '';
+    const summaryNode = document.createElement('p');
+    summaryNode.style.margin = '0 0 6px 0';
+    summaryNode.textContent = summary;
+    target.appendChild(summaryNode);
+    if (!entries.length) {
+      const empty = document.createElement('div');
+      empty.textContent = 'No detailed entries yet.';
+      target.appendChild(empty);
+      return;
+    }
+    entries.forEach((entry, index) => {
+      const row = document.createElement('div');
+      const prefix = document.createTextNode(`${index + 1}. `);
+      const link = document.createElement('a');
+      link.href = entry.url;
+      link.target = '_blank';
+      link.rel = 'noreferrer';
+      link.textContent = entry.title;
+      row.append(prefix, link);
+      target.appendChild(row);
+    });
   } catch (err) {
     target.textContent = `Error: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -199,7 +217,7 @@ function renderDates(): void {
     card.className = 'hl-card';
     const title = document.createElement('h3');
     title.textContent = `${formatPretty(item.date)} — ${item.count} capture${item.count === 1 ? '' : 's'}`;
-    const body = document.createElement('p');
+    const body = document.createElement('div');
     body.textContent = 'Loading…';
     card.appendChild(title);
     card.appendChild(body);

@@ -292,40 +292,43 @@ function renderRows(rows: ManagePage[]): void {
     if (!state.queue.length) {
       queueView.innerHTML = '<p>No pending captures.</p>';
     } else {
-      queueView.innerHTML = `
-        <table style="width:100%; border-collapse: collapse;">
-          <thead>
-            <tr>
-              <th align="left">Status</th>
-              <th align="left">Title</th>
-              <th align="left">Attempts</th>
-              <th align="left">Updated</th>
-              <th align="left">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${state.queue
-              .slice(0, 10)
-              .map((entry) => {
-                const time = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
-                return `<tr>
-                  <td>${entry.status}</td>
-                  <td>${entry.title || entry.url}</td>
-                  <td>${entry.attempts}</td>
-                  <td>${time}</td>
-                  <td><button type="button" class="manage-retry" data-url="${entry.url}">Retry</button></td>
-                </tr>`;
-              })
-              .join('')}
-          </tbody>
-        </table>
-      `;
-      queueView.querySelectorAll<HTMLButtonElement>('.manage-retry').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          const url = btn.dataset.url || '';
-          void retryQueueEntry(url);
-        });
+      queueView.textContent = '';
+      const table = document.createElement('table');
+      table.style.width = '100%';
+      table.style.borderCollapse = 'collapse';
+      const thead = document.createElement('thead');
+      const headRow = document.createElement('tr');
+      ['Status', 'Title', 'Attempts', 'Updated', 'Actions'].forEach((label) => {
+        const th = document.createElement('th');
+        th.setAttribute('align', 'left');
+        th.textContent = label;
+        headRow.appendChild(th);
       });
+      thead.appendChild(headRow);
+      const body = document.createElement('tbody');
+      state.queue.slice(0, 10).forEach((entry) => {
+        const tr = document.createElement('tr');
+        const statusCell = document.createElement('td');
+        statusCell.textContent = entry.status;
+        const titleCell = document.createElement('td');
+        titleCell.textContent = entry.title || entry.url;
+        const attemptsCell = document.createElement('td');
+        attemptsCell.textContent = String(entry.attempts);
+        const updatedCell = document.createElement('td');
+        updatedCell.textContent = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
+        const actionsCell = document.createElement('td');
+        const retryBtn = document.createElement('button');
+        retryBtn.type = 'button';
+        retryBtn.textContent = 'Retry';
+        retryBtn.addEventListener('click', () => {
+          void retryQueueEntry(entry.url);
+        });
+        actionsCell.appendChild(retryBtn);
+        tr.append(statusCell, titleCell, attemptsCell, updatedCell, actionsCell);
+        body.appendChild(tr);
+      });
+      table.append(thead, body);
+      queueView.appendChild(table);
     }
   }
 }

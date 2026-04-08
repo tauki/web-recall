@@ -20,6 +20,12 @@ function normalizeDomains(input: unknown): string[] {
   return Array.from(normalized);
 }
 
+function normalizeLogLevel(level: unknown): BetaSettings['logLevel'] {
+  return level === 'debug' || level === 'info' || level === 'warn' || level === 'error' || level === 'off'
+    ? level
+    : DEFAULT_SETTINGS.logLevel;
+}
+
 function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettings {
   if (!payload || typeof payload !== 'object') {
     return { ...DEFAULT_SETTINGS };
@@ -35,7 +41,7 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
     askMaxSources: clampNumber(payload.askMaxSources, 1, 10),
     theme: normalizedTheme,
     activeProviderId,
-    logLevel: payload.logLevel || DEFAULT_SETTINGS.logLevel,
+    logLevel: normalizeLogLevel(payload.logLevel),
     answerMode: payload.answerMode === 'detailed' ? 'detailed' : 'concise',
     queryRewrite: typeof payload.queryRewrite === 'boolean' ? payload.queryRewrite : DEFAULT_SETTINGS.queryRewrite,
     searchRerank: typeof payload.searchRerank === 'boolean' ? payload.searchRerank : DEFAULT_SETTINGS.searchRerank,
@@ -110,7 +116,7 @@ export async function updateSettings(partial: Partial<BetaSettings>): Promise<Be
     askMaxSources: typeof partial.askMaxSources === 'number' ? clampNumber(partial.askMaxSources, 1, 10) : current.askMaxSources,
     theme: partial.theme === 'dark' || partial.theme === 'system' || partial.theme === 'light' ? partial.theme : current.theme,
     activeProviderId: typeof partial.activeProviderId === 'string' && partial.activeProviderId ? partial.activeProviderId : current.activeProviderId,
-    logLevel: partial.logLevel || current.logLevel,
+    logLevel: normalizeLogLevel(partial.logLevel ?? current.logLevel),
     answerMode: partial.answerMode || current.answerMode,
     queryRewrite: typeof partial.queryRewrite === 'boolean' ? partial.queryRewrite : current.queryRewrite,
     searchRerank: typeof partial.searchRerank === 'boolean' ? partial.searchRerank : current.searchRerank,

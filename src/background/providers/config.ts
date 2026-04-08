@@ -80,10 +80,13 @@ export async function updateProviderSettings(providerId: string, partial: Record
     ...settings,
     [providerId]: {
       ...(settings[providerId] || {}),
-      ...Object.fromEntries(
-        Object.entries(partial)
-          .filter(([, value]) => typeof value === 'string')
-          .map(([key, value]) => [key, key === 'baseUrl' ? sanitizeBaseUrl(value) : value.trim()])
+        ...Object.fromEntries(
+          Object.entries(partial)
+            .filter(([, value]) => typeof value === 'string')
+            .map(([key, value]) => {
+              const trimmed = value.trim();
+              return [key, key === 'baseUrl' ? sanitizeBaseUrl(trimmed) : trimmed];
+            })
       )
     }
   };

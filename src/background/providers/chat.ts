@@ -29,8 +29,11 @@ export type ChatProbeResult = {
   suggestion?: string;
 };
 
+export type ChatProbeOptions = {
+  timeoutMs?: number;
+};
+
 const DEFAULT_CHAT_MODEL = 'llama3.1';
-const CHAT_TIMEOUT_MS = 300_000;
 const textDecoder = new TextDecoder();
 
 function normalizeProviderId(providerId: string | undefined): string {
@@ -67,9 +70,10 @@ export async function ensureChatReady(config: ChatConfig): Promise<void> {
   }
 }
 
-export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
+export async function probeChat(config: ChatConfig, options?: ChatProbeOptions): Promise<ChatProbeResult> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5_000);
+  const timeoutMs = Math.max(1_000, options?.timeoutMs ?? 15_000);
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const resp = await fetch(`${config.baseUrl}/api/chat`, {
       method: 'POST',
@@ -97,7 +101,12 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
     }
     return { ok: true };
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unable to reach the chat provider.';
+    const message =
+      err instanceof Error && err.name === 'AbortError'
+        ? `Chat provider probe timed out after ${timeoutMs}ms.`
+        : err instanceof Error
+          ? err.message
+          : 'Unable to reach the chat provider.';
     return {
       ok: false,
       lastError: message,
@@ -109,22 +118,15 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
 }
 
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
-  try {
-    const resp = await fetch(`${config.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: controller.signal
-    });
-    if (!resp.ok) {
-      throw new Error(`Chat request failed (${resp.status})`);
-    }
-    return (await resp.json()) as ChatResponse;
-  } finally {
-    clearTimeout(timeout);
+  const resp = await fetch(`${config.baseUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    throw new Error(`Chat request failed (${resp.status})`);
   }
+  return (await resp.json()) as ChatResponse;
 }
 
 export function stripJsonFences(content: string): string {
@@ -153,56 +155,49 @@ export async function streamChat(
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), CHAT_TIMEOUT_MS);
   let assembled = '';
-  try {
-    const resp = await fetch(`${config.baseUrl}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...body, stream: true }),
-      signal: controller.signal
-    });
-    if (!resp.ok || !resp.body) {
-      throw new Error(`Streaming chat failed (${resp.status})`);
-    }
-    const reader = resp.body.getReader();
-    let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += textDecoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const payload = JSON.parse(trimmed) as ChatResponse;
-          const chunk = payload.message?.content || '';
-          if (!chunk) continue;
-          assembled += chunk;
-          onChunk(assembled);
-        } catch {
-          // Ignore malformed chunks.
-        }
-      }
-    }
-    const trailing = buffer.trim();
-    if (trailing) {
+  const resp = await fetch(`${config.baseUrl}/api/chat`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, stream: true })
+  });
+  if (!resp.ok || !resp.body) {
+    throw new Error(`Streaming chat failed (${resp.status})`);
+  }
+  const reader = resp.body.getReader();
+  let buffer = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += textDecoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
       try {
-        const payload = JSON.parse(trailing) as ChatResponse;
+        const payload = JSON.parse(trimmed) as ChatResponse;
         const chunk = payload.message?.content || '';
-        if (chunk) {
-          assembled += chunk;
-          onChunk(assembled);
-        }
+        if (!chunk) continue;
+        assembled += chunk;
+        onChunk(assembled);
       } catch {
-        // Ignore trailing malformed chunk.
+        // Ignore malformed chunks.
       }
     }
-  } finally {
-    clearTimeout(timeout);
+  }
+  const trailing = buffer.trim();
+  if (trailing) {
+    try {
+      const payload = JSON.parse(trailing) as ChatResponse;
+      const chunk = payload.message?.content || '';
+      if (chunk) {
+        assembled += chunk;
+        onChunk(assembled);
+      }
+    } catch {
+      // Ignore trailing malformed chunk.
+    }
   }
   return assembled;
 }
