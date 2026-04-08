@@ -177,6 +177,37 @@ async function gatherSearchHits(
   return Array.from(aggregated.values()).sort((a, b) => b.score - a.score).slice(0, maxResults);
 }
 
+function dedupeAskHitsByUrl(hits: SearchHit[]): SearchHit[] {
+  const merged = new Map<string, SearchHit & { _snippets?: string[] }>();
+  for (const hit of hits) {
+    const existing = merged.get(hit.url);
+    const snippet = (hit.snippet || '').trim();
+    if (!existing) {
+      merged.set(hit.url, {
+        ...hit,
+        _snippets: snippet ? [snippet] : []
+      });
+      continue;
+    }
+    if ((hit.score || 0) > (existing.score || 0)) {
+      existing.score = hit.score;
+      existing.chunkIndex = hit.chunkIndex;
+      existing.timestamp = hit.timestamp;
+      existing.title = hit.title;
+    }
+    if (typeof hit.crossScore === 'number' && (typeof existing.crossScore !== 'number' || hit.crossScore > existing.crossScore)) {
+      existing.crossScore = hit.crossScore;
+    }
+    if (snippet && !existing._snippets?.includes(snippet)) {
+      existing._snippets = [...(existing._snippets || []), snippet].slice(0, 3);
+    }
+  }
+  return Array.from(merged.values()).map((hit) => ({
+    ...hit,
+    snippet: (hit._snippets || []).join('\n\n')
+  }));
+}
+
 async function fetchPageContext(
   hit: SearchHit,
   index: number,
@@ -592,7 +623,8 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   const subQueries = queryRewriteEnabled ? await decomposeQuestion(normalized, config) : [normalized];
 
   const initialHits = await gatherSearchHits(subQueries, normalized, maxResults, options?.useSearch !== false, requestId);
-  const hits = await rerankAskHits(normalized, initialHits, askRerankEnabled, config);
+  const dedupedHits = dedupeAskHitsByUrl(initialHits);
+  const hits = await rerankAskHits(normalized, dedupedHits, askRerankEnabled, config);
   if (!hits.length) {
     const message = 'I could not find any captured pages related to your question yet. Try browsing a few articles first.';
     sendProgress(message, requestId);
