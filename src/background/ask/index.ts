@@ -264,12 +264,14 @@ function buildToolDefinitions(): ToolDefinition[] {
       type: 'function',
       function: {
         name: 'fetch_more',
-        description: 'Fetch additional text slices from a stored page. Provide chunkIndex for precise snippets when possible.',
+        description: 'Fetch more text from a stored page. Prefer chunkIndex for one chunk or aroundChunkIndex plus radius for neighboring chunks.',
         parameters: {
           type: 'object',
           properties: {
             url: { type: 'string' },
             chunkIndex: { type: 'integer' },
+            aroundChunkIndex: { type: 'integer' },
+            radius: { type: 'integer' },
             start: { type: 'integer' },
             end: { type: 'integer' }
           },
@@ -281,7 +283,7 @@ function buildToolDefinitions(): ToolDefinition[] {
       type: 'function',
       function: {
         name: 'get_page_summary',
-        description: 'Retrieve the stored summary for a captured page',
+        description: 'Retrieve structured summary metadata for a captured page before deciding whether to inspect chunks',
         parameters: {
           type: 'object',
           properties: { url: { type: 'string' } },
@@ -292,12 +294,43 @@ function buildToolDefinitions(): ToolDefinition[] {
     {
       type: 'function',
       function: {
+        name: 'get_page_chunks',
+        description: 'List chunk previews for a captured page so you can choose the most relevant section',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            limit: { type: 'integer' }
+          },
+          required: ['url']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
         name: 'search_memory',
-        description: 'Search captured memory with a semantic query and return top results',
+        description: 'Search captured memory with a semantic query and return page-level candidates with chunk hints',
         parameters: {
           type: 'object',
           properties: { query: { type: 'string' }, k: { type: 'integer' } },
           required: ['query']
+        }
+      }
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'search_within_page',
+        description: 'Search within one captured page to find the best matching chunks before fetching more text',
+        parameters: {
+          type: 'object',
+          properties: {
+            url: { type: 'string' },
+            query: { type: 'string' },
+            k: { type: 'integer' }
+          },
+          required: ['url', 'query']
         }
       }
     }
@@ -471,7 +504,7 @@ async function runExtractionWithTools(params: {
 }): Promise<{ notes: string; metrics: ToolMetric[]; usedUrls: string[] }> {
   const { config, question, contextBlocks, runtime, sources, enableTools, maxToolSteps, requestId } = params;
   const systemPrompt =
-    'You are preparing research notes for a final grounded answer. Review the numbered sources, use tools when needed to inspect details or gather missing context, and then write concise analyst notes with [n] citations. Do not write the final user-facing answer. End with a line "Coverage: low|medium|high".';
+    'You are preparing research notes for a final grounded answer. Review the numbered sources, use tools when needed to inspect details or gather missing context, and then write concise analyst notes with [n] citations. Prefer this sequence: search_memory -> get_page_summary or get_page_chunks -> search_within_page or fetch_more only when needed. Avoid redundant tool calls. Do not write the final user-facing answer. End with a line "Coverage: low|medium|high".';
   const userPrompt =
     `Question: ${question}\n\nContext:\n${contextBlocks}\n\nUse tools only if they materially improve the answer. Then produce:\n` +
     `- Key facts with [n] citations\n- Any uncertainty or gaps\n- Coverage line`;
@@ -515,7 +548,10 @@ async function runExtractionWithTools(params: {
       }
       sendProgress(`Tool: ${name}`, requestId);
       try {
-        const result = await runtime.runToolCall(name as 'fetch_more' | 'get_page_summary' | 'search_memory', args);
+        const result = await runtime.runToolCall(
+          name as 'fetch_more' | 'get_page_summary' | 'search_memory' | 'get_page_chunks' | 'search_within_page',
+          args
+        );
         messages.push({ role: 'tool', name, content: String(result.content || '') });
       } catch (err) {
         messages.push({ role: 'tool', name, content: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) });

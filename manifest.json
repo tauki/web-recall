@@ -54,13 +54,5 @@
       },
       "description": "Capture the current page now"
     }
-  },
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "dist/beta/transformers/*"
-      ],
-      "matches": ["<all_urls>"]
-    }
-  ]
+  }
 }
