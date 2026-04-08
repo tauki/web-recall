@@ -2,15 +2,16 @@
   "manifest_version": 3,
   "minimum_chrome_version": "109",
   "name": "Web Recall",
-  "version": "0.1.0",
-  "description": "A privacy‑preserving extension for semantic browsing history",
+  "version": "0.2.0",
+  "description": "A privacy-preserving extension for semantic browsing history",
   "permissions": [
     "sidePanel",
     "activeTab",
     "storage",
     "tabs",
     "offscreen",
-    "contextMenus"
+    "contextMenus",
+    "scripting"
   ],
   "host_permissions": [
     "http://localhost:11434/*",
@@ -18,28 +19,23 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "dist/beta/background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
-      "exclude_matches": [
-        "*://*.google.com/*",
-        "*://*.facebook.com/*",
-        "*://*.twitter.com/*"
-      ],
-      "js": [
-        "content.js"
-      ],
+      "matches": ["<all_urls>"],
+      "js": ["dist/beta/content.js"],
       "run_at": "document_idle"
     }
   ],
   "side_panel": {
-    "default_path": "sidepanel.html"
+    "default_path": "dist/beta/ui/sidepanel/index.html"
   },
+  "options_page": "dist/beta/ui/manage/index.html",
   "action": {
     "default_title": "Open Web Recall"
   },
@@ -50,6 +46,26 @@
         "mac": "Command+Shift+Y"
       },
       "description": "Open Web Recall side panel"
+    },
+    "capture-this-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+K",
+        "mac": "Command+Shift+K"
+      },
+      "description": "Capture the current page now"
     }
-  }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "dist/beta/ui/sidepanel/index.html",
+        "dist/beta/ui/manage/index.html",
+        "dist/beta/ui/highlights/index.html",
+        "dist/beta/ui/logs/index.html",
+        "dist/beta/offscreen/index.html",
+        "dist/beta/transformers/*"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
 }
