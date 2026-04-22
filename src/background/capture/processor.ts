@@ -23,6 +23,7 @@ export async function processCapturePayload(payload: CapturePayload): Promise<vo
     text: normalizeChunk(text),
     embedding: embeddings[idx] || []
   }));
+  const hasEmbeddings = items.some((item) => Array.isArray(item.embedding) && item.embedding.length > 0);
   await storageManager.savePageRecord({
     url: payload.url,
     title: payload.title || payload.url,
@@ -30,7 +31,7 @@ export async function processCapturePayload(payload: CapturePayload): Promise<vo
     text: payload.text || '',
     manual: Boolean(payload.manual),
     chunks: items,
-    lastEmbeddedAt: Date.now()
+    lastEmbeddedAt: hasEmbeddings ? Date.now() : undefined
   });
   console.info('[beta-background:capture] stored page snapshot', {
     url: payload.url,

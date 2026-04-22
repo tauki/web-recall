@@ -1,13 +1,14 @@
 import type { SearchMemoryArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
 function validateSearchMemory(args: SearchMemoryArgs | undefined): { ok: boolean; value?: { query: string; k: number }; errors?: string[] } {
-  if (!args || typeof args.query !== 'string' || args.query.trim().length === 0) {
+  const query = typeof args?.query === 'string' ? args.query.trim() : '';
+  if (!query) {
     return { ok: false, errors: ['query (string) is required'] };
   }
-  let k = typeof args.k === 'number' ? Math.trunc(args.k) : 5;
+  let k = typeof args?.k === 'number' ? Math.trunc(args.k) : 5;
   if (k < 1) k = 1;
   if (k > 10) k = 10;
-  return { ok: true, value: { query: args.query, k } };
+  return { ok: true, value: { query, k } };
 }
 
 function normalizeHits(ctx: ToolsHandlerContext, hits: Awaited<ReturnType<ToolsHandlerContext['searchMemory']>>, partial = false) {

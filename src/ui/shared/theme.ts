@@ -27,12 +27,18 @@ export function bindSystemThemeListener(): () => void {
       applyTheme('system');
     }
   };
+  const wrapCleanup = (cleanup: () => void): (() => void) => {
+    return () => {
+      cleanup();
+      stopSystemThemeListener = null;
+    };
+  };
   try {
     media.addEventListener('change', handleChange);
-    stopSystemThemeListener = () => media.removeEventListener('change', handleChange);
+    stopSystemThemeListener = wrapCleanup(() => media.removeEventListener('change', handleChange));
   } catch {
     media.addListener(handleChange);
-    stopSystemThemeListener = () => media.removeListener(handleChange);
+    stopSystemThemeListener = wrapCleanup(() => media.removeListener(handleChange));
   }
   return stopSystemThemeListener;
 }

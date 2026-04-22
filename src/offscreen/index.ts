@@ -31,6 +31,19 @@ type BrowserEmbedder = {
 let embedderPromise: Promise<BrowserEmbedder> | null = null;
 let embedderKey = '';
 
+async function getEmbeddingCapabilities(): Promise<{ runtimeAvailable: boolean; backend: 'onnx-wasm'; dtype: string }> {
+  const { env } = await import('@huggingface/transformers');
+  const wasmBackend = env.backends?.onnx?.wasm;
+  if (!wasmBackend) {
+    throw new Error('ONNX WASM backend is unavailable');
+  }
+  return {
+    runtimeAvailable: true,
+    backend: 'onnx-wasm',
+    dtype: DEFAULT_WASM_DTYPE
+  };
+}
+
 async function getBrowserEmbedder(model: string, revision: string): Promise<BrowserEmbedder> {
   const key = `${model}@${revision}`;
   if (embedderPromise && embedderKey === key) return embedderPromise;
@@ -208,6 +221,12 @@ chrome.runtime.onMessage.addListener(
     const revision = typeof message.revision === 'string' ? message.revision : '75a84c732f1884df76bec365346230e32f582c82';
     computeBrowserEmbeddings(inputs, prefix, model, revision)
       .then((embeddings) => sendResponse({ embeddings }))
+      .catch((err) => sendResponse({ error: err?.message || String(err) }));
+    return true;
+  }
+  if (message.type === 'OFFSCREEN_EMBED_CAPABILITIES') {
+    getEmbeddingCapabilities()
+      .then((capabilities) => sendResponse(capabilities))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
   }

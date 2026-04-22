@@ -16,6 +16,17 @@ const BROWSER_READY_KEY = 'browserEmbedReady';
 const MAX_EMBED_RETRIES = 3;
 const EMBED_TIMEOUT_MS = 10_000;
 
+export type BrowserEmbedStatus = {
+  ready: boolean;
+  runtimeAvailable: boolean;
+  model: string;
+  revision: string;
+  state: 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
+  code?: 'runtime_unavailable' | 'offscreen_unavailable' | 'download_failed' | 'resource_exhausted' | 'embed_failed' | 'unknown';
+  lastError?: string;
+  checkedAt?: string;
+};
+
 let currentConfig: EmbeddingConfig = {
   baseUrl: DEFAULT_BASE_URL,
   model: DEFAULT_MODEL,
@@ -24,6 +35,13 @@ let currentConfig: EmbeddingConfig = {
   browserRevision: DEFAULT_BROWSER_REVISION
 };
 let browserEmbedReady = false;
+let browserEmbedStatus: BrowserEmbedStatus = {
+  ready: false,
+  runtimeAvailable: false,
+  model: DEFAULT_BROWSER_MODEL,
+  revision: DEFAULT_BROWSER_REVISION,
+  state: 'idle'
+};
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -34,9 +52,9 @@ export function sanitizeBaseUrl(url: string | undefined): string {
   return url.endsWith('/') ? url.slice(0, -1) : url;
 }
 
-function broadcastBrowserEmbedStatus(payload: { status: 'downloading' | 'ready' | 'error'; error?: string }): void {
+function broadcastBrowserEmbedStatus(): void {
   try {
-    chrome.runtime.sendMessage({ type: 'BROWSER_EMBED_STATUS', ...payload });
+    chrome.runtime.sendMessage({ type: 'BROWSER_EMBED_STATUS', status: browserEmbedStatus });
   } catch {
     // best effort
   }
@@ -45,17 +63,125 @@ function broadcastBrowserEmbedStatus(payload: { status: 'downloading' | 'ready' 
 function setBrowserEmbedReady(value: boolean): void {
   browserEmbedReady = value;
   chrome.storage.local.set({ [BROWSER_READY_KEY]: value }).catch(() => {});
+  browserEmbedStatus = {
+    ...browserEmbedStatus,
+    ready: value,
+    state: value ? 'ready' : browserEmbedStatus.state === 'ready' ? 'idle' : browserEmbedStatus.state
+  };
 }
 
-export function getBrowserEmbedStatus(): { ready: boolean; model: string; revision: string } {
+function updateBrowserEmbedStatus(
+  partial: Partial<BrowserEmbedStatus>,
+  options?: { broadcast?: boolean; model?: string; revision?: string }
+): BrowserEmbedStatus {
+  browserEmbedStatus = {
+    ...browserEmbedStatus,
+    model: options?.model || currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
+    revision: options?.revision || currentConfig.browserRevision || DEFAULT_BROWSER_REVISION,
+    ...partial
+  };
+  if (options?.broadcast !== false) {
+    broadcastBrowserEmbedStatus();
+  }
+  return browserEmbedStatus;
+}
+
+function classifyBrowserEmbedFailure(err: unknown): { code: NonNullable<BrowserEmbedStatus['code']>; message: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  const normalized = message.toLowerCase();
+  if (normalized.includes('onnx wasm backend')) {
+    return {
+      code: 'runtime_unavailable',
+      message: 'Browser embedding runtime is unavailable in this browser environment.'
+    };
+  }
+  if (normalized.includes('offscreen')) {
+    return {
+      code: 'offscreen_unavailable',
+      message: 'Browser embeddings require the offscreen document, but it could not be created.'
+    };
+  }
+  if (
+    normalized.includes('out of memory') ||
+    normalized.includes('wasm memory') ||
+    normalized.includes('memory access out of bounds')
+  ) {
+    return {
+      code: 'resource_exhausted',
+      message: 'Browser embeddings ran out of available memory or compute resources.'
+    };
+  }
+  if (
+    normalized.includes('huggingface') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('load failed')
+  ) {
+    return {
+      code: 'download_failed',
+      message: 'Browser embedding model download failed. Check connectivity and try downloading the model again.'
+    };
+  }
   return {
+    code: 'embed_failed',
+    message: message || 'Browser embedding failed.'
+  };
+}
+
+export function getBrowserEmbedStatus(): BrowserEmbedStatus {
+  return {
+    ...browserEmbedStatus,
     ready: browserEmbedReady,
     model: currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
     revision: currentConfig.browserRevision || DEFAULT_BROWSER_REVISION
   };
 }
 
+export async function probeBrowserEmbeddingRuntime(options?: { model?: string; revision?: string }): Promise<BrowserEmbedStatus> {
+  const model = options?.model || currentConfig.browserModel || DEFAULT_BROWSER_MODEL;
+  const revision = options?.revision || currentConfig.browserRevision || DEFAULT_BROWSER_REVISION;
+  updateBrowserEmbedStatus(
+    {
+      state: 'checking',
+      lastError: undefined,
+      code: undefined
+    },
+    { model, revision }
+  );
+  try {
+    await ensureOffscreenDocument();
+    await sendOffscreenMessage<{ runtimeAvailable: boolean }>({ type: 'OFFSCREEN_EMBED_CAPABILITIES' });
+    return updateBrowserEmbedStatus(
+      {
+        runtimeAvailable: true,
+        checkedAt: new Date().toISOString(),
+        state: browserEmbedReady ? 'ready' : 'idle',
+        lastError: undefined,
+        code: undefined
+      },
+      { model, revision }
+    );
+  } catch (err) {
+    const failure = classifyBrowserEmbedFailure(err);
+    return updateBrowserEmbedStatus(
+      {
+        runtimeAvailable: false,
+        checkedAt: new Date().toISOString(),
+        state: 'error',
+        code: failure.code,
+        lastError: failure.message,
+        ready: false
+      },
+      { model, revision }
+    );
+  }
+}
+
 export async function prefetchBrowserEmbeddings(): Promise<void> {
+  const status = await probeBrowserEmbeddingRuntime();
+  if (!status.runtimeAvailable) {
+    throw new Error(status.lastError || 'Browser embedding runtime is unavailable.');
+  }
   if (browserEmbedReady) return;
   await computeBrowserEmbeddings(['prefetch'], DOC_PREFIX);
 }
@@ -74,6 +200,13 @@ export function configureEmbeddings(): void {
       };
     }
     browserEmbedReady = Boolean(result?.[BROWSER_READY_KEY]);
+    browserEmbedStatus = {
+      ...browserEmbedStatus,
+      ready: browserEmbedReady,
+      model: currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
+      revision: currentConfig.browserRevision || DEFAULT_BROWSER_REVISION,
+      state: browserEmbedReady ? 'ready' : 'idle'
+    };
   });
   try {
     chrome.storage.onChanged.addListener((changes: Record<string, { newValue?: unknown }>, area: string) => {
@@ -100,7 +233,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
 }
 
 export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): Promise<void> {
-  currentConfig = {
+  const nextConfig: EmbeddingConfig = {
     baseUrl: sanitizeBaseUrl(partial.baseUrl) || currentConfig.baseUrl,
     model: partial.model || currentConfig.model,
     provider: partial.provider === 'browser' ? 'browser' : currentConfig.provider || 'ollama',
@@ -108,6 +241,34 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
     browserRevision: partial.browserRevision || currentConfig.browserRevision,
     updatedAt: new Date().toISOString()
   };
+  const browserModelChanged =
+    nextConfig.browserModel !== currentConfig.browserModel ||
+    nextConfig.browserRevision !== currentConfig.browserRevision;
+  if (browserModelChanged) {
+    setBrowserEmbedReady(false);
+    updateBrowserEmbedStatus(
+      {
+        ready: false,
+        state: 'idle',
+        lastError: undefined,
+        code: undefined
+      },
+      {
+        model: nextConfig.browserModel || DEFAULT_BROWSER_MODEL,
+        revision: nextConfig.browserRevision || DEFAULT_BROWSER_REVISION
+      }
+    );
+  }
+  if (nextConfig.provider === 'browser') {
+    const status = await probeBrowserEmbeddingRuntime({
+      model: nextConfig.browserModel || DEFAULT_BROWSER_MODEL,
+      revision: nextConfig.browserRevision || DEFAULT_BROWSER_REVISION
+    });
+    if (!status.runtimeAvailable) {
+      throw new Error(status.lastError || 'Browser embedding runtime is unavailable.');
+    }
+  }
+  currentConfig = nextConfig;
   return new Promise((resolve, reject) => {
     chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: currentConfig }, () => {
       if (chrome.runtime.lastError) {
@@ -158,10 +319,13 @@ async function callOllamaEmbed(inputs: string[]): Promise<number[][]> {
 }
 
 async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<number[][]> {
-  if (!browserEmbedReady) {
-    broadcastBrowserEmbedStatus({ status: 'downloading' });
+  const runtimeStatus = await probeBrowserEmbeddingRuntime();
+  if (!runtimeStatus.runtimeAvailable) {
+    throw new Error(runtimeStatus.lastError || 'Browser embedding runtime is unavailable.');
   }
-  await ensureOffscreenDocument();
+  if (!browserEmbedReady) {
+    updateBrowserEmbedStatus({ state: 'downloading' });
+  }
   try {
     const response = await sendOffscreenMessage<{ embeddings?: number[][] }>({
       type: 'OFFSCREEN_EMBED',
@@ -172,14 +336,26 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
     });
     if (!browserEmbedReady) {
       setBrowserEmbedReady(true);
-      broadcastBrowserEmbedStatus({ status: 'ready' });
+      updateBrowserEmbedStatus({
+        runtimeAvailable: true,
+        checkedAt: new Date().toISOString(),
+        state: 'ready',
+        lastError: undefined,
+        code: undefined
+      });
     }
     return Array.isArray(response.embeddings) ? response.embeddings : [];
   } catch (err) {
-    if (!browserEmbedReady) {
-      broadcastBrowserEmbedStatus({ status: 'error', error: err instanceof Error ? err.message : String(err) });
-    }
-    throw err;
+    const failure = classifyBrowserEmbedFailure(err);
+    updateBrowserEmbedStatus({
+      ready: false,
+      runtimeAvailable: failure.code !== 'runtime_unavailable' && failure.code !== 'offscreen_unavailable',
+      checkedAt: new Date().toISOString(),
+      state: 'error',
+      code: failure.code,
+      lastError: failure.message
+    });
+    throw new Error(failure.message);
   }
 }
 
@@ -187,11 +363,7 @@ export async function computeEmbeddingsForChunks(chunks: string[]): Promise<numb
   if (chunks.length === 0) return [];
   const sanitized = chunks.map((text) => text || '');
   if (currentConfig.provider === 'browser') {
-    try {
-      return await computeBrowserEmbeddings(sanitized, DOC_PREFIX);
-    } catch (err) {
-      console.warn('[beta-background:embeddings] browser embed failed, falling back', err);
-    }
+    return computeBrowserEmbeddings(sanitized, DOC_PREFIX);
   }
   try {
     const batch = await callOllamaEmbed(sanitized);
@@ -220,11 +392,7 @@ export async function computeEmbeddingsForChunks(chunks: string[]): Promise<numb
 
 export async function computeEmbeddingsForQueries(queries: string[]): Promise<number[][]> {
   if (currentConfig.provider === 'browser') {
-    try {
-      return await computeBrowserEmbeddings(queries, QUERY_PREFIX);
-    } catch (err) {
-      console.warn('[beta-background:embeddings] browser query embed failed, falling back', err);
-    }
+    return computeBrowserEmbeddings(queries, QUERY_PREFIX);
   }
   return computeEmbeddingsForChunks(queries);
 }

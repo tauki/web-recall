@@ -5,7 +5,8 @@ import {
   getEmbeddingConfig,
   updateEmbeddingConfig,
   getBrowserEmbedStatus,
-  prefetchBrowserEmbeddings
+  prefetchBrowserEmbeddings,
+  probeBrowserEmbeddingRuntime
 } from '../embeddings/index';
 import { searchStoredPages } from '../search/index';
 import { handleAskQuestion } from '../ask/index';
@@ -50,7 +51,7 @@ type RuntimeMessage =
   | { type: 'GET_CALIBRATION' }
   | { type: 'SET_CALIBRATION'; payload?: { wSim?: number; wLLM?: number } }
   | { type: 'BACKFILL_EMBEDDINGS'; limit?: number; force?: boolean; urls?: string[] }
-  | { type: 'GET_BROWSER_EMBED_STATUS' }
+  | { type: 'GET_BROWSER_EMBED_STATUS'; probe?: boolean }
   | { type: 'DOWNLOAD_BROWSER_EMBED' };
 
 type SendResponse = (response?: Record<string, unknown>) => void;
@@ -339,10 +340,13 @@ const runtimeHandlers: RuntimeHandlerMap = {
       sendResponse
     ),
 
-  GET_BROWSER_EMBED_STATUS: (_message, sendResponse) => {
-    sendResponse({ status: getBrowserEmbedStatus() });
-    return false;
-  },
+  GET_BROWSER_EMBED_STATUS: (message, sendResponse) =>
+    message.probe
+      ? respondWith(probeBrowserEmbeddingRuntime().then((status) => ({ status })), sendResponse)
+      : (() => {
+          sendResponse({ status: getBrowserEmbedStatus() });
+          return false;
+        })(),
 
   DOWNLOAD_BROWSER_EMBED: (_message, sendResponse) =>
     respondWith(prefetchBrowserEmbeddings().then(() => ({ ok: true })), sendResponse)

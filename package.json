@@ -1,12 +1,11 @@
 {
   "name": "web-recall",
-  "version": "0.0.0",
+  "version": "0.2.0",
   "description": "Web Recall 0.2.x workspace tooling",
   "private": true,
   "type": "module",
   "scripts": {
     "build:beta": "node scripts/build-beta.mjs",
-    "sync:migration": "node scripts/migration-map-sync.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "lint": "eslint src --ext .ts"
   },
@@ -19,8 +18,8 @@
   "devDependencies": {
     "@eslint/js": "^9.39.1",
     "@types/chrome": "^0.0.266",
-    "@typescript-eslint/eslint-plugin": "^7.10.0",
-    "@typescript-eslint/parser": "^7.10.0",
+    "@typescript-eslint/eslint-plugin": "^8.47.0",
+    "@typescript-eslint/parser": "^8.47.0",
     "esbuild": "^0.21.5",
     "eslint": "^9.3.0",
     "typescript": "^5.4.5",

@@ -29,10 +29,6 @@ export type ChatProbeResult = {
   suggestion?: string;
 };
 
-export type ChatProbeOptions = {
-  timeoutMs?: number;
-};
-
 const DEFAULT_CHAT_MODEL = 'llama3.1';
 const textDecoder = new TextDecoder();
 
@@ -70,10 +66,7 @@ export async function ensureChatReady(config: ChatConfig): Promise<void> {
   }
 }
 
-export async function probeChat(config: ChatConfig, options?: ChatProbeOptions): Promise<ChatProbeResult> {
-  const controller = new AbortController();
-  const timeoutMs = Math.max(1_000, options?.timeoutMs ?? 15_000);
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
   try {
     const resp = await fetch(`${config.baseUrl}/api/chat`, {
       method: 'POST',
@@ -83,8 +76,7 @@ export async function probeChat(config: ChatConfig, options?: ChatProbeOptions):
         stream: false,
         messages: [{ role: 'user', content: 'Reply with the single word ok.' }],
         options: { temperature: 0 }
-      }),
-      signal: controller.signal
+      })
     });
     if (!resp.ok) {
       const message = `Chat provider probe failed (${resp.status})`;
@@ -102,18 +94,14 @@ export async function probeChat(config: ChatConfig, options?: ChatProbeOptions):
     return { ok: true };
   } catch (err) {
     const message =
-      err instanceof Error && err.name === 'AbortError'
-        ? `Chat provider probe timed out after ${timeoutMs}ms.`
-        : err instanceof Error
-          ? err.message
-          : 'Unable to reach the chat provider.';
+      err instanceof Error
+        ? err.message
+        : 'Unable to reach the chat provider.';
     return {
       ok: false,
       lastError: message,
       suggestion: buildOriginSuggestion(message)
     };
-  } finally {
-    clearTimeout(timeout);
   }
 }
 

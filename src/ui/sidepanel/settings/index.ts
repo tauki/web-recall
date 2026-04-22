@@ -7,6 +7,17 @@ import {
 import { sendRuntimeMessage as runtimeMessage } from '../../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../../shared/theme';
 
+type BrowserEmbedStatus = {
+  ready: boolean;
+  runtimeAvailable: boolean;
+  model: string;
+  revision: string;
+  state: 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
+  code?: string;
+  lastError?: string;
+  checkedAt?: string;
+};
+
 function formatDomainList(list: string[]): string {
   return list.join('\n');
 }
@@ -177,7 +188,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-embedding-provider">Provider</label>
           <select id="beta-embedding-provider">
             <option value="ollama">Ollama (local server)</option>
-            <option value="browser">In-browser (experimental, no download)</option>
+            <option value="browser">In-browser (experimental, model download required)</option>
           </select>
         </div>
         <div class="beta-field">
@@ -466,19 +477,43 @@ function attachBehavior(root: HTMLElement): void {
     browserStatusLine.style.color = isError ? '#b91c1c' : '#6b7280';
   }
 
+  function renderBrowserEmbedStatus(status?: BrowserEmbedStatus): void {
+    if (!status) {
+      updateBrowserStatus('Unable to determine browser embedding status', true);
+      return;
+    }
+    if (!status.runtimeAvailable) {
+      updateBrowserStatus(status.lastError || 'Browser embedding runtime is unavailable on this machine.', true);
+      return;
+    }
+    if (status.state === 'checking') {
+      updateBrowserStatus('Checking browser embedding runtime…');
+      return;
+    }
+    if (status.state === 'downloading') {
+      updateBrowserStatus(`Downloading browser model (${status.model}@${status.revision})…`);
+      return;
+    }
+    if (status.ready) {
+      updateBrowserStatus(`Browser model ready (${status.model}@${status.revision})`);
+      return;
+    }
+    if (status.state === 'error') {
+      updateBrowserStatus(status.lastError || 'Browser embeddings are unavailable.', true);
+      return;
+    }
+    updateBrowserStatus(`Browser runtime available. Download model ${status.model}@${status.revision} before using browser embeddings.`);
+  }
+
   async function refreshBrowserEmbedStatus(): Promise<void> {
     try {
-      const response = await runtimeMessage<{ status?: { ready: boolean; model: string; revision: string } }>({
-        type: 'GET_BROWSER_EMBED_STATUS'
+      const response = await runtimeMessage<{ status?: BrowserEmbedStatus }>({
+        type: 'GET_BROWSER_EMBED_STATUS',
+        probe: true
       });
-      const ready = Boolean(response.status?.ready);
-      if (ready) {
-        updateBrowserStatus('Browser model ready');
-      } else {
-        updateBrowserStatus('Browser model not downloaded yet');
-      }
-    } catch {
-      updateBrowserStatus('Unable to determine browser model status', true);
+      renderBrowserEmbedStatus(response.status);
+    } catch (err) {
+      updateBrowserStatus(err instanceof Error ? err.message : 'Unable to determine browser model status', true);
     }
   }
 
@@ -540,6 +575,9 @@ function attachBehavior(root: HTMLElement): void {
         payload: { baseUrl, model, provider, browserModel, browserRevision }
       });
       applyEmbedding(response.config || { baseUrl, model });
+      if (provider === 'browser') {
+        await refreshBrowserEmbedStatus();
+      }
       setStatus('Embedding settings saved');
     } catch (err) {
       setStatus(`Unable to save embedding settings: ${err instanceof Error ? err.message : String(err)}`, true);
@@ -739,14 +777,7 @@ function attachBehavior(root: HTMLElement): void {
 
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
     if (message?.type === 'BROWSER_EMBED_STATUS' && embeddingProviderSelect?.value === 'browser') {
-      const status = (message as { status?: string }).status;
-      if (status === 'downloading') {
-        updateBrowserStatus('Downloading browser model…');
-      } else if (status === 'ready') {
-        updateBrowserStatus('Browser model ready');
-      } else if (status === 'error') {
-        updateBrowserStatus(`Browser model download failed: ${(message as { error?: string }).error || 'Unknown error'}`, true);
-      }
+      renderBrowserEmbedStatus((message as { status?: BrowserEmbedStatus }).status);
     }
   });
 

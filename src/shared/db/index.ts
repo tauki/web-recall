@@ -183,6 +183,7 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
 
 async function replaceEmbeddingsForPage(pageUrl: string, chunks: PageChunkRecord[]): Promise<void> {
   const db = await openDatabase();
+  const now = Date.now();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(EMBEDDINGS_STORE, 'readwrite');
     const store = tx.objectStore(EMBEDDINGS_STORE);
@@ -194,28 +195,21 @@ async function replaceEmbeddingsForPage(pageUrl: string, chunks: PageChunkRecord
       if (cursor) {
         cursor.delete();
         cursor.continue();
+        return;
       }
+      chunks.forEach((chunk, chunkIndex) => {
+        const payload: EmbeddingRecord = {
+          key: `${pageUrl}::${chunkIndex}`,
+          pageUrl,
+          chunkIndex,
+          text: chunk.text,
+          embedding: chunk.embedding || [],
+          createdAt: now
+        };
+        store.put(payload);
+      });
     };
     request.onerror = () => reject(request.error);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-  if (!chunks.length) return;
-  const now = Date.now();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(EMBEDDINGS_STORE, 'readwrite');
-    const store = tx.objectStore(EMBEDDINGS_STORE);
-    chunks.forEach((chunk, index) => {
-      const payload: EmbeddingRecord = {
-        key: `${pageUrl}::${index}`,
-        pageUrl,
-        chunkIndex: index,
-        text: chunk.text,
-        embedding: chunk.embedding || [],
-        createdAt: now
-      };
-      store.put(payload);
-    });
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });

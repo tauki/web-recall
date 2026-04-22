@@ -270,9 +270,9 @@ function renderRows(rows: ManagePage[]): void {
     const reembedBtn = document.createElement('button');
     reembedBtn.textContent = 'Re-embed';
     reembedBtn.style.marginLeft = '6px';
-    reembedBtn.addEventListener('click', () =>
-      runBackfill(1, true, [page.url]).then(() => updateStatus(`Queued re-embed for ${page.url}`))
-    );
+    reembedBtn.addEventListener('click', () => {
+      void runBackfill(1, true, [page.url]);
+    });
     tdActions.appendChild(delBtn);
     tdActions.appendChild(reembedBtn);
     tr.appendChild(tdCheckbox);
@@ -430,7 +430,7 @@ async function handleImport(file: File): Promise<void> {
   }
 }
 
-async function runBackfill(limit: number, force: boolean, urls?: string[]): Promise<void> {
+async function runBackfill(limit: number, force: boolean, urls?: string[]): Promise<boolean> {
   try {
     updateStatus('Backfill running…');
     const response = await sendRuntimeMessage<{
@@ -455,8 +455,10 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
     const suffix = updatedUrls.length ? ` (${updatedUrls.length} page(s))` : '';
     updateStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}${suffix}`);
     await fetchPages();
+    return true;
   } catch (err) {
     updateStatus(`Backfill failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    return false;
   }
 }
 

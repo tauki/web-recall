@@ -1,6 +1,6 @@
 import type { FetchMoreArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
-function validateFetchMore(args: FetchMoreArgs | undefined): { ok: boolean; value?: FetchMoreArgs; errors?: string[] } {
+function validateFetchMore(args: FetchMoreArgs | undefined, maxSlice: number): { ok: boolean; value?: FetchMoreArgs; errors?: string[] } {
   const errors: string[] = [];
   const url = typeof args?.url === 'string' ? args.url.trim() : '';
   if (!url) {
@@ -28,9 +28,9 @@ function validateFetchMore(args: FetchMoreArgs | undefined): { ok: boolean; valu
     value.radius = Math.max(0, Math.min(3, Math.trunc(radiusValue ?? 1)));
   } else {
     let start = typeof startValue === 'number' ? startValue : 0;
-    let end = typeof endValue === 'number' ? endValue : start + 1200;
+    let end = typeof endValue === 'number' ? endValue : start + maxSlice;
     if (start < 0) start = 0;
-    if (end < start) end = start + 1200;
+    if (end < start) end = start + maxSlice;
     value.start = start;
     value.end = end;
   }
@@ -38,7 +38,7 @@ function validateFetchMore(args: FetchMoreArgs | undefined): { ok: boolean; valu
 }
 
 export async function runFetchMore(ctx: ToolsHandlerContext, rawArgs: unknown): Promise<ToolHandlerResult> {
-  const validation = validateFetchMore(rawArgs as FetchMoreArgs | undefined);
+  const validation = validateFetchMore(rawArgs as FetchMoreArgs | undefined, ctx.maxSlice);
   if (!validation.ok || !validation.value) {
     return {
       ok: false,
