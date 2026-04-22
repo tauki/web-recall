@@ -4,6 +4,7 @@ import {
   type BetaSettings,
   type EmbeddingConfig
 } from '../../../shared/config/index';
+import { getProviderOriginInfo } from '../../../shared/providerOrigin';
 import { sendRuntimeMessage as runtimeMessage } from '../../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../../shared/theme';
 
@@ -154,6 +155,17 @@ export function renderSettingsPanel(target: HTMLElement): void {
         <p class="beta-help">When paused, Web Recall ignores automatic capture requests until you resume.</p>
       </section>
 
+      <section class="beta-card" id="beta-capture-setup-card" aria-labelledby="capture-setup-heading" hidden>
+        <h2 id="capture-setup-heading">First-run capture setup</h2>
+        <p class="beta-help">
+          Web Recall starts paused by default. Choose broad capture, or save an allowlist first and resume capture only for approved domains.
+        </p>
+        <div class="beta-field" style="display:flex; gap:8px; flex-wrap:wrap;">
+          <button id="beta-enable-broad-capture" type="button">Enable broad capture</button>
+          <button id="beta-save-allowlist-and-resume" type="button">Save allowlist and enable capture</button>
+        </div>
+      </section>
+
       <section class="beta-card" aria-labelledby="theme-heading">
         <h2 id="theme-heading">Appearance</h2>
         <div class="beta-field">
@@ -232,6 +244,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <button id="beta-provider-refresh" type="button">Refresh models</button>
         </div>
         <p id="beta-provider-status" class="beta-help"></p>
+        <p id="beta-provider-security" class="beta-help"></p>
         <p id="beta-provider-notes" class="beta-help"></p>
       </section>
 
@@ -310,6 +323,9 @@ export function renderSettingsPanel(target: HTMLElement): void {
 
 function attachBehavior(root: HTMLElement): void {
   const pauseToggle = root.querySelector<HTMLInputElement>('#beta-pause-toggle');
+  const captureSetupCard = root.querySelector<HTMLElement>('#beta-capture-setup-card');
+  const enableBroadCaptureBtn = root.querySelector<HTMLButtonElement>('#beta-enable-broad-capture');
+  const saveAllowlistAndResumeBtn = root.querySelector<HTMLButtonElement>('#beta-save-allowlist-and-resume');
   const allowInput = root.querySelector<HTMLTextAreaElement>('#beta-allowlist-input');
   const denyInput = root.querySelector<HTMLTextAreaElement>('#beta-denylist-input');
   const saveRulesBtn = root.querySelector<HTMLButtonElement>('#beta-save-rules');
@@ -340,6 +356,7 @@ function attachBehavior(root: HTMLElement): void {
   const providerTestBtn = root.querySelector<HTMLButtonElement>('#beta-provider-test');
   const providerRefreshBtn = root.querySelector<HTMLButtonElement>('#beta-provider-refresh');
   const providerStatus = root.querySelector<HTMLParagraphElement>('#beta-provider-status');
+  const providerSecurity = root.querySelector<HTMLParagraphElement>('#beta-provider-security');
   const providerNotes = root.querySelector<HTMLParagraphElement>('#beta-provider-notes');
   const openManageBtn = root.querySelector<HTMLButtonElement>('#beta-open-manage');
   const openLogsBtn = root.querySelector<HTMLButtonElement>('#beta-open-logs');
@@ -368,21 +385,66 @@ function attachBehavior(root: HTMLElement): void {
 
   let providerCache: ProviderView[] = [];
 
+  function getAcknowledgedRemoteOrigins(): string[] {
+    return Array.isArray(currentSettings.acknowledgedRemoteProviderOrigins)
+      ? currentSettings.acknowledgedRemoteProviderOrigins
+      : [];
+  }
+
+  function renderProviderSecurityNotice(baseUrl: string): void {
+    if (!providerSecurity) return;
+    const info = getProviderOriginInfo(baseUrl);
+    if (!info.isValid) {
+      providerSecurity.textContent = '';
+      return;
+    }
+    if (!info.isRemote) {
+      providerSecurity.textContent = 'Local provider detected. Captured context stays on the local provider you configured.';
+      providerSecurity.style.color = '';
+      return;
+    }
+    const acknowledged = info.origin ? getAcknowledgedRemoteOrigins().includes(info.origin) : false;
+    providerSecurity.textContent = acknowledged
+      ? `Remote provider enabled (${info.origin}). Captured text and Ask context may leave this machine.`
+      : `Remote provider detected (${info.origin}). Captured text and Ask context may leave this machine until you explicitly acknowledge this trust boundary.`;
+    providerSecurity.style.color = acknowledged ? '#92400e' : '#b91c1c';
+  }
+
+  function replaceSelectOptions(
+    select: HTMLSelectElement,
+    options: Array<{ value: string; label: string }>
+  ): void {
+    select.replaceChildren(
+      ...options.map((item) => {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.textContent = item.label;
+        return option;
+      })
+    );
+  }
+
   function applyProvider(provider: ProviderView): void {
     if (providerSelect) {
       providerSelect.value = provider.id;
     }
     const baseSetting = provider.settings.find((setting) => setting.key === 'baseUrl');
-    if (providerBaseInput) providerBaseInput.value = baseSetting?.value || '';
+    if (providerBaseInput) {
+      providerBaseInput.value = baseSetting?.value || '';
+      renderProviderSecurityNotice(providerBaseInput.value);
+    }
     if (providerNotes) {
       providerNotes.textContent = provider.notes || '';
     }
     if (chatModelSelect) {
       const models = provider.models || [];
       const current = chatModelSelect.value;
-      chatModelSelect.innerHTML = models.length
-        ? models.map((model) => `<option value="${model}">${model}</option>`).join('')
-        : '<option value="">No models detected</option>';
+      replaceSelectOptions(
+        chatModelSelect,
+        models.length
+          ? models.map((model) => ({ value: model, label: model }))
+          : [{ value: '', label: 'No models detected' }]
+      );
       const toSelect = models.includes(provider.selectedModel) ? provider.selectedModel : models[0] || '';
       chatModelSelect.value = toSelect || current;
       chatModelSelect.disabled = models.length === 0;
@@ -395,13 +457,16 @@ function attachBehavior(root: HTMLElement): void {
       const providers = response.providers || [];
       providerCache = providers;
       if (providerSelect) {
-        providerSelect.innerHTML = providers.map((provider) => `<option value="${provider.id}">${provider.name}</option>`).join('');
+        replaceSelectOptions(
+          providerSelect,
+          providers.map((provider) => ({ value: provider.id, label: provider.name }))
+        );
       }
       const activeId = currentSettings.activeProviderId || 'ollama';
       const active = providers.find((provider) => provider.id === activeId) || providers[0];
       if (active) {
         applyProvider(active);
-        if (providerStatus) {
+    if (providerStatus) {
           providerStatus.textContent = active.status?.online ? `${active.name} online` : `Offline: ${active.status?.lastError || 'unknown error'}`;
           providerStatus.style.color = active.status?.online ? '#10b981' : '#b91c1c';
         }
@@ -416,6 +481,9 @@ function attachBehavior(root: HTMLElement): void {
 
   function applySettings(settings: BetaSettings): void {
     currentSettings = settings;
+    if (captureSetupCard) {
+      captureSetupCard.hidden = settings.captureSetupComplete;
+    }
     if (pauseToggle) {
       pauseToggle.checked = !!settings.paused;
     }
@@ -451,6 +519,13 @@ function attachBehavior(root: HTMLElement): void {
     if (toolTimeoutInput) toolTimeoutInput.value = String(settings.toolTimeoutMs ?? DEFAULT_SETTINGS.toolTimeoutMs);
     if (logFullBodiesToggle) logFullBodiesToggle.checked = !!settings.logFullBodies;
     applyTheme(settings.theme || 'light');
+    const allowlistCount = settings.allowlist.length;
+    if (saveAllowlistAndResumeBtn) {
+      saveAllowlistAndResumeBtn.disabled = allowlistCount === 0;
+    }
+    if (providerBaseInput) {
+      renderProviderSecurityNotice(providerBaseInput.value);
+    }
   }
 
   function applyEmbedding(config: EmbeddingConfig): void {
@@ -550,17 +625,80 @@ function attachBehavior(root: HTMLElement): void {
     if (!allowInput || !denyInput) return;
     const allowlist = parseDomainInput(allowInput.value);
     const denylist = parseDomainInput(denyInput.value);
+    const wasOnboarding = !currentSettings.captureSetupComplete;
+    const payload: Partial<BetaSettings> = { allowlist, denylist };
+    if (wasOnboarding && allowlist.length > 0) {
+      payload.captureSetupComplete = true;
+      payload.paused = false;
+    }
     try {
       const response = await runtimeMessage<{ settings: BetaSettings }>({
         type: 'SET_SETTINGS',
-        payload: { allowlist, denylist }
+        payload
       });
       applySettings(response.settings || { ...currentSettings, allowlist, denylist });
-      setStatus('Capture rules saved');
+      setStatus(
+        wasOnboarding && allowlist.length > 0
+          ? 'Allowlist saved and capture enabled'
+          : 'Capture rules saved'
+      );
     } catch (err) {
       setStatus(`Unable to save rules: ${err instanceof Error ? err.message : String(err)}`, true);
     }
   });
+
+  enableBroadCaptureBtn?.addEventListener('click', async () => {
+    try {
+      const response = await runtimeMessage<{ settings: BetaSettings }>({
+        type: 'SET_SETTINGS',
+        payload: { paused: false, captureSetupComplete: true }
+      });
+      applySettings(response.settings || { ...currentSettings, paused: false, captureSetupComplete: true });
+      setStatus('Broad capture enabled');
+    } catch (err) {
+      setStatus(`Unable to enable broad capture: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+  });
+
+  saveAllowlistAndResumeBtn?.addEventListener('click', async () => {
+    if (!allowInput || !denyInput) return;
+    const allowlist = parseDomainInput(allowInput.value);
+    const denylist = parseDomainInput(denyInput.value);
+    if (allowlist.length === 0) {
+      setStatus('Add at least one allowlist domain before enabling capture.', true);
+      return;
+    }
+    try {
+      const response = await runtimeMessage<{ settings: BetaSettings }>({
+        type: 'SET_SETTINGS',
+        payload: {
+          allowlist,
+          denylist,
+          paused: false,
+          captureSetupComplete: true
+        }
+      });
+      applySettings(
+        response.settings || {
+          ...currentSettings,
+          allowlist,
+          denylist,
+          paused: false,
+          captureSetupComplete: true
+        }
+      );
+      setStatus('Allowlist saved and capture enabled');
+    } catch (err) {
+      setStatus(`Unable to save allowlist: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+  });
+
+  const syncAllowlistSetupButton = (): void => {
+    if (!saveAllowlistAndResumeBtn || !allowInput) return;
+    saveAllowlistAndResumeBtn.disabled = parseDomainInput(allowInput.value).length === 0;
+  };
+
+  allowInput?.addEventListener('input', syncAllowlistSetupButton);
 
   saveEmbeddingBtn?.addEventListener('click', async () => {
     if (!baseInput || !modelInput) return;
@@ -610,6 +748,18 @@ function attachBehavior(root: HTMLElement): void {
   providerSaveBtn?.addEventListener('click', async () => {
     if (!providerBaseInput) return;
     const baseUrl = providerBaseInput.value.trim();
+    const providerInfo = getProviderOriginInfo(baseUrl);
+    let acknowledgedOrigins = getAcknowledgedRemoteOrigins();
+    if (providerInfo.isValid && providerInfo.isRemote && providerInfo.origin && !acknowledgedOrigins.includes(providerInfo.origin)) {
+      const confirmed = window.confirm(
+        `This provider is remote (${providerInfo.origin}). Captured text, Ask context, and prompts may leave this machine. Save this provider anyway?`
+      );
+      if (!confirmed) {
+        setStatus('Remote provider change cancelled');
+        return;
+      }
+      acknowledgedOrigins = [...acknowledgedOrigins, providerInfo.origin];
+    }
     try {
       await runtimeMessage<{ providers: unknown }>({
         type: 'SET_PROVIDER_SETTING',
@@ -617,6 +767,13 @@ function attachBehavior(root: HTMLElement): void {
         key: 'baseUrl',
         value: baseUrl
       });
+      if (acknowledgedOrigins !== getAcknowledgedRemoteOrigins()) {
+        const response = await runtimeMessage<{ settings: BetaSettings }>({
+          type: 'SET_SETTINGS',
+          payload: { acknowledgedRemoteProviderOrigins: acknowledgedOrigins }
+        });
+        applySettings(response.settings || { ...currentSettings, acknowledgedRemoteProviderOrigins: acknowledgedOrigins });
+      }
       await refreshProvider();
       setStatus('Provider settings saved');
     } catch (err) {
@@ -666,6 +823,10 @@ function attachBehavior(root: HTMLElement): void {
     }
     const selected = providerCache.find((provider) => provider.id === selectedId);
     if (selected) applyProvider(selected);
+  });
+
+  providerBaseInput?.addEventListener('input', () => {
+    renderProviderSecurityNotice(providerBaseInput.value.trim());
   });
 
   chatModelSelect?.addEventListener('change', async () => {

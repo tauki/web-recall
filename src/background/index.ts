@@ -17,6 +17,10 @@ type SidePanelVisibilityEvent = {
   windowId?: number;
 };
 
+type WindowLike = {
+  id?: number;
+};
+
 console.info('[beta-background] Initialising service worker');
 
 initStorage();
@@ -50,30 +54,50 @@ function ensureSidePanelTracking(): void {
   }
 }
 
+async function resolveSidePanelWindowId(windowId?: number): Promise<number | undefined> {
+  if (typeof windowId === 'number' && windowId >= 0) return windowId;
+  try {
+    const current = (await chrome.windows.getCurrent()) as WindowLike;
+    return typeof current.id === 'number' && current.id >= 0 ? current.id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 async function openSidePanel(windowId?: number): Promise<void> {
   if (!chrome.sidePanel) return;
   ensureSidePanelTracking();
-  const targetWindow = typeof windowId === 'number' ? windowId : chrome.windows.WINDOW_ID_CURRENT;
+  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
+  const targetWindow =
+    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
   await chrome.sidePanel.open({ windowId: targetWindow });
-  openPanelWindows.add(targetWindow);
+  if (typeof resolvedWindowId === 'number') {
+    openPanelWindows.add(resolvedWindowId);
+  }
 }
 
 async function closeSidePanel(windowId?: number): Promise<void> {
   if (!chrome.sidePanel) return;
   ensureSidePanelTracking();
-  const targetWindow = typeof windowId === 'number' ? windowId : chrome.windows.WINDOW_ID_CURRENT;
+  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
+  const targetWindow =
+    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
   await chrome.sidePanel.close({ windowId: targetWindow });
-  openPanelWindows.delete(targetWindow);
+  if (typeof resolvedWindowId === 'number') {
+    openPanelWindows.delete(resolvedWindowId);
+  }
 }
 
 async function toggleSidePanel(windowId?: number): Promise<void> {
   if (!chrome.sidePanel) return;
   ensureSidePanelTracking();
-  const targetWindow = typeof windowId === 'number' ? windowId : chrome.windows.WINDOW_ID_CURRENT;
-  if (openPanelWindows.has(targetWindow)) {
-    await closeSidePanel(targetWindow);
+  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
+  const trackingWindowId =
+    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
+  if (typeof resolvedWindowId === 'number' && openPanelWindows.has(trackingWindowId)) {
+    await closeSidePanel(resolvedWindowId);
   } else {
-    await openSidePanel(targetWindow);
+    await openSidePanel(resolvedWindowId);
   }
 }
 

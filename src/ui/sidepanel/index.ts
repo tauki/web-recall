@@ -2,6 +2,8 @@ import { renderSettingsPanel } from './settings/index';
 import { startPolling } from '../shared/polling';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
+import { DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
+import { getProviderOriginInfo } from '../../shared/providerOrigin';
 
 type SearchResult = {
   url: string;
@@ -17,6 +19,20 @@ type RecentPage = {
   url: string;
   title: string;
   timestamp: number;
+};
+
+type AskSource = {
+  index: number;
+  title: string;
+  url: string;
+  snippet: string;
+  domain: string;
+};
+
+type ProviderView = {
+  id: string;
+  name: string;
+  settings: Array<{ key: string; value: string }>;
 };
 
 function ensureStyles(): void {
@@ -101,6 +117,17 @@ function ensureStyles(): void {
       background: var(--surface);
       overflow-x: auto;
     }
+    .beta-remote-provider-banner {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+      background: #fef3c7;
+      color: #7c2d12;
+      font-size: 0.9rem;
+    }
+    :root[data-theme="dark"] .beta-remote-provider-banner {
+      background: #3f2c00;
+      color: #fde68a;
+    }
     .beta-sidepanel-tabs button {
       flex: 1;
       padding: 10px 12px;
@@ -156,6 +183,37 @@ function ensureStyles(): void {
       border: 1px solid var(--border);
       padding: 10px;
       margin-bottom: 12px;
+    }
+    .beta-capture-setup {
+      background: var(--surface);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      padding: 10px;
+      margin-bottom: 12px;
+      box-shadow: var(--shadow);
+    }
+    .beta-capture-setup h2 {
+      margin: 0 0 6px 0;
+      font-size: 1rem;
+    }
+    .beta-capture-setup p {
+      margin: 0 0 8px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+    .beta-capture-setup-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .beta-capture-setup-actions button {
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--surface-muted);
+      color: var(--text);
+      cursor: pointer;
+      font-weight: 600;
     }
     .beta-capture-status ul {
       list-style: none;
@@ -331,6 +389,81 @@ function openToolPage(path: string): void {
   }
 }
 
+async function refreshRemoteProviderBanner(
+  banner: HTMLElement | null,
+  settingsOverride?: BetaSettings
+): Promise<void> {
+  if (!banner) return;
+  try {
+    const settings =
+      settingsOverride ||
+      (await sendRuntimeMessage<{ settings?: BetaSettings }>({ type: 'GET_SETTINGS' })).settings ||
+      DEFAULT_SETTINGS;
+    const response = await sendRuntimeMessage<{ providers?: ProviderView[] }>({ type: 'GET_PROVIDERS' });
+    const providers = response.providers || [];
+    const active = providers.find((provider) => provider.id === settings.activeProviderId) || providers[0];
+    const baseUrl = active?.settings.find((setting) => setting.key === 'baseUrl')?.value || '';
+    const info = getProviderOriginInfo(baseUrl);
+    if (info.isValid && info.isRemote) {
+      banner.hidden = false;
+      banner.textContent = `Remote provider active (${info.origin}). Ask and retrieval context may leave this machine.`;
+      return;
+    }
+  } catch {
+    // best effort
+  }
+  banner.hidden = true;
+  banner.textContent = '';
+}
+
+function replaceWithMessage(container: HTMLElement, message: string, tagName = 'p'): void {
+  const node = document.createElement(tagName);
+  node.textContent = message;
+  container.replaceChildren(node);
+}
+
+function buildResultCard(params: {
+  url: string;
+  title: string;
+  snippet?: string;
+  meta: string[];
+  headingPrefix?: string;
+}): HTMLElement {
+  const article = document.createElement('article');
+  article.className = 'beta-result-card';
+
+  const heading = document.createElement('h3');
+  if (params.headingPrefix) {
+    heading.append(document.createTextNode(params.headingPrefix));
+  }
+  const link = document.createElement('a');
+  link.href = params.url;
+  link.target = '_blank';
+  link.rel = 'noreferrer';
+  link.textContent = params.title;
+  heading.appendChild(link);
+  article.appendChild(heading);
+
+  if (params.snippet) {
+    const body = document.createElement('p');
+    body.textContent = params.snippet;
+    article.appendChild(body);
+  }
+
+  const meta = document.createElement('div');
+  meta.className = 'beta-result-meta';
+  params.meta
+    .filter(Boolean)
+    .forEach((item) => {
+      const span = document.createElement('span');
+      span.textContent = item;
+      meta.appendChild(span);
+    });
+  article.appendChild(meta);
+
+  return article;
+}
+
 function createSearchView(container: HTMLElement): void {
   container.innerHTML = `
     <form class="beta-search-form" id="beta-search-form">
@@ -338,6 +471,14 @@ function createSearchView(container: HTMLElement): void {
       <button type="submit">Search</button>
     </form>
     <div id="beta-search-status" role="status" aria-live="polite" class="beta-status"></div>
+    <section id="beta-capture-setup" class="beta-capture-setup" hidden>
+      <h2>Choose your capture policy</h2>
+      <p>Web Recall now starts paused on first run. You can resume broad capture, or set an allowlist first and only capture approved domains.</p>
+      <div class="beta-capture-setup-actions">
+        <button type="button" id="beta-enable-broad-capture">Enable broad capture</button>
+        <button type="button" id="beta-open-capture-settings">Set allowlist first</button>
+      </div>
+    </section>
     <section class="beta-capture-status" aria-live="polite">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
         <h2 style="margin:0;">Capture queue</h2>
@@ -360,12 +501,17 @@ function createSearchView(container: HTMLElement): void {
   const form = container.querySelector<HTMLFormElement>('#beta-search-form');
   const input = container.querySelector<HTMLInputElement>('#beta-search-input');
   const status = container.querySelector<HTMLDivElement>('#beta-search-status');
+  const captureSetupNotice = container.querySelector<HTMLElement>('#beta-capture-setup');
+  const enableBroadCaptureBtn = container.querySelector<HTMLButtonElement>('#beta-enable-broad-capture');
+  const openCaptureSettingsBtn = container.querySelector<HTMLButtonElement>('#beta-open-capture-settings');
+  const remoteProviderBanner = document.querySelector<HTMLElement>('#beta-remote-provider-banner');
   const resultsWrap = container.querySelector<HTMLDivElement>('#beta-search-results');
   const captureStatusView = container.querySelector<HTMLDivElement>('#beta-capture-status');
   const captureNowBtn = container.querySelector<HTMLButtonElement>('#beta-capture-now');
   const retryFailedBtn = container.querySelector<HTMLButtonElement>('#beta-retry-failed');
   const recentsList = container.querySelector<HTMLDivElement>('#beta-recents-list');
   const recentsRefresh = container.querySelector<HTMLButtonElement>('#beta-refresh-recents');
+  let currentSettings: BetaSettings = { ...DEFAULT_SETTINGS };
   let captureQueue: Array<{ url: string; title: string; status: string; attempts: number; updatedAt?: number }> = [];
   let recentPages: RecentPage[] = [];
 
@@ -378,54 +524,70 @@ function createSearchView(container: HTMLElement): void {
   function renderResults(results: SearchResult[]): void {
     if (!resultsWrap) return;
     if (!results.length) {
-      resultsWrap.innerHTML = '<p>No matching pages yet. Capture pages or adjust your query.</p>';
+      replaceWithMessage(resultsWrap, 'No matching pages yet. Capture pages or adjust your query.');
       return;
     }
-    resultsWrap.innerHTML = results
-      .map(
-        (result) => `
-        <article class="beta-result-card">
-          <h3><a href="${result.url}" target="_blank" rel="noreferrer">${result.title}</a></h3>
-          <p>${result.snippet.replace(/\s+/g, ' ').trim()}</p>
-          <div class="beta-result-meta">
-            <span>${extractDomain(result.url)}</span>
-            <span>${formatScoreLabel(result)}</span>
-            <span>${result.hitsFromPage && result.hitsFromPage > 1 ? `${result.hitsFromPage} matches` : ''}</span>
-            <span>${formatDate(result.timestamp)}</span>
-          </div>
-        </article>`
+    resultsWrap.replaceChildren(
+      ...results.map((result) =>
+        buildResultCard({
+          url: result.url,
+          title: result.title,
+          snippet: result.snippet.replace(/\s+/g, ' ').trim(),
+          meta: [
+            extractDomain(result.url),
+            formatScoreLabel(result),
+            result.hitsFromPage && result.hitsFromPage > 1 ? `${result.hitsFromPage} matches` : '',
+            formatDate(result.timestamp)
+          ]
+        })
       )
-      .join('');
+    );
+  }
+
+  function renderCaptureSetupNotice(): void {
+    if (!captureSetupNotice) return;
+    captureSetupNotice.hidden = currentSettings.captureSetupComplete;
+  }
+
+  function applySettings(settings: BetaSettings): void {
+    currentSettings = settings;
+    renderCaptureSetupNotice();
   }
 
   function renderCaptureStatus(): void {
     if (!captureStatusView) return;
     if (!captureQueue.length) {
-      captureStatusView.innerHTML = '<p>No pending captures.</p>';
+      replaceWithMessage(captureStatusView, 'No pending captures.');
       return;
     }
-    captureStatusView.innerHTML = `
-      <ul>
-        ${captureQueue
-          .slice(0, 5)
-          .map((entry) => {
-            const time = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
-            return `<li>
-              <div><strong>${entry.status}</strong> · ${entry.title || entry.url} · attempts: ${entry.attempts}${time ? ` · ${time}` : ''}</div>
-              <div class="beta-queue-actions">
-                <button type="button" class="beta-retry-entry" data-url="${entry.url}">Retry</button>
-              </div>
-            </li>`;
-          })
-          .join('')}
-      </ul>
-    `;
-    captureStatusView.querySelectorAll<HTMLButtonElement>('.beta-retry-entry').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const url = btn.dataset.url || '';
-        void retryEntry(url);
+    const list = document.createElement('ul');
+    captureQueue.slice(0, 5).forEach((entry) => {
+      const item = document.createElement('li');
+      const summary = document.createElement('div');
+      const statusStrong = document.createElement('strong');
+      statusStrong.textContent = entry.status;
+      const time = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
+      summary.appendChild(statusStrong);
+      summary.append(
+        document.createTextNode(
+          ` · ${entry.title || entry.url} · attempts: ${entry.attempts}${time ? ` · ${time}` : ''}`
+        )
+      );
+
+      const actions = document.createElement('div');
+      actions.className = 'beta-queue-actions';
+      const retryBtn = document.createElement('button');
+      retryBtn.type = 'button';
+      retryBtn.textContent = 'Retry';
+      retryBtn.addEventListener('click', () => {
+        void retryEntry(entry.url);
       });
+      actions.appendChild(retryBtn);
+
+      item.append(summary, actions);
+      list.appendChild(item);
     });
+    captureStatusView.replaceChildren(list);
   }
 
   async function retryEntry(url: string): Promise<void> {
@@ -443,25 +605,18 @@ function createSearchView(container: HTMLElement): void {
   function renderRecents(): void {
     if (!recentsList) return;
     if (!recentPages.length) {
-      recentsList.innerHTML = '<p>No recent captures yet.</p>';
+      replaceWithMessage(recentsList, 'No recent captures yet.');
       return;
     }
-    recentsList.innerHTML = recentPages
-      .slice(0, 6)
-      .map((page) => {
-        const domain = extractDomain(page.url);
-        const date = formatDate(page.timestamp);
-        return `
-          <article class="beta-result-card">
-            <h3><a href="${page.url}" target="_blank" rel="noreferrer">${page.title}</a></h3>
-            <div class="beta-result-meta">
-              <span>${domain}</span>
-              <span>${date}</span>
-            </div>
-          </article>
-        `;
-      })
-      .join('');
+    recentsList.replaceChildren(
+      ...recentPages.slice(0, 6).map((page) =>
+        buildResultCard({
+          url: page.url,
+          title: page.title,
+          meta: [extractDomain(page.url), formatDate(page.timestamp)]
+        })
+      )
+    );
   }
 
   async function refreshRecents(): Promise<void> {
@@ -470,7 +625,12 @@ function createSearchView(container: HTMLElement): void {
       recentPages = Array.isArray(response.pages) ? response.pages.slice(0, 20) : [];
       renderRecents();
     } catch (err) {
-      if (recentsList) recentsList.innerHTML = `<p>Unable to load recents: ${err instanceof Error ? err.message : String(err)}</p>`;
+      if (recentsList) {
+        replaceWithMessage(
+          recentsList,
+          `Unable to load recents: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
     }
   }
 
@@ -513,14 +673,29 @@ function createSearchView(container: HTMLElement): void {
       renderCaptureStatus();
     }
     if (message?.type === 'BETA_SETTINGS_UPDATED') {
-      const theme = (message as { settings?: { theme?: ThemeChoice } }).settings?.theme;
+      const settings = (message as { settings?: BetaSettings }).settings;
+      const theme = settings?.theme;
       if (theme) applyTheme(theme);
+      if (settings) {
+        applySettings(settings);
+        void refreshRemoteProviderBanner(remoteProviderBanner, settings);
+      }
     }
   });
+
+  void sendRuntimeMessage<{ settings?: BetaSettings }>({ type: 'GET_SETTINGS' })
+    .then((response) => {
+      if (response.settings) {
+        applySettings(response.settings);
+        void refreshRemoteProviderBanner(remoteProviderBanner, response.settings);
+      }
+    })
+    .catch(() => {});
 
   startPolling(() => {
     void refreshCaptureStatus();
     void refreshRecents();
+    void refreshRemoteProviderBanner(remoteProviderBanner);
   }, 5000);
 
   captureNowBtn?.addEventListener('click', async () => {
@@ -544,6 +719,24 @@ function createSearchView(container: HTMLElement): void {
 
   recentsRefresh?.addEventListener('click', () => {
     void refreshRecents();
+  });
+
+  enableBroadCaptureBtn?.addEventListener('click', async () => {
+    try {
+      const response = await sendRuntimeMessage<{ settings: BetaSettings }>({
+        type: 'SET_SETTINGS',
+        payload: { paused: false, captureSetupComplete: true }
+      });
+      applySettings(response.settings || { ...currentSettings, paused: false, captureSetupComplete: true });
+      setStatus('Broad capture enabled');
+    } catch (err) {
+      setStatus(`Unable to enable capture: ${err instanceof Error ? err.message : String(err)}`, true);
+    }
+  });
+
+  openCaptureSettingsBtn?.addEventListener('click', () => {
+    const settingsTab = document.querySelector<HTMLButtonElement>('.beta-sidepanel-tabs button[data-tab="settings"]');
+    settingsTab?.click();
   });
 }
 
@@ -578,7 +771,13 @@ function createAskView(container: HTMLElement): void {
     if (!logView || !message) return;
     if (logEntries[logEntries.length - 1] === message) return;
     logEntries.push(message);
-    logView.innerHTML = logEntries.map((entry) => `<div>${entry}</div>`).join('');
+    logView.replaceChildren(
+      ...logEntries.map((entry) => {
+        const row = document.createElement('div');
+        row.textContent = entry;
+        return row;
+      })
+    );
     logView.dataset.variant = variant;
     logView.scrollTop = logView.scrollHeight;
   }
@@ -591,30 +790,32 @@ function createAskView(container: HTMLElement): void {
   }
 
   function renderSources(
-    sources: Array<{ index: number; title: string; url: string; snippet: string; domain: string }> | undefined,
+    sources: AskSource[] | undefined,
     state: 'pending' | 'ready' = 'ready'
   ): void {
     if (!sourcesView) return;
     if (state === 'pending') {
-      sourcesView.innerHTML = '<p>Gathering sources…</p>';
+      replaceWithMessage(sourcesView, 'Gathering sources…');
       return;
     }
     if (!sources || !sources.length) {
-      sourcesView.innerHTML = '<p>No sources found for this question. Try adjusting the query or capture more pages.</p>';
+      replaceWithMessage(
+        sourcesView,
+        'No sources found for this question. Try adjusting the query or capture more pages.'
+      );
       return;
     }
-    sourcesView.innerHTML = sources
-      .map(
-        (source) => `
-          <article class="beta-result-card">
-            <h3>[${source.index}] <a href="${source.url}" target="_blank" rel="noreferrer">${source.title}</a></h3>
-            <p>${(source.snippet || '').trim()}</p>
-            <div class="beta-result-meta">
-              <span>${source.domain}</span>
-            </div>
-          </article>`
+    sourcesView.replaceChildren(
+      ...sources.map((source) =>
+        buildResultCard({
+          url: source.url,
+          title: source.title,
+          snippet: (source.snippet || '').trim(),
+          meta: [source.domain],
+          headingPrefix: `[${source.index}] `
+        })
       )
-      .join('');
+    );
   }
 
   form?.addEventListener('submit', async (event) => {
@@ -633,7 +834,7 @@ function createAskView(container: HTMLElement): void {
     }
     renderSources([], 'pending');
     try {
-      const response = await sendRuntimeMessage<{ answer: string; sources: Array<{ index: number; title: string; url: string; snippet: string; domain: string }> }>(
+      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>(
         {
           type: 'ASK_QUESTION',
           question,
@@ -687,6 +888,7 @@ function renderApp(root: HTMLElement): void {
           <button type="button" data-action="open-settings">Manage</button>
         </div>
       </div>
+      <div id="beta-remote-provider-banner" class="beta-remote-provider-banner" hidden></div>
       <div class="beta-sidepanel-tabs" role="tablist">
         <button type="button" data-tab="search" class="active" aria-selected="true" role="tab">Search</button>
         <button type="button" data-tab="ask" role="tab" aria-selected="false">Ask</button>
@@ -700,6 +902,7 @@ function renderApp(root: HTMLElement): void {
   const searchView = root.querySelector<HTMLElement>('#beta-view-search');
   const askView = root.querySelector<HTMLElement>('#beta-view-ask');
   const settingsView = root.querySelector<HTMLElement>('#beta-view-settings');
+  const remoteProviderBanner = root.querySelector<HTMLElement>('#beta-remote-provider-banner');
   const tabButtons = root.querySelectorAll<HTMLButtonElement>('.beta-sidepanel-tabs button');
   const headerActions = root.querySelectorAll<HTMLButtonElement>('.beta-header-actions button');
 
@@ -712,6 +915,8 @@ function renderApp(root: HTMLElement): void {
   if (settingsView) {
     renderSettingsPanel(settingsView);
   }
+
+  void refreshRemoteProviderBanner(remoteProviderBanner);
 
   tabButtons.forEach((btn) => {
     btn.addEventListener('click', () => {

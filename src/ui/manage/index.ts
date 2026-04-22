@@ -39,6 +39,8 @@ const state: ManageState = {
   queue: []
 };
 
+const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+
 function ensureStyles(): void {
   if (document.getElementById('beta-manage-style')) return;
   const style = document.createElement('style');
@@ -410,19 +412,31 @@ async function handleExport(): Promise<void> {
 }
 
 async function handleImport(file: File): Promise<void> {
+  if (file.size > MAX_IMPORT_FILE_BYTES) {
+    updateStatus(
+      `Import failed: file exceeds the maximum size of ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB.`,
+      true
+    );
+    return;
+  }
   const text = await file.text();
   try {
     const parsed = JSON.parse(text);
     let pages: unknown[] = [];
+    let schemaVersion: number | undefined;
     if (Array.isArray(parsed)) {
       pages = parsed;
     } else if (parsed && typeof parsed === 'object' && Array.isArray(parsed.pages)) {
       pages = parsed.pages;
+      schemaVersion =
+        typeof (parsed as { schemaVersion?: unknown }).schemaVersion === 'number'
+          ? (parsed as { schemaVersion: number }).schemaVersion
+          : undefined;
     } else {
       throw new Error('Invalid schema: expected array or { pages: [] }');
     }
     updateStatus('Importing…');
-    await sendRuntimeMessage<{ imported: number }>({ type: 'IMPORT_PAGES', pages });
+    await sendRuntimeMessage<{ imported: number }>({ type: 'IMPORT_PAGES', pages, schemaVersion });
     updateStatus('Import complete');
     await fetchPages();
   } catch (err) {

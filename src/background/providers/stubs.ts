@@ -6,17 +6,19 @@ type StubProviderConfig = {
   notes: string;
 };
 
-const DEFAULT_STATUS: ProviderStatus = {
-  online: false,
-  lastChecked: new Date().toISOString(),
-  lastError: 'Not implemented in 0.2.0'
-};
+function buildStatus(): ProviderStatus {
+  return {
+    online: false,
+    lastChecked: new Date().toISOString(),
+    lastError: 'Not implemented in 0.2.0'
+  };
+}
 
 function buildDescriptor(config: StubProviderConfig): ProviderDescriptor {
   return {
     id: config.id,
     name: config.name,
-    status: DEFAULT_STATUS,
+    status: buildStatus(),
     settings: [
       {
         key: 'baseUrl',

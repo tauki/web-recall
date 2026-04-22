@@ -1,5 +1,7 @@
 export type BetaSettings = {
   paused: boolean;
+  captureSetupComplete: boolean;
+  acknowledgedRemoteProviderOrigins: string[];
   allowlist: string[];
   denylist: string[];
   contextWindowChars: number;
@@ -18,7 +20,9 @@ export type BetaSettings = {
 };
 
 export const DEFAULT_SETTINGS: BetaSettings = {
-  paused: false,
+  paused: true,
+  captureSetupComplete: false,
+  acknowledgedRemoteProviderOrigins: [],
   allowlist: [],
   denylist: [],
   contextWindowChars: 1200,

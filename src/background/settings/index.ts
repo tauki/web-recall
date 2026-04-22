@@ -2,6 +2,7 @@ const SETTINGS_KEY = 'betaSettings';
 
 import { DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
 import { setLogLevel } from '../../shared/logger/index';
+import { getNormalizedOrigin } from '../../shared/providerOrigin';
 
 let cachedSettings: BetaSettings = { ...DEFAULT_SETTINGS };
 
@@ -20,6 +21,16 @@ function normalizeDomains(input: unknown): string[] {
   return Array.from(normalized);
 }
 
+function normalizeOrigins(input: unknown): string[] {
+  if (!Array.isArray(input)) return [];
+  const normalized = new Set<string>();
+  for (const value of input) {
+    const origin = getNormalizedOrigin(typeof value === 'string' ? value : String(value || ''));
+    if (origin) normalized.add(origin);
+  }
+  return Array.from(normalized);
+}
+
 function normalizeLogLevel(level: unknown): BetaSettings['logLevel'] {
   return level === 'debug' || level === 'info' || level === 'warn' || level === 'error' || level === 'off'
     ? level
@@ -30,11 +41,20 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
   if (!payload || typeof payload !== 'object') {
     return { ...DEFAULT_SETTINGS };
   }
+  const hasLegacyCaptureChoice =
+    typeof payload.paused === 'boolean' ||
+    Array.isArray(payload.allowlist) ||
+    Array.isArray(payload.denylist);
   const theme = payload.theme;
   const normalizedTheme: BetaSettings['theme'] = theme === 'dark' || theme === 'system' ? theme : 'light';
   const activeProviderId = typeof payload.activeProviderId === 'string' && payload.activeProviderId ? payload.activeProviderId : DEFAULT_SETTINGS.activeProviderId;
   return {
     paused: Boolean(payload.paused),
+    captureSetupComplete:
+      typeof payload.captureSetupComplete === 'boolean'
+        ? payload.captureSetupComplete
+        : hasLegacyCaptureChoice,
+    acknowledgedRemoteProviderOrigins: normalizeOrigins(payload.acknowledgedRemoteProviderOrigins),
     allowlist: normalizeDomains(payload.allowlist),
     denylist: normalizeDomains(payload.denylist),
     contextWindowChars: clampNumber(payload.contextWindowChars, 400, 6000),
@@ -110,6 +130,13 @@ export async function updateSettings(partial: Partial<BetaSettings>): Promise<Be
   const current = await readSettingsFromStorage();
   const next: BetaSettings = {
     paused: typeof partial.paused === 'boolean' ? partial.paused : current.paused,
+    captureSetupComplete:
+      typeof partial.captureSetupComplete === 'boolean'
+        ? partial.captureSetupComplete
+        : current.captureSetupComplete,
+    acknowledgedRemoteProviderOrigins: Array.isArray(partial.acknowledgedRemoteProviderOrigins)
+      ? normalizeOrigins(partial.acknowledgedRemoteProviderOrigins)
+      : current.acknowledgedRemoteProviderOrigins,
     allowlist: Array.isArray(partial.allowlist) ? normalizeDomains(partial.allowlist) : current.allowlist,
     denylist: Array.isArray(partial.denylist) ? normalizeDomains(partial.denylist) : current.denylist,
     contextWindowChars: typeof partial.contextWindowChars === 'number' ? clampNumber(partial.contextWindowChars, 400, 6000) : current.contextWindowChars,

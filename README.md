@@ -88,8 +88,8 @@ Setup
    * Toggle **Pause automatic capture**, add allowlist/denylist domains (one per line), and click **Save capture rules**.
    * Enter the Ollama base URL/model in **Embedding provider** and click **Save embedding settings**.
    * Optional: switch the embedding provider to **In-browser (experimental)** to
-     download the pinned local embedding model and fall back to Ollama if the
-     browser runtime is unavailable.
+     download the pinned local embedding model. If the browser runtime is not
+     available, the extension will report an error.
    * Run a smoke query from the **Search** tab to ensure captured pages appear and the runtime path works.
 
 5. Browse as usual
