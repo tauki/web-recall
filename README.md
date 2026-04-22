@@ -1,45 +1,51 @@
 Web Recall
 ==========
 
-Web Recall is a privacy‑preserving Chrome extension. It captures the visible
-text of pages you visit, generates semantic embeddings locally via the Ollama
-API, stores the results in your browser, and provides a side‑panel UI for
-semantic search. You can also ask questions about what you’ve read using
-retrieval‑augmented generation (RAG) powered by locally running models.
+Web Recall is a privacy-preserving Chrome extension. It captures the visible
+text of pages you visit, generates semantic embeddings locally via either
+Ollama or the optional in-browser runtime, stores the results in your browser,
+and provides a side-panel UI for semantic search. You can also ask questions
+about what you've read using retrieval-augmented generation (RAG) powered by
+locally running models.
 
 Directory contents
 ------------------
 
-- `manifest.json`: MV3 manifest. Permissions include `activeTab`, `storage`,
-  `tabs`, `offscreen`, `contextMenus`; host permissions cover
-  `http://localhost:11434/*`, `http://127.0.0.1:11434/*`, and `<all_urls>` for
-  provider tests/page-scope operations. Default action opens the side panel.
-- `background.js`: Service worker handling capture queue, embeddings/chat,
-  IndexedDB storage, search/Ask/highlights, provider status, and settings.
-- `content.js`: Top-level content script that extracts readable text, chunks it,
-  respects allow/deny rules, and sends `SAVE_PAGE` payloads to background.
-- UI surfaces:
-  - `sidepanel.html/js`: search, Ask (with tools), highlights trigger, settings.
-  - `manage.html/js`: memory manager (browse/delete/backfill/export/import).
-  - `highlights.html/js`: daily highlights dashboard with cache backfill.
-  - `logs.html/js`: structured log viewer with filters/auto refresh.
-- Shared utilities:
-  - `db.js`: IndexedDB schema helpers (pages/highlights stores).
-  - `tools.js`: Ask tool runtime (`fetch_more`, `get_page_summary`,
-    `search_memory`) with validation/timeout/metrics.
-  - `vectors.js`: cosine similarity, recency weighting, centroid helpers.
-  - `text.js`: text normalization/chunk helpers used by capture/background.
-  - `logger.js`: shared logging façade for modules and UIs.
-  - `offscreen.html/js`: performs heavier scoring/centroid work off main worker.
+- `manifest.json`: MV3 manifest targeting the bundled `dist/beta/` workspace.
+- `src/background/`: service worker modules for capture, embeddings, search,
+  Ask, settings, storage orchestration, providers, highlights, logs, and
+  offscreen coordination.
+- `src/content/`: top-level content script that extracts page text, chunks it,
+  and sends capture payloads to the background queue.
+- `src/ui/sidepanel/`: Search, Ask, and Settings surfaces.
+- `src/ui/manage/`, `src/ui/highlights/`, `src/ui/logs/`: full-page tools for
+  memory management, daily highlights, and structured logs.
+- `src/shared/`: shared config, IndexedDB helpers, logging, vector math, tools,
+  and wasm/offscreen support.
 
 Setup
 -----
 
-1. Install and start Ollama
+0. Install Node.js + pnpm
 
-   The extension uses Ollama to generate embeddings and to run the
-   generative models for summarisation and Q&A.  Install Ollama on your
-   machine and start the server:
+   Web Recall's 0.2.x workspace uses Node.js 20.x with pnpm for dependency
+   management. If you use `nvm`, select a Node 20.x runtime and run
+   `corepack enable pnpm` so CLI scripts resolve the correct toolchain.
+
+1. Install dependencies
+
+   ```bash
+   pnpm install
+   pnpm build:beta
+   ```
+
+   `pnpm build:beta` bundles all MV3 entrypoints into `dist/beta/` via esbuild.
+   Re-run the build whenever you change `src/` or HTML entrypoints.
+
+2. Install and start Ollama
+
+   The default runtime uses Ollama for embeddings and local chat/summarisation.
+   Install Ollama on your machine and start the server:
 
    ```bash
    # Install Ollama (see https://ollama.com/download for instructions)
@@ -56,11 +62,11 @@ Setup
    `nomic-embed-text`:
 
    ```bash
-   ollama pull embeddinggemma    # or another embedding model
+   ollama pull embeddinggemma
    ```
 
-   For summarisation and chat, pull one or more instruct‑tuned models, such as
-   `gpt-oss` or `llama3` or `gemma:2b`:
+   For summarisation and chat, pull one or more instruct-tuned models, such as
+   `gpt-oss`, `llama3`, or `gemma:2b`:
 
    ```bash
    ollama pull llama3
@@ -68,92 +74,100 @@ Setup
    ollama pull gpt-oss:latest
    ```
 
-   The extension calls `/api/embed` for embeddings and `/api/chat` for
-   summaries/answers. The default embedding model is `embeddinggemma` and can be
-   changed from the side panel Settings (Model selectors).
+3. Load the extension in Chrome
 
-2. Load the extension in Chrome
+   * Open `chrome://extensions/` and enable **Developer mode**.
+   * Click **Load unpacked** and select the repository root.
+   * Ensure `pnpm build:beta` has been run so `dist/beta/` exists.
+   * In DevTools -> Service Workers, verify the console logs
+     `[beta-background] Initialising service worker` without errors.
 
-   * Open `chrome://extensions/` in Chrome.
-   * Enable “Developer mode”.
-   * Click “Load unpacked” and select this repository folder.
+4. Configure capture + embeddings in the side panel
 
-3. Browse as usual
+   * Open the Chrome side panel, switch to the Web Recall tab, and visit **Settings**.
+   * Toggle **Pause automatic capture**, add allowlist/denylist domains (one per line), and click **Save capture rules**.
+   * Enter the Ollama base URL/model in **Embedding provider** and click **Save embedding settings**.
+   * Optional: switch the embedding provider to **In-browser (experimental)** to
+     download the pinned local embedding model. If the browser runtime is not
+     available, the extension will report an error.
+   * Run a smoke query from the **Search** tab to ensure captured pages appear and the runtime path works.
 
-   After visiting pages, open the side panel (click the extension icon and
-   choose “Show in side panel” or use Chrome’s side panel button).  The
-   extension captures the visible text of pages you visit, embeds it
-   locally via Ollama, and stores the vectors in your browser.
+5. Browse as usual
 
-   Type queries like “rust raft diagram” or “news about AI I read
-   yesterday” and press **Search**.  The extension will find the most
-   relevant passages from your stored pages and display them.
+   After visiting pages, open the side panel. The extension captures visible
+   text from pages you visit, embeds it locally, and stores the vectors in your
+   browser.
 
-   The side panel includes a **Today’s Highlights** button to generate a concise
-   summary of everything captured today using per‑page summaries.
+   Use **Search** to retrieve relevant captured pages.
+   Use **Ask** to query your captured memory and get a grounded cited answer.
 
-4. Use chat, tools, and model selection (optional)
+6. Manage & inspect captures
 
-   Choose embedding/summary/chat models from the drop-downs. Use Provider
-   Settings to set the Ollama base URL (the “Test” button checks reachability with a 5s timeout).
+   - **Memory Manager**: open `chrome://extensions`, click **Details** on Web Recall, then **Extension options**. Search, sort, delete, import, export, and re-embed stored pages. Exports follow `docs/Pack.md` (schema v1).
+   - **Highlights dashboard**: navigate to `chrome-extension://<EXTENSION_ID>/dist/beta/ui/highlights/index.html` to review daily summaries.
+   - **Logs viewer**: visit `chrome-extension://<EXTENSION_ID>/dist/beta/ui/logs/index.html` to inspect structured background logs.
+
+7. Use chat, tools, and model selection (optional)
+
+   Choose embedding settings in the **Embedding provider** card and chat models
+   in the **Chat provider** card. Use **Save provider**, **Test connection**,
+   and **Refresh models** to configure the Ollama base URL and active chat
+   model. The connection test probes the actual chat endpoint, which helps
+   surface `OLLAMA_ORIGINS` misconfiguration.
+
    If Tools are enabled, Ask can call:
-   - fetch_more(url, start/end | chunkIndex) — fetch additional text (stored pages only, length-capped)
-   - get_page_summary(url) — return stored summary
-   - search_memory(query, k) — quick cosine search with timeout and partials
-   Max tool steps and Tool timeout (ms) are configurable; default timeout is disabled to support slower local runs.
-   A live status feed shows tool activity, and per-tool metrics are logged under the answer.
+   - `search_memory({ query, k? })`
+   - `get_page_summary({ url })`
+   - `get_page_chunks({ url, limit? })`
+   - `search_within_page({ url, query, k? })`
+   - `fetch_more({ url, chunkIndex })`
+   - `fetch_more({ url, aroundChunkIndex, radius })`
+   - `fetch_more({ url, start, end })`
 
-5. Shortcuts and context menu
+   `Max tool steps = 0` means no user-imposed limit. `Tool timeout (ms)` applies
+   to tool calls only; it does not abort slow `/api/chat` inference.
+
+8. Shortcuts and context menu
 
    - Keyboard: `Ctrl+Shift+Y` (Windows/Linux) or `Command+Shift+Y` (macOS) opens
      the side panel.
-   - Right‑click: open the panel, capture the current page now, search the
+   - Right-click: open the panel, capture the current page now, search the
      current selection, toggle pause, or open Highlights.
 
-6. Manage memory and logs
+9. Capture rules and pause
 
-   - Memory Manager: open from Settings to browse/delete items, bulk actions,
-     and export/import JSON.
-   - Debug Logs: open from Settings to view recent operational logs.
-
-7. Capture rules and pause
-
-   - Configure whitelist/blacklist domain rules in Settings. When the whitelist
-     is non‑empty, only listed domains are captured. Use the Pause toggle to
-     temporarily stop auto‑capture.
+   - Configure allowlist/denylist domain rules in Settings. When the allowlist
+     is non-empty, only listed domains are captured. Use the Pause toggle to
+     temporarily stop auto-capture.
 
 Release
 -------
 
-- Current version: `0.1.0` (pre‑1.0 SemVer; minor versions may contain breaking changes).
+- Current version: `0.2.0`.
 - See [CHANGELOG.md](./CHANGELOG.md) for details.
-- Chrome extension note: the manifest version is numeric and used for store updates.
-
 
 Security and privacy
 --------------------
 
 * The extension never sends your browsing data to any remote server by default.
-  All embeddings are generated locally via the HTTP server you run yourself.
-* Tools operate primarily on stored page URLs. When a tool requests a URL that
-  isn’t yet captured (e.g., `fetch_more` on a new link), the extension will
-  fetch that page directly and run it through the same on-device embedding flow.
-  Consider allowing only trusted domains in Settings if that usage is a concern.
-* Host permissions include `<all_urls>` to enable certain MV3 features
-  (e.g., provider connectivity tests and page‑scoped actions); the extension
-  does not exfiltrate page content.
+  Embeddings run either against your local Ollama server or locally in-browser
+  via the optional downloaded model.
+* Ask tools operate only on stored page URLs and captured content already in
+  memory. `fetch_more` can expand a page already returned by memory search, but
+  it does not fetch arbitrary uncaptured URLs.
+* Host permissions include `<all_urls>` to enable capture and page-scoped
+  actions; the extension does not exfiltrate page content.
 
 Limitations
 -----------
 
-* Semantic search currently uses a linear scan over your stored embeddings,
-  which works for a few hundred pages but won’t scale to thousands.
-* Reranking uses a local chat model. Keep candidates small (e.g., 5–10) for
-  predictable latency; batch reranking reduces calls.
-* Memory Manager and logs are basic and may change.
+* Semantic search still uses a browser-local retrieval pipeline over stored
+  embeddings; larger datasets will need more aggressive optimization.
+* Reranking uses a local chat model. Keep candidate sets small for predictable latency.
+* Memory Manager and logs are functional but still likely to evolve.
 
 Export/Import
---------------
+-------------
 - Export creates a JSON object with `schemaVersion: 1`, `exportedAt`, optional `embeddingMeta { model, dim }`, and `pages: []`.
-- Import accepts legacy arrays or the v1 object. If a file declares a newer schemaVersion, you can still proceed; import is best‑effort.
-- Embedding compatibility: if stored embedding dimension differs from imported items, incompatible items/versions are skipped and reported after import. When no local metadata exists, the importer infers and persists the dimension from the first embedded item.
+- Import accepts legacy arrays or the v1 object. If a file declares a newer schemaVersion, import is best-effort.
+- Embedding compatibility: if stored embedding dimension differs from imported items, incompatible items/versions are skipped and reported after import.
