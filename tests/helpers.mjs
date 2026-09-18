@@ -10,7 +10,7 @@ export async function loadSource(relative, extraExports = '', mocks = {}, contex
     builder.onLoad({ filter: /.*/, namespace: 'fixture' }, args => ({ contents: Object.keys(mocks[args.path]).map(name => `export const ${name} = globalThis.__mocks[${JSON.stringify(args.path)}][${JSON.stringify(name)}];`).join('\n') }));
   }}] });
   const module = { exports: {} };
-  vm.runInNewContext(built.outputFiles[0].text, { module, exports: module.exports, __mocks: mocks, console, URL, Date, setTimeout, clearTimeout, performance, AbortSignal, TextDecoder, ...context });
+  vm.runInNewContext(built.outputFiles[0].text, { module, exports: module.exports, __mocks: mocks, console, URL, Date, setTimeout, clearTimeout, performance, AbortSignal, AbortController, crypto, TextDecoder, ...context });
   return module.exports;
 }
 export const chromeFixture = { runtime: { sendMessage() {}, getURL: value => value, onMessage: { addListener() {} } }, storage: { local: { set(_value, callback) { callback?.(); return Promise.resolve(); } } } };

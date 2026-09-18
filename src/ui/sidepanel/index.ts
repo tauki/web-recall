@@ -1,3 +1,5 @@
+import { installSharedStyles, relativeDate } from '../shared/presentation';
+import { renderAnswer } from '../shared/answer';
 import { renderSettingsPanel } from './settings/index';
 import { startPolling } from '../shared/polling';
 import { sendRuntimeMessage } from '../shared/runtime';
@@ -365,7 +367,7 @@ function formatScoreLabel(result: SearchResult): string {
   const llmScore = Number.isFinite(result.crossScore) ? Number(result.crossScore).toFixed(1) : undefined;
   const parts: string[] = [];
   if (simPct !== undefined && simPct >= 0) parts.push(`sim ${simPct}%`);
-  parts.push(`llm ${llmScore ?? 'n/a'}/10`);
+  parts.push(llmScore ? `LLM ${llmScore}/10` : 'Not reranked');
   return parts.join(' · ');
 }
 
@@ -428,6 +430,7 @@ function buildResultCard(params: {
   snippet?: string;
   meta: string[];
   headingPrefix?: string;
+  details?: string[];
 }): HTMLElement {
   const article = document.createElement('article');
   article.className = 'beta-result-card';
@@ -460,6 +463,12 @@ function buildResultCard(params: {
       meta.appendChild(span);
     });
   article.appendChild(meta);
+  if (params.details?.length) {
+    const details = document.createElement('details'); details.className = 'wr-match-details';
+    const summary = document.createElement('summary'); summary.textContent = 'Match details'; details.append(summary);
+    for (const text of params.details.filter(Boolean)) { const p = document.createElement('p'); p.textContent = text; details.append(p); }
+    article.append(details);
+  }
 
   return article;
 }
@@ -469,8 +478,10 @@ function createSearchView(container: HTMLElement): void {
     <form class="beta-search-form" id="beta-search-form">
       <input type="search" id="beta-search-input" placeholder="Search captured pages" aria-label="Search query" />
       <button type="submit">Search</button>
+      <button type="button" id="beta-search-clear" data-secondary hidden>Clear</button>
     </form>
     <div id="beta-search-status" role="status" aria-live="polite" class="beta-status"></div>
+    <div class="beta-search-results" id="beta-search-results"></div>
     <section id="beta-capture-setup" class="beta-capture-setup" hidden>
       <h2>Choose your capture policy</h2>
       <p>Web Recall now starts paused on first run. You can resume broad capture, or set an allowlist first and only capture approved domains.</p>
@@ -479,7 +490,7 @@ function createSearchView(container: HTMLElement): void {
         <button type="button" id="beta-open-capture-settings">Set allowlist first</button>
       </div>
     </section>
-    <section class="beta-capture-status" aria-live="polite">
+    <section class="beta-capture-status" id="beta-queue-section" aria-live="polite">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
         <h2 style="margin:0;">Capture queue</h2>
         <div style="display:flex; gap:8px; flex-wrap:wrap;">
@@ -489,14 +500,13 @@ function createSearchView(container: HTMLElement): void {
       </div>
       <div id="beta-capture-status">No pending captures.</div>
     </section>
-    <section class="beta-capture-status" aria-live="polite">
+    <section class="beta-capture-status" id="beta-recents-section" aria-live="polite">
       <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
         <h2 style="margin:0;">Recent captures</h2>
         <button type="button" id="beta-refresh-recents">Refresh</button>
       </div>
       <div id="beta-recents-list"><p>Loading…</p></div>
     </section>
-    <div class="beta-search-results" id="beta-search-results"></div>
   `;
   const form = container.querySelector<HTMLFormElement>('#beta-search-form');
   const input = container.querySelector<HTMLInputElement>('#beta-search-input');
@@ -514,6 +524,23 @@ function createSearchView(container: HTMLElement): void {
   let currentSettings: BetaSettings = { ...DEFAULT_SETTINGS };
   let captureQueue: Array<{ url: string; title: string; status: string; attempts: number; updatedAt?: number }> = [];
   let recentPages: RecentPage[] = [];
+  let searchGeneration = 0;
+  let searching = false;
+  const clearSearch = container.querySelector<HTMLButtonElement>('#beta-search-clear')!;
+  const queueSection = container.querySelector<HTMLElement>('#beta-queue-section')!;
+  const recentsSection = container.querySelector<HTMLElement>('#beta-recents-section')!;
+  function syncSearchLayout(): void {
+    recentsSection.hidden = searching;
+    queueSection.hidden = searching && captureQueue.length === 0;
+    clearSearch.hidden = !searching;
+  }
+  function resetSearch(): void {
+    searchGeneration++; searching = false;
+    if (input) input.value = '';
+    resultsWrap?.replaceChildren(); setStatus(''); syncSearchLayout();
+  }
+  clearSearch.addEventListener('click', () => { resetSearch(); input?.focus(); });
+  input?.addEventListener('input', () => { if (!input.value) resetSearch(); });
 
   function setStatus(text: string, isError = false): void {
     if (!status) return;
@@ -535,7 +562,9 @@ function createSearchView(container: HTMLElement): void {
           snippet: result.snippet.replace(/\s+/g, ' ').trim(),
           meta: [
             extractDomain(result.url),
-            formatScoreLabel(result),
+            relativeDate(result.timestamp)
+          ],
+          details: [formatScoreLabel(result),
             result.hitsFromPage && result.hitsFromPage > 1 ? `${result.hitsFromPage} matches` : '',
             formatDate(result.timestamp)
           ]
@@ -555,6 +584,7 @@ function createSearchView(container: HTMLElement): void {
   }
 
   function renderCaptureStatus(): void {
+    syncSearchLayout();
     if (!captureStatusView) return;
     if (!captureQueue.length) {
       replaceWithMessage(captureStatusView, 'No pending captures.');
@@ -613,7 +643,7 @@ function createSearchView(container: HTMLElement): void {
         buildResultCard({
           url: page.url,
           title: page.title,
-          meta: [extractDomain(page.url), formatDate(page.timestamp)]
+          meta: [extractDomain(page.url), relativeDate(page.timestamp)]
         })
       )
     );
@@ -648,10 +678,11 @@ function createSearchView(container: HTMLElement): void {
     event.preventDefault();
     const query = input?.value.trim() || '';
     if (!query) {
-      setStatus('Enter a query to search.');
-      renderResults([]);
+      resetSearch();
       return;
     }
+    const generation = ++searchGeneration;
+    searching = true; syncSearchLayout(); resultsWrap?.replaceChildren();
     setStatus('Searching…');
     try {
       const response = await sendRuntimeMessage<{ results: SearchResult[] }>({
@@ -659,9 +690,11 @@ function createSearchView(container: HTMLElement): void {
         query,
         limit: 20
       });
+      if (generation !== searchGeneration) return;
       renderResults(response.results || []);
       setStatus(`Found ${response.results?.length || 0} result(s).`);
     } catch (err) {
+      if (generation !== searchGeneration) return;
       setStatus(`Search failed: ${err instanceof Error ? err.message : String(err)}`, true);
       renderResults([]);
     }
@@ -735,141 +768,150 @@ function createSearchView(container: HTMLElement): void {
   });
 
   openCaptureSettingsBtn?.addEventListener('click', () => {
-    const settingsTab = document.querySelector<HTMLButtonElement>('.beta-sidepanel-tabs button[data-tab="settings"]');
+    const settingsTab = document.querySelector<HTMLButtonElement>('#tab-settings');
     settingsTab?.click();
+    document.querySelector<HTMLTextAreaElement>('#beta-allowlist-input')?.focus();
   });
 }
 
 function createAskView(container: HTMLElement): void {
   container.innerHTML = `
     <form class="beta-ask-form" id="beta-ask-form">
-      <textarea id="beta-ask-input" placeholder="Ask a question about your captured pages"></textarea>
+      <label for="beta-ask-input">Ask about your captured pages</label>
+      <textarea id="beta-ask-input" placeholder="What would you like to know?" required></textarea>
       <div class="beta-ask-options">
-        <label><input type="checkbox" id="beta-ask-use-search" checked /> Use memory search</label>
-        <label>Max sources (optional) <input type="number" id="beta-ask-max-results" min="1" placeholder="auto" style="width:70px;margin-left:4px;" /></label>
+        <label><input type="checkbox" id="beta-ask-use-search" checked /> Search memory</label>
+        <label>Max sources (optional) <input type="number" id="beta-ask-max-results" min="1" placeholder="auto" style="width:80px" /></label>
       </div>
+      <p class="wr-help">Auto chooses an initial source count from Settings; tools can retrieve more. With Search memory off, Ask starts from recent captures.</p>
       <div class="beta-ask-actions">
-        <button type="submit">Ask</button>
+        <button type="button" id="beta-ask-clear" data-secondary>Clear</button>
+        <button type="button" id="beta-ask-stop" data-secondary hidden>Stop</button>
+        <button type="submit" id="beta-ask-submit">Ask</button>
       </div>
     </form>
-    <div id="beta-ask-log" class="beta-ask-log"></div>
+    <p id="beta-ask-status" class="wr-status" role="status" aria-live="polite"></p>
+    <details id="beta-ask-activity" hidden>
+      <summary>Activity <span id="beta-ask-activity-count"></span></summary>
+      <div id="beta-ask-log" class="beta-ask-log" tabindex="0" aria-label="Ask activity history"></div>
+    </details>
     <div id="beta-ask-answer" class="beta-ask-answer" hidden></div>
-    <div id="beta-ask-sources" class="beta-search-results"></div>
+    <div id="beta-ask-sources" class="beta-search-results beta-ask-sources"></div>
   `;
-
-  const form = container.querySelector<HTMLFormElement>('#beta-ask-form');
-  const input = container.querySelector<HTMLTextAreaElement>('#beta-ask-input');
-  const useSearch = container.querySelector<HTMLInputElement>('#beta-ask-use-search');
-  const maxResults = container.querySelector<HTMLInputElement>('#beta-ask-max-results');
-  const logView = container.querySelector<HTMLDivElement>('#beta-ask-log');
-  const answerView = container.querySelector<HTMLDivElement>('#beta-ask-answer');
-  const sourcesView = container.querySelector<HTMLDivElement>('#beta-ask-sources');
-  const logEntries: string[] = [];
+  const form = container.querySelector<HTMLFormElement>('#beta-ask-form')!;
+  const input = container.querySelector<HTMLTextAreaElement>('#beta-ask-input')!;
+  const useSearch = container.querySelector<HTMLInputElement>('#beta-ask-use-search')!;
+  const maxResults = container.querySelector<HTMLInputElement>('#beta-ask-max-results')!;
+  const submit = container.querySelector<HTMLButtonElement>('#beta-ask-submit')!;
+  const stop = container.querySelector<HTMLButtonElement>('#beta-ask-stop')!;
+  const clear = container.querySelector<HTMLButtonElement>('#beta-ask-clear')!;
+  const status = container.querySelector<HTMLElement>('#beta-ask-status')!;
+  const activity = container.querySelector<HTMLDetailsElement>('#beta-ask-activity')!;
+  const activityCount = container.querySelector<HTMLElement>('#beta-ask-activity-count')!;
+  const logView = container.querySelector<HTMLElement>('#beta-ask-log')!;
+  const answerView = container.querySelector<HTMLElement>('#beta-ask-answer')!;
+  const sourcesView = container.querySelector<HTMLElement>('#beta-ask-sources')!;
   let activeRequestId: string | null = null;
+  let generation = 0;
+  let entries = 0;
+  let lastLog = '';
 
-  function appendLog(message: string, variant: 'info' | 'error' = 'info'): void {
-    if (!logView || !message) return;
-    if (logEntries[logEntries.length - 1] === message) return;
-    logEntries.push(message);
-    logView.replaceChildren(
-      ...logEntries.map((entry) => {
-        const row = document.createElement('div');
-        row.textContent = entry;
-        return row;
-      })
-    );
-    logView.dataset.variant = variant;
-    logView.scrollTop = logView.scrollHeight;
+  function setRunning(running: boolean): void {
+    submit.disabled = running;
+    submit.textContent = running ? 'Answering…' : 'Ask';
+    stop.hidden = !running;
+    input.readOnly = running;
+    useSearch.disabled = maxResults.disabled = running;
+    form.setAttribute('aria-busy', String(running));
   }
-
-  function resetLog(): void {
-    logEntries.length = 0;
-    if (!logView) return;
-    logView.innerHTML = '';
-    delete logView.dataset.variant;
+  function setStatus(text: string, error = false): void {
+    status.textContent = text;
+    status.dataset.variant = error ? 'error' : 'info';
   }
-
-  function renderSources(
-    sources: AskSource[] | undefined,
-    state: 'pending' | 'ready' = 'ready'
-  ): void {
-    if (!sourcesView) return;
-    if (state === 'pending') {
-      replaceWithMessage(sourcesView, 'Gathering sources…');
-      return;
-    }
-    if (!sources || !sources.length) {
-      replaceWithMessage(
-        sourcesView,
-        'No sources found for this question. Try adjusting the query or capture more pages.'
-      );
-      return;
-    }
-    sourcesView.replaceChildren(
-      ...sources.map((source) =>
-        buildResultCard({
-          url: source.url,
-          title: source.title,
-          snippet: (source.snippet || '').trim(),
-          meta: [source.domain],
-          headingPrefix: `[${source.index}] `
-        })
-      )
-    );
+  function resetOutput(): void {
+    entries = 0; lastLog = '';
+    logView.replaceChildren(); activity.hidden = true; activity.open = false;
+    answerView.replaceChildren(); answerView.hidden = true;
+    delete answerView.dataset.streaming;
+    sourcesView.replaceChildren();
   }
-
-  form?.addEventListener('submit', async (event) => {
+  function appendLog(text: string): void {
+    if (!text || text === lastLog) return;
+    const atBottom = logView.scrollHeight - logView.scrollTop - logView.clientHeight < 24;
+    const row = document.createElement('div'); row.textContent = text;
+    logView.append(row); entries++; lastLog = text;
+    activityCount.textContent = `(${entries})`; activity.hidden = false;
+    if (atBottom) logView.scrollTop = logView.scrollHeight;
+  }
+  function renderSources(sources: AskSource[]): void {
+    sourcesView.replaceChildren(...sources.map((source) => {
+      const card = buildResultCard({ url: source.url, title: source.title, snippet: source.snippet,
+        meta: [source.domain], headingPrefix: `[${source.index}] ` });
+      card.id = `ask-source-${source.index}`;
+      card.tabIndex = -1;
+      return card;
+    }));
+  }
+  async function stopRequest(): Promise<void> {
+    const requestId = activeRequestId;
+    if (!requestId) return;
+    const stoppedGeneration = generation;
+    activeRequestId = null; // Invalidate callbacks before awaiting cancellation.
+    setRunning(false);
+    sourcesView.replaceChildren();
+    setStatus('Stopped. Any partial answer has not been verified.');
+    appendLog('Answer stopped');
+    try { await sendRuntimeMessage({ type: 'CANCEL_ASK', requestId }); }
+    catch { if (!activeRequestId && generation === stoppedGeneration) setStatus('Stopped showing updates. The background connection was lost; the request may still finish.', true); }
+  }
+  stop.addEventListener('click', () => { void stopRequest(); submit.focus(); });
+  clear.addEventListener('click', () => {
+    void stopRequest();
+    generation++;
+    resetOutput(); input.value = ''; setStatus(''); input.focus();
+  });
+  form.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const question = input?.value.trim() || '';
-    if (!question) {
-      appendLog('Please enter a question.');
-      return;
-    }
-    activeRequestId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    resetLog();
-    appendLog('Searching captured pages...');
-    if (answerView) {
-      answerView.hidden = true;
-      answerView.textContent = '';
-    }
-    renderSources([], 'pending');
+    if (activeRequestId) return;
+    const question = input.value.trim();
+    if (!question) { setStatus('Enter a question to begin.'); input.focus(); return; }
+    const requestId = `ask-${crypto.randomUUID()}`;
+    generation++;
+    activeRequestId = requestId; resetOutput(); setRunning(true);
+    setStatus('Gathering sources…');
     try {
-      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>(
-        {
-          type: 'ASK_QUESTION',
-          question,
-          options: {
-            useSearch: useSearch ? useSearch.checked : true,
-            maxResults: (() => {
-              const raw = maxResults?.value?.trim() || '';
-              if (!raw) return undefined;
-              const parsed = Number(raw);
-              return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-            })(),
-            requestId: activeRequestId
-          }
-        }
-      );
-      if (answerView) {
-        answerView.textContent = response.answer || 'No answer';
-        answerView.hidden = false;
-      }
-      renderSources(response.sources, 'ready');
+      const raw = maxResults.value.trim();
+      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>({
+        type: 'ASK_QUESTION', question,
+        options: { useSearch: useSearch.checked, maxResults: raw ? Number(raw) : undefined, requestId }
+      });
+      if (activeRequestId !== requestId) return;
+      delete answerView.dataset.streaming;
+      const sources = response.sources || [];
+      renderSources(sources);
+      renderAnswer(answerView, response.answer || 'No answer returned.', sources.map((source) => source.index));
+      answerView.hidden = false;
+      setStatus(sources.length ? `Answer ready · ${sources.length} source${sources.length === 1 ? '' : 's'}` : 'Answer ready · No cited sources');
     } catch (err) {
-      appendLog(`Ask failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
-      renderSources([], 'ready');
+      if (activeRequestId !== requestId) return;
+      const message = `Ask failed: ${err instanceof Error ? err.message : String(err)}. Try again or check Settings.`;
+      setStatus(message, true); appendLog(message);
+      if (!answerView.hidden) appendLog('The partial answer has not been verified.');
+    } finally {
+      if (activeRequestId === requestId) { activeRequestId = null; setRunning(false); }
     }
   });
-
+  answerView.addEventListener('click', (event) => {
+    const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#ask-source-"]');
+    if (!link) return;
+    const source = sourcesView.querySelector<HTMLElement>(link.getAttribute('href')!);
+    if (source) { event.preventDefault(); source.focus(); source.scrollIntoView({ block: 'nearest' }); }
+  });
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
-    if (message?.requestId && activeRequestId && message.requestId !== activeRequestId) {
-      return;
-    }
-    if (message?.type === 'ASK_PROGRESS') {
-      appendLog(String(message.message || '')); 
-    }
-    if (message?.type === 'ASK_ANSWER_UPDATE' && answerView) {
-      answerView.hidden = false;
+    if (!activeRequestId || message.requestId !== activeRequestId) return;
+    if (message.type === 'ASK_PROGRESS') { appendLog(String(message.message || '')); setStatus(String(message.message || 'Working…')); }
+    if (message.type === 'ASK_ANSWER_UPDATE') {
+      answerView.hidden = false; answerView.dataset.streaming = 'true';
       answerView.textContent = String(message.chunk || '');
     }
   });
@@ -885,18 +927,18 @@ function renderApp(root: HTMLElement): void {
         <div class="beta-header-actions">
           <button type="button" data-action="open-logs">Logs</button>
           <button type="button" data-action="open-highlights">Highlights</button>
-          <button type="button" data-action="open-settings">Manage</button>
+          <button type="button" data-action="open-settings">Memory</button>
         </div>
       </div>
       <div id="beta-remote-provider-banner" class="beta-remote-provider-banner" hidden></div>
-      <div class="beta-sidepanel-tabs" role="tablist">
-        <button type="button" data-tab="search" class="active" aria-selected="true" role="tab">Search</button>
-        <button type="button" data-tab="ask" role="tab" aria-selected="false">Ask</button>
-        <button type="button" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+      <div class="beta-sidepanel-tabs" role="tablist" aria-label="Web Recall views">
+        <button type="button" id="tab-search" aria-controls="beta-view-search" tabindex="0" data-tab="search" class="active" aria-selected="true" role="tab">Search</button>
+        <button type="button" id="tab-ask" aria-controls="beta-view-ask" tabindex="-1" data-tab="ask" role="tab" aria-selected="false">Ask</button>
+        <button type="button" id="tab-settings" aria-controls="beta-view-settings" tabindex="-1" data-tab="settings" role="tab" aria-selected="false">Settings</button>
       </div>
-      <section id="beta-view-search" class="beta-sidepanel-view" role="tabpanel"></section>
-      <section id="beta-view-ask" class="beta-sidepanel-view" role="tabpanel" hidden></section>
-      <section id="beta-view-settings" class="beta-sidepanel-view" role="tabpanel" hidden></section>
+      <section id="beta-view-search" aria-labelledby="tab-search" class="beta-sidepanel-view" role="tabpanel"></section>
+      <section id="beta-view-ask" aria-labelledby="tab-ask" class="beta-sidepanel-view" role="tabpanel" hidden></section>
+      <section id="beta-view-settings" aria-labelledby="tab-settings" class="beta-sidepanel-view" role="tabpanel" hidden></section>
     </div>
   `;
   const searchView = root.querySelector<HTMLElement>('#beta-view-search');
@@ -918,11 +960,21 @@ function renderApp(root: HTMLElement): void {
 
   void refreshRemoteProviderBanner(remoteProviderBanner);
 
-  tabButtons.forEach((btn) => {
+  tabButtons.forEach((btn, index) => {
+    btn.addEventListener('keydown', (event) => {
+      let next = index;
+      if (event.key === 'ArrowRight') next = (index + 1) % tabButtons.length;
+      else if (event.key === 'ArrowLeft') next = (index + tabButtons.length - 1) % tabButtons.length;
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = tabButtons.length - 1;
+      else return;
+      event.preventDefault(); tabButtons[next]?.click(); tabButtons[next]?.focus();
+    });
     btn.addEventListener('click', () => {
       const tab = btn.dataset.tab;
       tabButtons.forEach((button) => {
         button.classList.toggle('active', button === btn);
+        button.tabIndex = button === btn ? 0 : -1;
         button.setAttribute('aria-selected', button === btn ? 'true' : 'false');
       });
       searchView?.setAttribute('hidden', 'true');
@@ -938,6 +990,14 @@ function renderApp(root: HTMLElement): void {
     });
   });
 
+  installSharedStyles();
+  if (window.location.hash.startsWith('#settings')) {
+    root.querySelector<HTMLButtonElement>('[data-tab="settings"]')?.click();
+    if (window.location.hash === '#settings-advanced') {
+      root.querySelector<HTMLDetailsElement>('#settings-advanced')?.setAttribute('open', '');
+      root.querySelector<HTMLElement>('#settings-advanced')?.scrollIntoView();
+    }
+  }
   headerActions.forEach((btn) => {
     btn.addEventListener('click', () => {
       const action = btn.dataset.action;

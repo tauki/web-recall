@@ -4,10 +4,13 @@ import { storageManager, type PageRecord } from '../storage/manager';
 import { invalidateOffscreenIndex } from '../offscreen/index';
 import { log } from '../../shared/logger/index';
 
+export type BackfillProgress = { url: string; status: 'running' | 'complete' | 'error'; completed: number; total: number; error?: string };
+
 export async function backfillMissingEmbeddings(
   limit = 50,
   force = false,
-  urls?: string[]
+  urls?: string[],
+  onProgress?: (progress: BackfillProgress) => void
 ): Promise<{ processed: number; updated: number; failed: number; updatedUrls: string[] }> {
   const pages = await storageManager.listAllPages();
   const ordered = urls === undefined ? pages : [...new Set(urls)].map((url) => pages.find((page) => page.url === url))
@@ -16,7 +19,10 @@ export async function backfillMissingEmbeddings(
     .slice(0, Math.max(0, Math.floor(limit)));
   const updatedUrls: string[] = [];
   let failed = 0;
+  let completed = 0;
+  const report = (progress: BackfillProgress): void => { try { onProgress?.(progress); } catch { /* UI progress must not fail persistence. */ } };
   for (const page of targets) {
+    report({ url: page.url, status: 'running', completed, total: targets.length });
     const indices = page.chunks.map((_, index) => index).filter((index) => force || !page.chunks[index]!.embedding?.length);
     const key = embeddingSpaceKey(getEmbeddingConfig());
     try {
@@ -34,10 +40,12 @@ export async function backfillMissingEmbeddings(
       await storageManager.savePageRecord({ ...page, chunks, lastEmbeddedAt: Date.now() }, { expectedUpdatedAt: page.updatedAt });
       await invalidateOffscreenIndex();
       updatedUrls.push(page.url);
-      await log('info', 'backfill embeddings updated page', { url: page.url, chunkCount: indices.length });
+      report({ url: page.url, status: 'complete', completed: ++completed, total: targets.length });
+      await log('info', 'backfill embeddings updated page', { url: page.url, chunkCount: indices.length }).catch(() => {});
     } catch (err) {
       failed += 1;
-      await log('warn', 'backfill embeddings failed', { url: page.url, error: err instanceof Error ? err.message : String(err) });
+      report({ url: page.url, status: 'error', completed: ++completed, total: targets.length, error: err instanceof Error ? err.message : String(err) });
+      await log('warn', 'backfill embeddings failed', { url: page.url, error: err instanceof Error ? err.message : String(err) }).catch(() => {});
     }
   }
   return { processed: targets.length, updated: updatedUrls.length, failed, updatedUrls };

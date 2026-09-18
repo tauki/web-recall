@@ -1,3 +1,4 @@
+import { abortable } from '../../shared/abort';
 import { storageManager } from '../storage/manager';
 import { searchStoredPages } from '../search/index';
 import { ToolsRuntime, type ToolMetric } from '../../shared/tools/index';
@@ -24,6 +25,7 @@ export type AskOptions = {
   useSearch?: boolean;
   maxResults?: number;
   requestId?: string;
+  signal?: AbortSignal;
 };
 
 type SearchHit = Awaited<ReturnType<typeof searchStoredPages>>[number];
@@ -103,6 +105,7 @@ function heuristicDecompose(question: string): string[] {
 }
 
 async function decomposeQuestion(question: string, config: ChatConfig): Promise<string[]> {
+  config.signal?.throwIfAborted();
   const fallback = heuristicDecompose(question);
   try {
     const body = {
@@ -127,6 +130,7 @@ async function decomposeQuestion(question: string, config: ChatConfig): Promise<
       .forEach((entry) => set.add(entry));
     return Array.from(set);
   } catch (err) {
+    config.signal?.throwIfAborted();
     console.warn('[beta-background:ask] question decomposition failed', err);
     return fallback;
   }
@@ -137,7 +141,8 @@ async function gatherSearchHits(
   normalized: string,
   maxResults: number,
   useSearch: boolean,
-  requestId?: string
+  requestId?: string,
+  signal?: AbortSignal
 ): Promise<SearchHit[]> {
   if (!useSearch) {
     const recents = await storageManager.listRecentPages(maxResults);
@@ -151,12 +156,13 @@ async function gatherSearchHits(
   }
   const aggregated = new Map<string, SearchHit>();
   for (const sub of subQueries) {
+    signal?.throwIfAborted();
     if (!sub) continue;
     sendProgress(`Searching memory: ${sub}`, requestId);
     try {
       const hits = await searchStoredPages(sub, Math.max(maxResults * 2, 5), {
         rewrite: false,
-        rerank: false
+        rerank: false, signal
       });
       hits.forEach((hit) => {
         const key = `${hit.url}::${hit.snippet}`;
@@ -166,13 +172,14 @@ async function gatherSearchHits(
         }
       });
     } catch (err) {
+      signal?.throwIfAborted();
       console.warn('[beta-background:ask] search failed', err);
     }
   }
   if (!aggregated.size) {
     const fallback = await searchStoredPages(normalized, Math.max(5, maxResults), {
       rewrite: false,
-      rerank: false
+      rerank: false, signal
     });
     fallback.forEach((hit) => aggregated.set(`${hit.url}::${hit.snippet}`, hit));
   }
@@ -348,7 +355,7 @@ function resolveToolStepBudget(maxToolSteps: number): number {
   return Math.max(1, Math.min(Math.round(maxToolSteps), MAX_INTERNAL_TOOL_STEPS));
 }
 
-async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], contextLimit: number): Promise<ToolsRuntime | null> {
+async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], contextLimit: number, signal?: AbortSignal): Promise<ToolsRuntime | null> {
   try {
     const pages = await storageManager.listAllPages();
     const pageText = new Map<string, string>();
@@ -365,8 +372,8 @@ async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], c
       allowedUrls: new Set(pages.map((page) => page.url)),
       pageText,
       pages,
-      searchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false }),
-      quickSearchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false }),
+      searchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
+      quickSearchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
       toolTimeoutMs,
       recordEvidence: (url, text) => {
         let source = sources.find((entry) => entry.url === url);
@@ -437,6 +444,7 @@ async function rerankAskHits(question: string, hits: SearchHit[], enabled: boole
       });
     }
   } catch (err) {
+    config.signal?.throwIfAborted();
     console.warn('[beta-background:ask] ask rerank failed', err);
   }
   ranked.sort((a, b) => b.score - a.score);
@@ -541,6 +549,7 @@ async function runExtractionWithTools(params: {
   const tools = buildToolDefinitions();
   const steps = resolveToolStepBudget(maxToolSteps);
   for (let step = 0; step < steps; step += 1) {
+    config.signal?.throwIfAborted();
     const resp = await callChat(config, {
       model: config.model,
       stream: false,
@@ -556,23 +565,26 @@ async function runExtractionWithTools(params: {
     }
     messages = [...messages, { role: 'assistant', content: resp.message?.content || '', tool_calls: toolCalls }];
     for (const call of toolCalls) {
+      config.signal?.throwIfAborted();
       const name = call.function?.name;
       if (!name) continue;
       let args: Record<string, unknown> = {};
       try {
         args = normalizeToolArguments(call.function?.arguments);
       } catch (err) {
+        config.signal?.throwIfAborted();
         messages.push({ role: 'tool', tool_name: name, content: JSON.stringify({ ok: false, error: String(err) }) });
         continue;
       }
       sendProgress(`Tool: ${name}`, requestId);
       try {
-        const result = await runtime.runToolCall(
+        const result = await abortable(runtime.runToolCall(
           name as 'fetch_more' | 'get_page_summary' | 'search_memory' | 'get_page_chunks' | 'search_within_page',
           args
-        );
+        ), config.signal);
         messages.push({ role: 'tool', tool_name: name, content: String(result.content || '') });
       } catch (err) {
+        config.signal?.throwIfAborted();
         messages.push({ role: 'tool', tool_name: name, content: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) });
       }
     }
@@ -616,7 +628,9 @@ function hasValidCitations(answerText: string, sources: AskSource[]): boolean {
   return found;
 }
 
-export async function handleAskQuestion(question: string, options?: AskOptions): Promise<AskResponse> {
+async function runAskQuestion(question: string, options?: AskOptions): Promise<AskResponse> {
+  const signal = options?.signal;
+  signal?.throwIfAborted();
   const normalized = question?.trim();
   if (!normalized) {
     throw new Error('Please enter a question');
@@ -637,14 +651,17 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   const askRerankEnabled = settings.askRerank !== false;
   const useToolAugmentation = enableTools;
   const requestId = options?.requestId;
-  const config = await getChatConfig();
+  const config = { ...await getChatConfig(), signal };
+  signal?.throwIfAborted();
 
   sendProgress('Analyzing question…', requestId);
   const subQueries = queryRewriteEnabled ? await decomposeQuestion(normalized, config) : [normalized];
 
-  const initialHits = await gatherSearchHits(subQueries, normalized, maxResults, options?.useSearch !== false, requestId);
+  const initialHits = await gatherSearchHits(subQueries, normalized, maxResults, options?.useSearch !== false, requestId, signal);
+  signal?.throwIfAborted();
   const dedupedHits = dedupeAskHitsByUrl(initialHits);
   const hits = await rerankAskHits(normalized, dedupedHits, askRerankEnabled, config);
+  signal?.throwIfAborted();
   if (!hits.length) {
     const message = 'I could not find any captured pages related to your question yet. Try browsing a few articles first.';
     sendProgress(message, requestId);
@@ -657,7 +674,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
     | { notes: string; metrics: ToolMetric[]; usedUrls: string[] }
     | null = null;
   if (useToolAugmentation) {
-    const runtime = await createToolsRuntime(toolTimeoutMs, sources, contextLimit);
+    const runtime = await createToolsRuntime(toolTimeoutMs, sources, contextLimit, signal);
     sendProgress('Running tool-augmented extraction…', requestId);
     extraction = await runExtractionWithTools({
       config,
@@ -669,6 +686,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
       maxToolSteps,
       requestId
     }).catch((err) => {
+      signal?.throwIfAborted();
       console.warn('[beta-background:ask] extraction failed', err);
       return null;
     });
@@ -679,6 +697,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   }
 
   let answer = '';
+  signal?.throwIfAborted();
   sendProgress('Composing final answer…', requestId);
   try {
     const mergedSources = sources;
@@ -703,6 +722,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
       sources: filteredSources
     };
   } catch (err) {
+    signal?.throwIfAborted();
     console.warn('[beta-background:ask] answer synthesis failed', err);
     answer = buildFallbackAnswer(sources);
   }
@@ -713,4 +733,25 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
     answer,
     sources: filterSourcesByCitations(sources, answer)
   };
+}
+
+const activeRequests = new Map<string, AbortController>();
+
+export function cancelAskQuestion(requestId: string): boolean {
+  const controller = activeRequests.get(requestId);
+  if (!controller) return false;
+  controller.abort(new Error('Answer stopped'));
+  return true;
+}
+
+export async function handleAskQuestion(question: string, options?: AskOptions): Promise<AskResponse> {
+  const requestId = options?.requestId || crypto.randomUUID();
+  if (activeRequests.has(requestId)) throw new Error('This question is already running');
+  const controller = new AbortController();
+  activeRequests.set(requestId, controller);
+  try {
+    return await abortable(runAskQuestion(question, { ...options, requestId, signal: controller.signal }), controller.signal);
+  } finally {
+    if (activeRequests.get(requestId) === controller) activeRequests.delete(requestId);
+  }
 }

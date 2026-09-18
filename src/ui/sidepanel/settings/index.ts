@@ -1,3 +1,4 @@
+import { installSharedStyles } from '../../shared/presentation';
 import {
   DEFAULT_EMBEDDING_CONFIG as DEFAULT_EMBEDDING,
   DEFAULT_SETTINGS,
@@ -152,7 +153,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <input type="checkbox" id="beta-pause-toggle" />
           <span>Pause automatic capture</span>
         </label>
-        <p class="beta-help">When paused, Web Recall ignores automatic capture requests until you resume.</p>
+        <p class="beta-help">Automatic capture is paused until you resume. Capture current tab still works and respects your domain rules.</p>
       </section>
 
       <section class="beta-card" id="beta-capture-setup-card" aria-labelledby="capture-setup-heading" hidden>
@@ -161,7 +162,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           Web Recall starts paused by default. Choose broad capture, or save an allowlist first and resume capture only for approved domains.
         </p>
         <div class="beta-field" style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button id="beta-enable-broad-capture" type="button">Enable broad capture</button>
+          <button id="settings-enable-broad-capture" type="button">Enable broad capture</button>
           <button id="beta-save-allowlist-and-resume" type="button">Save allowlist and enable capture</button>
         </div>
       </section>
@@ -200,9 +201,10 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-embedding-provider">Provider</label>
           <select id="beta-embedding-provider">
             <option value="ollama">Ollama (local server)</option>
-            <option value="browser">In-browser (experimental, model download required)</option>
+              <option value="browser">In-browser (experimental)</option>
           </select>
         </div>
+        <div id="embedding-ollama-fields">
         <div class="beta-field">
           <label for="beta-embedding-base">Base URL</label>
           <input id="beta-embedding-base" type="url" placeholder="http://localhost:11434" />
@@ -211,6 +213,10 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-embedding-model">Model name</label>
           <input id="beta-embedding-model" type="text" placeholder="embeddinggemma" />
         </div>
+        </div>
+        <div id="embedding-browser-fields" hidden>
+        <p class="beta-help">Download EmbeddingGemma once from Hugging Face. It stays cached on this device; page text is processed locally. The initial download may take several minutes.</p>
+        <details><summary>Advanced model configuration</summary>
         <div class="beta-field">
           <label for="beta-embedding-browser-model">Browser model (Hugging Face)</label>
           <input id="beta-embedding-browser-model" type="text" placeholder="onnx-community/embeddinggemma-300m-ONNX" />
@@ -219,8 +225,10 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-embedding-browser-rev">Browser model revision</label>
           <input id="beta-embedding-browser-rev" type="text" placeholder="commit hash" />
         </div>
-        <button id="beta-download-browser-model" type="button">Download browser model</button>
-        <p id="beta-embedding-browser-status" class="beta-help">Browser embeddings download a pinned Hugging Face model (~80MB). Expect higher memory use.</p>
+        </details>
+        <button id="beta-download-browser-model" type="button">Save &amp; download model</button>
+        <p id="beta-embedding-browser-status" class="beta-help">Download EmbeddingGemma once from Hugging Face; it is cached on this device. The download is large and may take several minutes. Captured text is processed locally.</p>
+        </div>
         <button id="beta-save-embedding" type="button">Save embedding settings</button>
       </section>
 
@@ -249,14 +257,14 @@ export function renderSettingsPanel(target: HTMLElement): void {
       </section>
 
       <section class="beta-card" aria-labelledby="ask-heading">
-        <h2 id="ask-heading">Retrieval and Ask preferences</h2>
+        <h2 id="ask-heading">Retrieval, Ask and logging</h2>
         <div class="beta-field">
           <label for="beta-context-window">Context window (characters)</label>
           <input id="beta-context-window" type="number" min="400" max="6000" step="100" />
         </div>
         <div class="beta-field">
-          <label for="beta-ask-sources">Max sources per answer</label>
-          <input id="beta-ask-sources" type="number" min="1" max="10" />
+          <label for="settings-ask-sources">Initial sources for Auto</label>
+          <input id="settings-ask-sources" type="number" min="1" max="10" aria-describedby="settings-source-help" /><p id="settings-source-help" class="beta-help">Starting point for Ask’s Auto mode, adjusted by retrieval settings. An explicit number in Ask overrides this; tools can retrieve more.</p>
         </div>
         <div class="beta-field">
           <label for="beta-answer-mode">Answer mode</label>
@@ -266,7 +274,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           </select>
         </div>
         <div class="beta-field">
-          <label for="beta-log-level">Log level</label>
+          <label for="beta-log-level">Capture log level</label>
           <select id="beta-log-level">
             <option value="debug">Debug</option>
             <option value="info">Info</option>
@@ -318,13 +326,41 @@ export function renderSettingsPanel(target: HTMLElement): void {
     </div>
   `;
 
+  const shell = target.querySelector<HTMLElement>('.beta-settings-root')!;
+  const navigation = document.createElement('nav'); navigation.className = 'wr-settings-sections';
+  navigation.setAttribute('aria-label', 'Settings sections');
+  const title = shell.querySelector('h1')!; title.after(navigation);
+  const status = target.querySelector<HTMLElement>('#beta-settings-status')!;
+  status.classList.add('wr-settings-status'); navigation.after(status);
+  const groups = [
+    ['capture', 'Capture', ['capture-heading', 'domain-heading', 'capture-setup-heading']],
+    ['models', 'Models', ['provider-heading', 'embed-heading']],
+    ['appearance', 'Appearance', ['theme-heading']],
+    ['advanced', 'Advanced', ['ask-heading', 'calibration-heading', 'tools-heading']]
+  ] as const;
+  for (const [id, label, headings] of groups) {
+    const details = document.createElement('details'); details.id = `settings-${id}`;
+    details.open = id === 'capture' || id === 'models';
+    const summary = document.createElement('summary'); summary.textContent = label; details.append(summary);
+    const content = document.createElement('div'); content.className = 'wr-settings-group'; details.append(content);
+    for (const heading of headings) {
+      const card = target.querySelector(`#${heading}`)?.closest('section');
+      if (card) content.append(card);
+    }
+    shell.append(details);
+    const link = document.createElement('a'); link.href = `#settings-${id}`; link.textContent = label;
+    link.addEventListener('click', (event) => { event.preventDefault(); details.open = true; details.scrollIntoView({ block: 'start' }); summary.focus(); });
+    summary.tabIndex = 0;
+    navigation.append(link);
+  }
+  installSharedStyles();
   attachBehavior(target);
 }
 
 function attachBehavior(root: HTMLElement): void {
   const pauseToggle = root.querySelector<HTMLInputElement>('#beta-pause-toggle');
   const captureSetupCard = root.querySelector<HTMLElement>('#beta-capture-setup-card');
-  const enableBroadCaptureBtn = root.querySelector<HTMLButtonElement>('#beta-enable-broad-capture');
+  const enableBroadCaptureBtn = root.querySelector<HTMLButtonElement>('#settings-enable-broad-capture');
   const saveAllowlistAndResumeBtn = root.querySelector<HTMLButtonElement>('#beta-save-allowlist-and-resume');
   const allowInput = root.querySelector<HTMLTextAreaElement>('#beta-allowlist-input');
   const denyInput = root.querySelector<HTMLTextAreaElement>('#beta-denylist-input');
@@ -339,7 +375,7 @@ function attachBehavior(root: HTMLElement): void {
   const saveEmbeddingBtn = root.querySelector<HTMLButtonElement>('#beta-save-embedding');
   const providerSelect = root.querySelector<HTMLSelectElement>('#beta-provider-select');
   const contextWindowInput = root.querySelector<HTMLInputElement>('#beta-context-window');
-  const askSourcesInput = root.querySelector<HTMLInputElement>('#beta-ask-sources');
+  const askSourcesInput = root.querySelector<HTMLInputElement>('#settings-ask-sources');
   const themeSelect = root.querySelector<HTMLSelectElement>('#beta-theme-select');
   const answerModeSelect = root.querySelector<HTMLSelectElement>('#beta-answer-mode');
   const logLevelSelect = root.querySelector<HTMLSelectElement>('#beta-log-level');
@@ -371,6 +407,12 @@ function attachBehavior(root: HTMLElement): void {
     if (!statusLine) return;
     statusLine.textContent = text;
     statusLine.dataset.variant = isError ? 'error' : 'info';
+    const card = document.activeElement?.closest<HTMLElement>('.beta-card');
+    if (card && root.contains(card)) {
+      let feedback = card.querySelector<HTMLElement>('.wr-setting-feedback');
+      if (!feedback) { feedback = document.createElement('p'); feedback.className = 'wr-setting-feedback'; card.append(feedback); }
+      feedback.textContent = text; feedback.dataset.variant = isError ? 'error' : 'info';
+    }
   }
 
   type ProviderView = {
@@ -407,7 +449,7 @@ function attachBehavior(root: HTMLElement): void {
     providerSecurity.textContent = acknowledged
       ? `Remote provider enabled (${info.origin}). Captured text and Ask context may leave this machine.`
       : `Remote provider detected (${info.origin}). Captured text and Ask context may leave this machine until you explicitly acknowledge this trust boundary.`;
-    providerSecurity.style.color = acknowledged ? '#92400e' : '#b91c1c';
+    providerSecurity.style.color = acknowledged ? '#92400e' : 'var(--error)';
   }
 
   function replaceSelectOptions(
@@ -468,13 +510,13 @@ function attachBehavior(root: HTMLElement): void {
         applyProvider(active);
     if (providerStatus) {
           providerStatus.textContent = active.status?.online ? `${active.name} online` : `Offline: ${active.status?.lastError || 'unknown error'}`;
-          providerStatus.style.color = active.status?.online ? '#10b981' : '#b91c1c';
+          providerStatus.style.color = active.status?.online ? 'var(--text)' : 'var(--error)';
         }
       }
     } catch (err) {
       if (providerStatus) {
         providerStatus.textContent = `Unable to load provider: ${err instanceof Error ? err.message : String(err)}`;
-        providerStatus.style.color = '#b91c1c';
+        providerStatus.style.color = 'var(--error)';
       }
     }
   }
@@ -536,6 +578,8 @@ function attachBehavior(root: HTMLElement): void {
     if (embeddingProviderSelect) {
       embeddingProviderSelect.value = config.provider === 'browser' ? 'browser' : 'ollama';
       const isBrowser = embeddingProviderSelect.value === 'browser';
+      root.querySelector<HTMLElement>('#embedding-ollama-fields')!.hidden = isBrowser;
+      root.querySelector<HTMLElement>('#embedding-browser-fields')!.hidden = !isBrowser;
       if (baseInput) baseInput.disabled = isBrowser;
       if (modelInput) modelInput.disabled = isBrowser;
       if (downloadBrowserBtn) downloadBrowserBtn.style.display = isBrowser ? 'inline-flex' : 'none';
@@ -549,7 +593,8 @@ function attachBehavior(root: HTMLElement): void {
   function updateBrowserStatus(text: string, isError = false): void {
     if (!browserStatusLine) return;
     browserStatusLine.textContent = text;
-    browserStatusLine.style.color = isError ? '#b91c1c' : '#6b7280';
+    browserStatusLine.style.color = isError ? 'var(--error)' : 'var(--muted)';
+    browserStatusLine.setAttribute('role', 'status');
   }
 
   function renderBrowserEmbedStatus(status?: BrowserEmbedStatus): void {
@@ -566,18 +611,18 @@ function attachBehavior(root: HTMLElement): void {
       return;
     }
     if (status.state === 'downloading') {
-      updateBrowserStatus(`Downloading browser model (${status.model}@${status.revision})…`);
+      updateBrowserStatus('Downloading EmbeddingGemma… Keep this browser open. This may take several minutes.');
       return;
     }
     if (status.ready) {
-      updateBrowserStatus(`Browser model ready (${status.model}@${status.revision})`);
+      updateBrowserStatus('Model ready — embeddings run on this device.');
       return;
     }
     if (status.state === 'error') {
       updateBrowserStatus(status.lastError || 'Browser embeddings are unavailable.', true);
       return;
     }
-    updateBrowserStatus(`Browser runtime available. Download model ${status.model}@${status.revision} before using browser embeddings.`);
+    updateBrowserStatus('Ready to download. Save & download model to prepare browser embeddings.');
   }
 
   async function refreshBrowserEmbedStatus(): Promise<void> {
@@ -736,13 +781,18 @@ function attachBehavior(root: HTMLElement): void {
   });
 
   downloadBrowserBtn?.addEventListener('click', async () => {
-    updateBrowserStatus('Starting browser model download…');
+    downloadBrowserBtn.disabled = true;
+    updateBrowserStatus('Saving settings and preparing the model…');
     try {
+      await runtimeMessage({ type: 'SET_EMBEDDING_CONFIG', payload: {
+        provider: 'browser', browserModel: browserModelInput?.value.trim(), browserRevision: browserRevisionInput?.value.trim()
+      } });
       await runtimeMessage<{ ok?: boolean }>({ type: 'DOWNLOAD_BROWSER_EMBED' });
-      setStatus('Browser model download requested');
+      await refreshBrowserEmbedStatus();
+      setStatus('Browser model ready');
     } catch (err) {
-      updateBrowserStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
+      updateBrowserStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}. Try Save & download again.`, true);
+    } finally { downloadBrowserBtn.disabled = false; }
   });
 
   providerSaveBtn?.addEventListener('click', async () => {
@@ -795,14 +845,14 @@ function attachBehavior(root: HTMLElement): void {
       const status = response.status;
       if (status?.online) {
         providerStatus.textContent = 'Ollama online';
-        providerStatus.style.color = '#10b981';
+        providerStatus.style.color = 'var(--text)';
       } else {
         providerStatus.textContent = `Offline: ${status?.lastError || 'unknown error'}`;
-        providerStatus.style.color = '#b91c1c';
+        providerStatus.style.color = 'var(--error)';
       }
     } catch (err) {
       providerStatus.textContent = `Test failed: ${err instanceof Error ? err.message : String(err)}`;
-      providerStatus.style.color = '#b91c1c';
+      providerStatus.style.color = 'var(--error)';
     }
   });
 

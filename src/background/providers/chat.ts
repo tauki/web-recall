@@ -4,6 +4,7 @@ import { getSettings } from '../settings/index';
 import { getProviderBaseUrl } from './config';
 
 export type ChatConfig = {
+  signal?: AbortSignal;
   providerId: string;
   baseUrl: string;
   model: string;
@@ -75,7 +76,7 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
   try {
     const resp = await fetch(`${config.baseUrl}/api/chat`, {
       method: 'POST',
-    signal: AbortSignal.timeout(300_000),
+      signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: config.model,
@@ -114,7 +115,7 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
   const resp = await fetch(`${config.baseUrl}/api/chat`, {
     method: 'POST',
-    signal: AbortSignal.timeout(300_000),
+    signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
@@ -154,7 +155,7 @@ export async function streamChat(
   let assembled = '';
   const resp = await fetch(`${config.baseUrl}/api/chat`, {
     method: 'POST',
-    signal: AbortSignal.timeout(300_000),
+    signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...body, stream: true })
   });

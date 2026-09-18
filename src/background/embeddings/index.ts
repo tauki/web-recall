@@ -1,3 +1,4 @@
+import { abortable } from '../../shared/abort';
 import type { CapturePayload } from '../capture/types';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import {
@@ -280,20 +281,18 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
   });
 }
 
-async function callOllamaEmbed(inputs: string[]): Promise<number[][]> {
+async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<number[][]> {
   if (!inputs.length) return [];
   const endpoint = `${currentConfig.baseUrl}/api/embed`;
   for (let attempt = 1; attempt <= MAX_EMBED_RETRIES; attempt++) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), EMBED_TIMEOUT_MS);
+      signal?.throwIfAborted();
       const resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: currentConfig.model, input: inputs }),
-        signal: controller.signal
+        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)]) : AbortSignal.timeout(EMBED_TIMEOUT_MS)
       });
-      clearTimeout(timeout);
       if (!resp.ok) {
         throw new Error(`Embedding request failed: ${resp.status}`);
       }
@@ -307,12 +306,13 @@ async function callOllamaEmbed(inputs: string[]): Promise<number[][]> {
       console.warn('[beta-background:embeddings] unexpected embed response shape', data);
       return [];
     } catch (err) {
+      signal?.throwIfAborted();
       const delayMs = Math.min(2000 * attempt, 5000);
       console.warn('[beta-background:embeddings] embed attempt failed', { attempt, err });
       if (attempt === MAX_EMBED_RETRIES) {
         throw err;
       }
-      await delay(delayMs);
+      await abortable(delay(delayMs), signal);
     }
   }
   return [];
@@ -364,18 +364,20 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
   }
 }
 
-export async function computeEmbeddingsForChunks(chunks: string[]): Promise<number[][]> {
+export async function computeEmbeddingsForChunks(chunks: string[], signal?: AbortSignal): Promise<number[][]> {
+  signal?.throwIfAborted();
   if (chunks.length === 0) return [];
   const sanitized = chunks.map((text) => text || '');
   if (currentConfig.provider === 'browser') {
-    return computeBrowserEmbeddings(sanitized, DOC_PREFIX);
+    return abortable(computeBrowserEmbeddings(sanitized, DOC_PREFIX), signal);
   }
   try {
-    const batch = await callOllamaEmbed(sanitized);
+    const batch = await callOllamaEmbed(sanitized, signal);
     if (batch.length === sanitized.length) {
       return batch;
     }
   } catch (err) {
+    signal?.throwIfAborted();
     console.warn('[beta-background:embeddings] batch call failed', err);
   }
   const results: number[][] = [];
@@ -385,9 +387,10 @@ export async function computeEmbeddingsForChunks(chunks: string[]): Promise<numb
       continue;
     }
     try {
-      const single = await callOllamaEmbed([text]);
+      const single = await callOllamaEmbed([text], signal);
       results.push(single[0] || []);
     } catch (err) {
+      signal?.throwIfAborted();
       console.warn('[beta-background:embeddings] per-item call failed', err);
       results.push([]);
     }
@@ -395,11 +398,12 @@ export async function computeEmbeddingsForChunks(chunks: string[]): Promise<numb
   return results;
 }
 
-export async function computeEmbeddingsForQueries(queries: string[]): Promise<number[][]> {
+export async function computeEmbeddingsForQueries(queries: string[], signal?: AbortSignal): Promise<number[][]> {
   if (currentConfig.provider === 'browser') {
-    return computeBrowserEmbeddings(queries, QUERY_PREFIX);
+    signal?.throwIfAborted();
+    return abortable(computeBrowserEmbeddings(queries, QUERY_PREFIX), signal);
   }
-  return computeEmbeddingsForChunks(queries);
+  return computeEmbeddingsForChunks(queries, signal);
 }
 
 export async function embedPayloadChunks(payload: CapturePayload): Promise<number[][]> {

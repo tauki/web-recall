@@ -1,3 +1,4 @@
+import { installSharedStyles, createToolNavigation } from '../shared/presentation';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 
@@ -234,7 +235,7 @@ function renderApp(rootEl: HTMLElement): void {
     <div class="hl-shell">
       <div>
         <h1>Daily Highlights</h1>
-        <p class="status-line" id="highlight-status"></p>
+        <p class="status-line" role="status" id="highlight-status"></p>
       </div>
       <div class="hl-toolbar">
         <label>From <input type="date" id="highlight-from" /></label>
@@ -252,6 +253,8 @@ function renderApp(rootEl: HTMLElement): void {
       </div>
     </div>
   `;
+  rootEl.prepend(createToolNavigation('highlights'));
+  installSharedStyles();
   rootEl.dataset.view = 'highlights';
 
   document.getElementById('highlight-apply')?.addEventListener('click', () => {

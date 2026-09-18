@@ -1,3 +1,4 @@
+import { installSharedStyles, createToolNavigation } from '../shared/presentation';
 import { startPolling } from '../shared/polling';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
@@ -26,12 +27,6 @@ const state: LogsState = {
   autoRefresh: true
 };
 
-const LEVEL_ORDER: Record<string, number> = {
-  debug: 10,
-  info: 20,
-  warn: 30,
-  error: 40
-};
 
 function ensureStyles(): void {
   if (document.getElementById('beta-logs-style')) return;
@@ -139,14 +134,12 @@ function formatTimestamp(ts?: number): string {
 }
 
 function applyFilters(entries: LogEntry[]): LogEntry[] {
-  const levelThreshold = state.filters.level === 'all' ? 0 : LEVEL_ORDER[state.filters.level] ?? 0;
   const tokens = state.filters.text
     .split(/\s+/)
     .map((token) => token.trim().toLowerCase())
     .filter(Boolean);
   return entries.filter((entry) => {
-    const lvl = LEVEL_ORDER[entry.level] ?? 0;
-    if (lvl < levelThreshold) return false;
+    if (state.filters.level !== 'all' && entry.level !== state.filters.level) return false;
     const blob = JSON.stringify(entry).toLowerCase();
     if (tokens.length && !tokens.every((token) => blob.includes(token))) {
       return false;
@@ -159,6 +152,7 @@ function renderLogs(): void {
   const list = document.querySelector<HTMLDivElement>('#logs-list');
   if (!list) return;
   const filtered = applyFilters(state.entries);
+  updateStatus(`Showing ${filtered.length} of ${state.entries.length} entries`);
   list.innerHTML = '';
   if (!filtered.length) {
     list.innerHTML = '<p>No logs.</p>';
@@ -185,7 +179,6 @@ async function refreshLogs(): Promise<void> {
     const response = await sendRuntimeMessage<{ logs: LogEntry[] }>({ type: 'GET_LOGS' });
     state.entries = response.logs || [];
     renderLogs();
-    updateStatus(`Loaded ${state.entries.length} entries`);
   } catch (err) {
     updateStatus(`Failed to load logs: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -213,7 +206,7 @@ function renderApp(rootEl: HTMLElement): void {
     <div class="logs-shell">
       <div>
         <h1>Structured Logs</h1>
-        <p class="status-line" id="logs-status"></p>
+        <p class="status-line" role="status" id="logs-status"></p>
       </div>
       <div class="logs-toolbar">
         <button id="logs-refresh">Refresh</button>
@@ -221,7 +214,7 @@ function renderApp(rootEl: HTMLElement): void {
         <label><input type="checkbox" id="logs-auto" checked /> Auto-refresh</label>
       </div>
       <div class="logs-filters">
-        <label>Level
+        <label>Exact level
           <select id="logs-level">
             <option value="all">All</option>
             <option value="debug">Debug</option>
@@ -230,12 +223,16 @@ function renderApp(rootEl: HTMLElement): void {
             <option value="error">Error</option>
           </select>
         </label>
-        <input type="search" id="logs-text" placeholder="Filter text" />
+        <input type="search" id="logs-text" placeholder="Filter text" aria-label="Filter logs by text" />
       </div>
+      <p class="wr-help">Filters change what you see here. <a id="logs-settings-link">Change which logs are captured in Settings</a>.</p>
       <div class="logs-list" id="logs-list"></div>
     </div>
   `;
+  rootEl.prepend(createToolNavigation('logs'));
+  installSharedStyles();
   rootEl.dataset.view = 'logs';
+  rootEl.querySelector<HTMLAnchorElement>('#logs-settings-link')!.href = chrome.runtime.getURL('dist/beta/ui/sidepanel/index.html#settings-advanced');
 
   document.getElementById('logs-refresh')?.addEventListener('click', () => void refreshLogs());
   document.getElementById('logs-clear')?.addEventListener('click', () => void clearLogs());

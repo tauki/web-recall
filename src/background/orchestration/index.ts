@@ -9,7 +9,7 @@ import {
   probeBrowserEmbeddingRuntime
 } from '../embeddings/index';
 import { searchStoredPages } from '../search/index';
-import { handleAskQuestion } from '../ask/index';
+import { handleAskQuestion, cancelAskQuestion } from '../ask/index';
 import {
   deleteManagePages,
   exportManagePages,
@@ -26,6 +26,7 @@ import { backfillMissingEmbeddings } from '../embeddings/backfill';
 import type { BetaSettings, EmbeddingConfig } from '../../shared/config/index';
 
 type RuntimeMessage =
+  | { type: 'CANCEL_ASK'; requestId: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'SET_SETTINGS'; payload?: Partial<BetaSettings> }
   | { type: 'GET_EMBEDDING_CONFIG' }
@@ -50,7 +51,7 @@ type RuntimeMessage =
   | { type: 'CAPTURE_ACTIVE_TAB' }
   | { type: 'GET_CALIBRATION' }
   | { type: 'SET_CALIBRATION'; payload?: { wSim?: number; wLLM?: number } }
-  | { type: 'BACKFILL_EMBEDDINGS'; limit?: number; force?: boolean; urls?: string[] }
+  | { type: 'BACKFILL_EMBEDDINGS'; requestId?: string; limit?: number; force?: boolean; urls?: string[] }
   | { type: 'GET_BROWSER_EMBED_STATUS'; probe?: boolean }
   | { type: 'DOWNLOAD_BROWSER_EMBED' };
 
@@ -153,6 +154,10 @@ function handleCaptureActiveTab(sendResponse: SendResponse): boolean {
 }
 
 const runtimeHandlers: RuntimeHandlerMap = {
+  CANCEL_ASK: (message, sendResponse) => {
+    sendResponse({ cancelled: cancelAskQuestion(String(message.requestId || '')) });
+    return false;
+  },
   GET_SETTINGS: (_message, sendResponse) =>
     respondWith(getSettings().then((settings) => ({ settings })), sendResponse),
 
@@ -335,7 +340,8 @@ const runtimeHandlers: RuntimeHandlerMap = {
       backfillMissingEmbeddings(
         typeof message.limit === 'number' ? message.limit : 50,
         Boolean(message.force),
-        Array.isArray(message.urls) ? (message.urls as string[]) : undefined
+        Array.isArray(message.urls) ? (message.urls as string[]) : undefined,
+        (progress) => { void chrome.runtime.sendMessage({ type: 'BACKFILL_PROGRESS', requestId: message.requestId, ...progress }).catch(() => {}); }
       ).then((result) => ({ result })),
       sendResponse
     ),

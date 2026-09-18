@@ -1,3 +1,4 @@
+import { abortable } from '../../shared/abort';
 import { embeddingSpaceKey } from '../../shared/config/index';
 import { storageManager, type PageRecord } from '../storage/manager';
 import { getCalibrationSnapshot } from '../calibration/index';
@@ -21,6 +22,7 @@ export type SearchResult = {
 };
 
 export type SearchOptions = {
+  signal?: AbortSignal;
   rewrite?: boolean;
   rerank?: boolean;
 };
@@ -390,12 +392,14 @@ async function rerankWithCrossEncoder(
 }
 
 async function semanticSearchInternal(query: string, limit: number, options: SearchOptions = {}): Promise<SearchResult[]> {
+  options.signal?.throwIfAborted();
   const normalized = query.trim();
   if (!normalized) return [];
   const variations = await generateQueryVariations(normalized, 3, options);
   const embeddingKey = embeddingSpaceKey(getEmbeddingConfig());
-  const embeddings = await computeEmbeddingsForQueries(variations).catch(() => []);
+  const embeddings = await computeEmbeddingsForQueries(variations, options.signal).catch((err) => { options.signal?.throwIfAborted(); console.warn(err); return []; });
   if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit);
+  options.signal?.throwIfAborted();
   const validEmbeddings = embeddings.filter((emb) => Array.isArray(emb) && emb.length);
   if (!validEmbeddings.length) {
     return fallbackSearch(normalized, limit);
@@ -442,6 +446,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       hitsFromPage: cand.hitsFromPage
     }));
   } catch (err) {
+    options.signal?.throwIfAborted();
     console.warn('[beta-background:search] offscreen search failed, falling back', err);
     const fallback = await fallbackSearch(normalized, limit);
     return dedupeByUrl(fallback).slice(0, limit);
@@ -449,5 +454,6 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
 }
 
 export async function searchStoredPages(query: string, limit = 10, options: SearchOptions = {}): Promise<SearchResult[]> {
-  return semanticSearchInternal(query, limit, options);
+  options.signal?.throwIfAborted();
+  return abortable(semanticSearchInternal(query, limit, options), options.signal);
 }

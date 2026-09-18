@@ -131,6 +131,59 @@ test('Ask synthesis keeps selected passages; references resolve against all supp
   assert.equal(mod.hasValidCitations('Fact [1], invented [99]', sources), false);
 });
 
+test('Ask cancellation interrupts retrieval and does not start synthesis after it resolves', async () => {
+  let release, searchStarted = false, syntheses = 0;
+  const pendingSearch = new Promise(resolve => { release = resolve; });
+  const mod = await loadSource('src/background/ask/index.ts', '', {
+    ...askMocks,
+    '../settings/index': { getSettings: async () => ({ queryRewrite: false, askRerank: false, enableTools: false }) },
+    '../search/index': { searchStoredPages: async () => { searchStarted = true; return pendingSearch; } },
+    '../providers/chat': { ...askMocks['../providers/chat'], streamChat: async () => { syntheses++; return 'Should not run'; } }
+  }, { chrome: chromeFixture });
+  const running = mod.handleAskQuestion('cats', { requestId: 'cancel-me' });
+  await tick(); assert.equal(searchStarted, true);
+  await assert.rejects(mod.handleAskQuestion('duplicate', { requestId: 'cancel-me' }), /already running/);
+  assert.equal(mod.cancelAskQuestion('cancel-me'), true);
+  await assert.rejects(running, /Answer stopped/);
+  release([{ url: 'https://example.test', chunkIndex: 0, snippet: 'evidence' }]); await tick();
+  assert.equal(syntheses, 0);
+  assert.equal(mod.cancelAskQuestion('cancel-me'), false);
+});
+
+test('chat cancellation reaches the underlying fetch', async () => {
+  let requestSignal;
+  const mod = await loadSource('src/background/providers/chat.ts', '', chatMocks, {
+    fetch: async (_url, { signal }) => {
+      requestSignal = signal;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }
+  });
+  const controller = new AbortController();
+  const pending = mod.callChat({ baseUrl: 'http://localhost', signal: controller.signal }, {});
+  controller.abort(Error('User stopped'));
+  await assert.rejects(pending, /User stopped/);
+  assert.equal(requestSignal.aborted, true);
+});
+
+test('Ollama embeddings stop without retrying when the Ask signal is cancelled', async () => {
+  let attempts = 0;
+  const mod = await loadSource('src/background/embeddings/index.ts', '', {
+    '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}) }
+  }, {
+    chrome: chromeFixture,
+    fetch: async (_url, { signal }) => {
+      attempts++;
+      return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }
+  });
+  const controller = new AbortController();
+  const pending = mod.computeEmbeddingsForQueries(['cats'], controller.signal);
+  await tick(); assert.equal(attempts, 1);
+  controller.abort(Error('User stopped'));
+  await assert.rejects(pending, /User stopped/);
+  assert.equal(attempts, 1);
+});
+
 test('queued and interrupted captures are recovered and completed on worker startup', async () => {
   const entries = new Map(['queued', 'processing'].map((status, index) => [`https://${index}.test`, { url: `https://${index}.test`, status, attempts: 1, payload: { url: `https://${index}.test`, chunks: ['text'] } }]));
   const processed = [];

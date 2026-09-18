@@ -1,3 +1,4 @@
+import { installSharedStyles, createToolNavigation } from '../shared/presentation';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 
@@ -39,6 +40,9 @@ const state: ManageState = {
   selected: new Set(),
   queue: []
 };
+
+let backfillRequestId: string | null = null;
+const rowProgress = new Map<string, { text: string; error?: boolean }>();
 
 const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
 
@@ -238,6 +242,7 @@ function renderRows(rows: ManagePage[]): void {
     const tdCheckbox = document.createElement('td');
     const checkbox = document.createElement('input');
     checkbox.type = 'checkbox';
+    checkbox.setAttribute('aria-label', `Select ${page.title || page.url}`);
     checkbox.dataset.url = page.url;
     checkbox.checked = state.selected.has(page.url);
     checkbox.addEventListener('change', (event) => {
@@ -256,22 +261,41 @@ function renderRows(rows: ManagePage[]): void {
     link.rel = 'noreferrer';
     link.textContent = page.title;
     tdTitle.appendChild(link);
-    const tdUrl = document.createElement('td');
-    tdUrl.textContent = page.url;
+    const domain = document.createElement('div'); domain.className = 'wr-muted';
+    try { domain.textContent = new URL(page.url).hostname; } catch { domain.textContent = page.url; }
+    tdTitle.append(domain);
+    const urlDetails = document.createElement('details');
+    const urlSummary = document.createElement('summary'); urlSummary.textContent = 'Full URL';
+    const urlText = document.createElement('div'); urlText.textContent = page.url;
+    urlDetails.append(urlSummary, urlText); tdTitle.append(urlDetails);
     const tdDate = document.createElement('td');
+    tdDate.dataset.label = 'Captured';
     tdDate.textContent = formatDate(page.timestamp);
     const tdEmbeds = document.createElement('td');
-    const embedStatus = page.embeddingStatus || (page.hasEmbeddings ? 'Present' : 'Missing');
+    const rawStatus = page.embeddingStatus || (page.hasEmbeddings ? 'Present' : 'Missing');
+    const embedStatus = rawStatus.startsWith('Different or unknown') ? 'Needs re-embed' : rawStatus;
     const embedDetails = [];
     if (typeof page.chunkCount === 'number') embedDetails.push(`${page.chunkCount} chunks`);
     if (typeof page.lastEmbeddedAt === 'number') embedDetails.push(`at ${formatDate(page.lastEmbeddedAt)}`);
-    tdEmbeds.textContent = `${embedStatus}${embedDetails.length ? ` (${embedDetails.join(', ')})` : ''}`;
+    tdEmbeds.dataset.label = 'Embeddings';
+    const badge = document.createElement('span'); badge.className = 'wr-embedding-status'; badge.textContent = embedStatus;
+    const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Details';
+    const detailsText = document.createElement('p'); detailsText.textContent = [rawStatus, ...embedDetails].join(' · ');
+    details.append(summary, detailsText); tdEmbeds.append(badge, details);
+    const progress = rowProgress.get(page.url);
+    if (progress) {
+      const line = document.createElement('span'); line.className = 'wr-row-progress'; line.textContent = progress.text;
+      if (progress.error) line.dataset.variant = 'error'; tdEmbeds.append(line);
+    }
     const tdActions = document.createElement('td');
     const delBtn = document.createElement('button');
     delBtn.textContent = 'Delete';
+    delBtn.setAttribute('aria-label', `Delete ${page.title || page.url}`);
     delBtn.addEventListener('click', () => deletePages([page.url]));
     const reembedBtn = document.createElement('button');
     reembedBtn.textContent = 'Re-embed';
+    reembedBtn.disabled = Boolean(backfillRequestId);
+    reembedBtn.setAttribute('aria-label', `Re-embed ${page.title || page.url}`);
     reembedBtn.style.marginLeft = '6px';
     reembedBtn.addEventListener('click', () => {
       void runBackfill(1, true, [page.url]);
@@ -280,7 +304,6 @@ function renderRows(rows: ManagePage[]): void {
     tdActions.appendChild(reembedBtn);
     tr.appendChild(tdCheckbox);
     tr.appendChild(tdTitle);
-    tr.appendChild(tdUrl);
     tr.appendChild(tdDate);
     tr.appendChild(tdEmbeds);
     tr.appendChild(tdActions);
@@ -348,7 +371,7 @@ async function fetchPages(): Promise<void> {
     updateStatus('Loading pages…');
     const response = await sendRuntimeMessage<{ pages: ManagePage[] }>({ type: 'GET_PAGE_LIST' });
     state.pages = response.pages || [];
-    state.selected.clear();
+    state.selected = new Set([...state.selected].filter(url => state.pages.some(page => page.url === url)));
     applyFilters();
     updateStatus(`Loaded ${state.pages.length} page(s)`);
   } catch (err) {
@@ -446,13 +469,23 @@ async function handleImport(file: File): Promise<void> {
 }
 
 async function runBackfill(limit: number, force: boolean, urls?: string[]): Promise<boolean> {
+  if (backfillRequestId) return false;
+  const requestId = crypto.randomUUID(); backfillRequestId = requestId;
+  rowProgress.clear();
+  syncBackfillControls(); sortAndRender();
+  const showStatus = (text: string, error = false): void => {
+    updateStatus(text, error);
+    const status = document.querySelector<HTMLElement>('#manage-backfill-status');
+    if (status) { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; }
+  };
   try {
-    updateStatus('Backfill running…');
+    showStatus(force ? 'Re-embedding… Existing vectors stay until a replacement succeeds.' : 'Filling missing embeddings…');
     const response = await sendRuntimeMessage<{
       result?: { processed: number; updated: number; failed?: number; updatedUrls?: string[] };
       error?: string;
     }>({
       type: 'BACKFILL_EMBEDDINGS',
+      requestId,
       limit,
       force,
       urls
@@ -469,12 +502,22 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
     const updatedUrls = Array.isArray(result.updatedUrls) ? result.updatedUrls : [];
     const suffix = updatedUrls.length ? ` (${updatedUrls.length} page(s))` : '';
     await fetchPages();
-    updateStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}`, Boolean(result.failed));
+    showStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}`, Boolean(result.failed));
     return true;
   } catch (err) {
-    updateStatus(`Backfill failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    showStatus(`Backfill failed: ${err instanceof Error ? err.message : String(err)}`, true);
     return false;
-  }
+  } finally { backfillRequestId = null; syncBackfillControls(); sortAndRender(); }
+}
+
+function syncBackfillControls(): void {
+  const run = document.querySelector<HTMLButtonElement>('#manage-backfill-run');
+  const force = document.querySelector<HTMLInputElement>('#manage-backfill-force');
+  const limit = document.querySelector<HTMLInputElement>('#manage-backfill-limit');
+  if (!run || !force || !limit) return;
+  const count = Math.max(1, Math.min(500, Number(limit.value) || 50));
+  run.textContent = backfillRequestId ? 'Working…' : `${force.checked ? 'Re-embed' : 'Fill missing'} (up to ${count} pages)`;
+  run.disabled = force.disabled = limit.disabled = Boolean(backfillRequestId);
 }
 
 function renderApp(rootEl: HTMLElement): void {
@@ -484,7 +527,7 @@ function renderApp(rootEl: HTMLElement): void {
       <div class="manage-header">
         <div>
           <h1>Memory Manager</h1>
-          <p class="status-line" id="manage-status"></p>
+          <p class="status-line" role="status" id="manage-status"></p>
         </div>
         <div class="manage-actions">
           <button id="manage-refresh" class="primary">Refresh</button>
@@ -494,7 +537,7 @@ function renderApp(rootEl: HTMLElement): void {
         </div>
       </div>
       <div class="manage-toolbar">
-        <input type="search" id="manage-search" placeholder="Search title or domain" />
+        <input type="search" id="manage-search" placeholder="Search title or domain" aria-label="Search memory by title or domain" />
         <label><input type="checkbox" id="manage-filter-manual" /> Manual captures only</label>
       </div>
       <section class="manage-queue" aria-live="polite">
@@ -507,18 +550,18 @@ function renderApp(rootEl: HTMLElement): void {
           <label for="manage-backfill-limit">Max pages</label>
           <input id="manage-backfill-limit" type="number" min="1" max="500" value="50" style="width:100px;" />
           <label style="display:flex; gap:4px; align-items:center;">
-            <input id="manage-backfill-force" type="checkbox" /> Force re-embed all
+            <input id="manage-backfill-force" type="checkbox" /> Replace existing embeddings
           </label>
           <button type="button" id="manage-backfill-run">Backfill missing</button>
         </div>
-        <p id="manage-backfill-status" class="status-line"></p>
+        <p class="wr-help">Applies to your library, up to the page limit. By default, only missing chunks are filled. Use Re-embed on a row to replace that page’s vectors.</p>
+        <p id="manage-backfill-status" class="status-line" role="status"></p>
       </section>
       <table>
         <thead>
           <tr>
-            <th><input type="checkbox" id="manage-select-all" /></th>
+            <th><input type="checkbox" id="manage-select-all" aria-label="Select all visible pages" /></th>
             <th><button type="button" data-sort="title">Title</button></th>
-            <th><button type="button" data-sort="url">URL</button></th>
             <th><button type="button" data-sort="date">Captured</button></th>
             <th>Embeddings</th>
             <th>Actions</th>
@@ -529,7 +572,12 @@ function renderApp(rootEl: HTMLElement): void {
     </div>
   `;
 
+  rootEl.prepend(createToolNavigation('manage'));
+  installSharedStyles();
   rootEl.dataset.view = 'manage';
+  syncBackfillControls();
+  rootEl.querySelector('#manage-backfill-limit')?.addEventListener('input', syncBackfillControls);
+  rootEl.querySelector('#manage-backfill-force')?.addEventListener('change', syncBackfillControls);
 
   document.getElementById('manage-refresh')?.addEventListener('click', () => fetchPages());
   document.getElementById('manage-search')?.addEventListener('input', () => applyFilters());
@@ -585,6 +633,13 @@ if (root) {
     void fetchQueue();
   });
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+    if (message?.type === 'BACKFILL_PROGRESS' && message.requestId === backfillRequestId) {
+      const text = message.status === 'running' ? 'Embedding…' : message.status === 'complete' ? 'Updated' : `Failed: ${String(message.error || 'Try again')}`;
+      rowProgress.set(String(message.url), { text, error: message.status === 'error' });
+      const progress = document.querySelector<HTMLElement>('#manage-backfill-status');
+      if (progress) progress.textContent = `${Number(message.completed)} of ${Number(message.total)} pages finished`;
+      sortAndRender();
+    }
     if (message?.type === 'CAPTURE_QUEUE_UPDATED') {
       state.queue = Array.isArray(message.queue) ? (message.queue as QueueEntry[]) : [];
       sortAndRender();
