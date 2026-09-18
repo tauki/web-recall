@@ -12,7 +12,7 @@
     "package:extension": "node scripts/package-extension.mjs"
   },
   "engines": {
-    "node": ">=20 <21"
+    "node": ">=24"
   },
   "dependencies": {
     "@huggingface/transformers": "^3.8.1"

@@ -28,9 +28,15 @@ Setup
 
 0. Install Node.js + pnpm
 
-   Web Recall's 0.2.x workspace uses Node.js 20.x with pnpm for dependency
-   management. If you use `nvm`, select a Node 20.x runtime and run
-   `corepack enable pnpm` so CLI scripts resolve the correct toolchain.
+   Use Node.js 24 LTS or newer with pnpm for dependency management. The
+   `.nvmrc` file selects the latest Node 24 release, which CI also uses.
+   If you use `nvm`, run:
+
+   ```bash
+   nvm install
+   nvm use
+   corepack enable pnpm
+   ```
 
 1. Install dependencies
 

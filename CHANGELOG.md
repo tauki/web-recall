@@ -6,6 +6,7 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Updated the development and CI runtime to Node.js 24 LTS; newer Node versions are allowed.
 - Fixed release packaging to build and include runtime bundles, with PR validation and artifact checks.
 - Made memory deletion remove chunk text, embeddings and queued jobs, and invalidate highlights atomically.
 - Restored interrupted capture jobs on service-worker startup; queue acceptance now waits for persistence.
