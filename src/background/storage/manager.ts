@@ -26,7 +26,7 @@ export type StorageBackend = {
   listAllPages: () => ReturnType<typeof listAllPages>;
   listRecentPages: (limit?: number) => ReturnType<typeof listRecentPages>;
   getPageRecord: (url: string) => ReturnType<typeof getPageRecord>;
-  savePageRecord: (record: Parameters<typeof savePageRecord>[0]) => Promise<void>;
+  savePageRecord: typeof savePageRecord;
   deletePages: (urls: string[]) => Promise<number>;
   listLogs: (limit?: number) => ReturnType<typeof listLogs>;
   clearLogs: () => Promise<void>;

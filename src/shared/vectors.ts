@@ -1,7 +1,8 @@
 // Shared vector helpers for similarity scoring and recency weighting.
 export function cosineSimilarity(a: number[] | undefined, b: number[] | undefined): number {
   if (!Array.isArray(a) || !Array.isArray(b) || a.length === 0 || b.length === 0) return 0;
-  const len = Math.min(a.length, b.length);
+  if (a.length !== b.length) return 0;
+  const len = a.length;
   let dot = 0;
   let na = 0;
   let nb = 0;
@@ -25,7 +26,7 @@ export function recencyWeight(timestamp: number | undefined): number {
 
 export function computeCentroid(vectors: Array<{ embedding?: number[] }> | undefined): number[] | null {
   if (!vectors || vectors.length === 0) return null;
-  const first = vectors.find((v) => Array.isArray(v?.embedding)) as { embedding?: number[] } | undefined;
+  const first = vectors.find((v) => Array.isArray(v?.embedding) && v.embedding.length > 0) as { embedding?: number[] } | undefined;
   const dim = first?.embedding?.length || 0;
   if (!dim) return null;
   const acc = new Array(dim).fill(0);

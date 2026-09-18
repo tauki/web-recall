@@ -4,6 +4,18 @@ Changelog
 All notable changes to this project are documented in this file.
 This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may include breaking changes.
 
+0.2.1 - 2026-09-18
+------------------
+- Fixed release packaging to build and include runtime bundles, with PR validation and artifact checks.
+- Made memory deletion remove chunk text, embeddings and queued jobs, and invalidate highlights atomically.
+- Restored interrupted capture jobs on service-worker startup; queue acceptance now waits for persistence.
+- Made missing-only backfill preserve existing vectors, reject failed/stale updates and refresh retrieval.
+- Fixed Ollama tool arguments, retained retrieved passages and stable source IDs through Ask, and restored streamed answers with a five-minute request deadline.
+- Fixed switching browser embeddings back to Ollama and retrying failed browser model loads.
+- Tagged new embeddings with their model space. Existing untagged vectors remain stored but require an explicit Re-embed to participate in semantic search; text fallback remains available.
+- Switched toolbar toggling to Chrome's native behavior and corrected lifecycle events. Minimum Chrome is now 142; no permissions or host permissions were added.
+- Added deterministic regression checks for persistence, backfill, recovery, provider switching, references and streaming.
+
 0.2.0 - 2026-04-06
 ------------------
 - Added a full sidepanel workflow for Search, Ask, and Settings so captured pages can be searched, queried, and configured without leaving the current tab.

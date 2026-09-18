@@ -9,6 +9,7 @@ type ManagePage = {
   timestamp: number;
   manual: boolean;
   hasEmbeddings?: boolean;
+  embeddingStatus?: string;
   chunkCount?: number;
   lastEmbeddedAt?: number;
 };
@@ -260,7 +261,7 @@ function renderRows(rows: ManagePage[]): void {
     const tdDate = document.createElement('td');
     tdDate.textContent = formatDate(page.timestamp);
     const tdEmbeds = document.createElement('td');
-    const embedStatus = page.hasEmbeddings ? 'Present' : 'Missing';
+    const embedStatus = page.embeddingStatus || (page.hasEmbeddings ? 'Present' : 'Missing');
     const embedDetails = [];
     if (typeof page.chunkCount === 'number') embedDetails.push(`${page.chunkCount} chunks`);
     if (typeof page.lastEmbeddedAt === 'number') embedDetails.push(`at ${formatDate(page.lastEmbeddedAt)}`);
@@ -448,7 +449,7 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
   try {
     updateStatus('Backfill running…');
     const response = await sendRuntimeMessage<{
-      result?: { processed: number; updated: number; updatedUrls?: string[] };
+      result?: { processed: number; updated: number; failed?: number; updatedUrls?: string[] };
       error?: string;
     }>({
       type: 'BACKFILL_EMBEDDINGS',
@@ -460,15 +461,15 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
       throw new Error((response as { error?: string }).error || 'Backfill failed');
     }
     const result =
-      (response as { result?: { processed: number; updated: number; updatedUrls?: string[] } }).result || {
+      (response as { result?: { processed: number; updated: number; failed?: number; updatedUrls?: string[] } }).result || {
         processed: 0,
         updated: 0,
         updatedUrls: []
       };
     const updatedUrls = Array.isArray(result.updatedUrls) ? result.updatedUrls : [];
     const suffix = updatedUrls.length ? ` (${updatedUrls.length} page(s))` : '';
-    updateStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}${suffix}`);
     await fetchPages();
+    updateStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}`, Boolean(result.failed));
     return true;
   } catch (err) {
     updateStatus(`Backfill failed: ${err instanceof Error ? err.message : String(err)}`, true);

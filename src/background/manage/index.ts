@@ -1,3 +1,6 @@
+import { cancelCaptureJobs } from '../capture/index';
+import { embeddingSpaceKey } from '../../shared/config/index';
+import { getEmbeddingConfig } from '../embeddings/index';
 import { storageManager, type PageChunkRecord, type PageRecord } from '../storage/manager';
 import { invalidateOffscreenIndex } from '../offscreen/index';
 
@@ -7,6 +10,7 @@ export type ManagePageSummary = {
   timestamp: number;
   manual: boolean;
   hasEmbeddings: boolean;
+  embeddingStatus: string;
   chunkCount: number;
   lastEmbeddedAt?: number;
 };
@@ -89,7 +93,8 @@ function normalizeImportedChunks(raw: unknown, pageIndex: number): PageChunkReco
       }
       return value;
     });
-    return { text, embedding };
+    const key = (chunk as { embeddingKey?: unknown }).embeddingKey;
+    return { text, embedding, embeddingKey: typeof key === 'string' ? key : undefined };
   });
 }
 
@@ -133,7 +138,8 @@ export async function getManagePages(): Promise<ManagePageSummary[]> {
     title: page.title || page.url,
     timestamp: page.timestamp,
     manual: Boolean(page.manual),
-    hasEmbeddings: Array.isArray(page.chunks) && page.chunks.length > 0 && page.chunks.every((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0),
+    hasEmbeddings: Array.isArray(page.chunks) && page.chunks.length > 0 && page.chunks.every((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0 && chunk.embeddingKey === embeddingSpaceKey(getEmbeddingConfig())),
+    embeddingStatus: page.chunks?.some((chunk) => chunk.embedding?.length && chunk.embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) ? 'Different or unknown model — use Re-embed' : '',
     chunkCount: Array.isArray(page.chunks) ? page.chunks.length : 0,
     lastEmbeddedAt: page.lastEmbeddedAt
   }));
@@ -141,6 +147,7 @@ export async function getManagePages(): Promise<ManagePageSummary[]> {
 
 export async function deleteManagePages(urls: string[]): Promise<number> {
   if (!Array.isArray(urls) || urls.length === 0) return 0;
+  cancelCaptureJobs(urls);
   const deleted = await storageManager.deletePages(urls);
   if (deleted > 0) {
     await invalidateOffscreenIndex();

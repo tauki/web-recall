@@ -4,6 +4,7 @@ import { computeCentroid, cosineSimilarity, recencyWeight } from '../shared/vect
 type CentroidEntry = {
   url: string;
   centroid: number[];
+  embeddingKey: string;
   timestamp: number;
 };
 
@@ -48,7 +49,7 @@ async function getBrowserEmbedder(model: string, revision: string): Promise<Brow
   const key = `${model}@${revision}`;
   if (embedderPromise && embedderKey === key) return embedderPromise;
   embedderKey = key;
-  embedderPromise = (async () => {
+  embedderPromise = (async (): Promise<BrowserEmbedder> => {
     const { AutoTokenizer, AutoModel, env } = await import('@huggingface/transformers');
     env.allowRemoteModels = true;
     env.remoteHost = 'https://huggingface.co';
@@ -69,7 +70,10 @@ async function getBrowserEmbedder(model: string, revision: string): Promise<Brow
       tokenizer: (inputs, options) => tokenizer(inputs, options),
       model: (inputs) => embedder(inputs)
     };
-  })();
+  })().catch((error) => {
+    if (embedderKey === key) embedderPromise = null;
+    throw error;
+  });
   return embedderPromise;
 }
 
@@ -120,22 +124,20 @@ async function ensureCentroidIndex(): Promise<CentroidEntry[]> {
   const pages = await readAllPages();
   const index: CentroidEntry[] = [];
   for (const page of pages) {
-    const centroid = computeCentroid(page.chunks);
-    if (!centroid) continue;
-    index.push({
-      url: page.url,
-      centroid,
-      timestamp: page.timestamp
-    });
+    const keys = new Set(page.chunks.map((chunk) => chunk.embeddingKey).filter((key): key is string => Boolean(key)));
+    for (const embeddingKey of keys) {
+      const centroid = computeCentroid(page.chunks.filter((chunk) => chunk.embeddingKey === embeddingKey));
+      if (centroid) index.push({ url: page.url, centroid, embeddingKey, timestamp: page.timestamp });
+    }
   }
   centroidIndex = index;
   return centroidIndex;
 }
 
-async function topPagesByCentroid(variationEmbeddings: number[][], topN: number): Promise<Array<{ url: string }>> {
+async function topPagesByCentroid(variationEmbeddings: number[][], topN: number, embeddingKey: string): Promise<Array<{ url: string }>> {
   if (!Array.isArray(variationEmbeddings) || !variationEmbeddings.length) return [];
   const idx = await ensureCentroidIndex();
-  const scored = idx.map((entry) => {
+  const scored = idx.filter((entry) => entry.embeddingKey === embeddingKey).map((entry) => {
     let maxSim = -Infinity;
     for (const ve of variationEmbeddings) {
       const sim = cosineSimilarity(ve, entry.centroid);
@@ -148,7 +150,7 @@ async function topPagesByCentroid(variationEmbeddings: number[][], topN: number)
   return scored.slice(0, Math.min(topN, scored.length));
 }
 
-async function scoreChunksInPages(pageUrls: string[], variationEmbeddings: number[][], originalQuery: string): Promise<ScoreCandidate[]> {
+async function scoreChunksInPages(pageUrls: string[], variationEmbeddings: number[][], originalQuery: string, embeddingKey: string): Promise<ScoreCandidate[]> {
   if (!variationEmbeddings.length) return [];
   const pages = await readAllPages();
   const urlSet = new Set(pageUrls);
@@ -160,6 +162,7 @@ async function scoreChunksInPages(pageUrls: string[], variationEmbeddings: numbe
     if (!urlSet.has(page.url)) continue;
     const titleLower = (page.title || '').toLowerCase();
     page.chunks.forEach((chunk, idx) => {
+      if (chunk.embeddingKey !== embeddingKey) return;
       const emb = chunk.embedding;
       if (!Array.isArray(emb) || emb.length === 0) return;
       let maxSim = -Infinity;
@@ -200,7 +203,7 @@ chrome.runtime.onMessage.addListener(
   if (message.type === 'OFFSCREEN_TOP_PAGES') {
     const variationEmbeddings = Array.isArray(message.variationEmbeddings) ? (message.variationEmbeddings as number[][]) : [];
     const topN = typeof message.topN === 'number' ? message.topN : 20;
-    topPagesByCentroid(variationEmbeddings, topN)
+    topPagesByCentroid(variationEmbeddings, topN, String(message.embeddingKey || ''))
       .then((pages) => sendResponse({ pages }))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
@@ -209,7 +212,7 @@ chrome.runtime.onMessage.addListener(
     const pageUrls = Array.isArray(message.pageUrls) ? (message.pageUrls as string[]) : [];
     const variationEmbeddings = Array.isArray(message.variationEmbeddings) ? (message.variationEmbeddings as number[][]) : [];
     const originalQuery = typeof message.originalQuery === 'string' ? message.originalQuery : '';
-    scoreChunksInPages(pageUrls, variationEmbeddings, originalQuery)
+    scoreChunksInPages(pageUrls, variationEmbeddings, originalQuery, String(message.embeddingKey || ''))
       .then((candidates) => sendResponse({ candidates }))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;

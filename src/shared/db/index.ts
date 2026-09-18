@@ -13,6 +13,7 @@ const MAX_LEGACY_SNAPSHOT = 20;
 export type PageChunkRecord = {
   text: string;
   embedding: number[];
+  embeddingKey?: string;
 };
 
 export type StoredCapturePayload = {
@@ -50,6 +51,7 @@ export type EmbeddingRecord = {
   chunkIndex: number;
   text: string;
   embedding: number[];
+  embeddingKey?: string;
   createdAt: number;
 };
 
@@ -154,7 +156,7 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
   });
 }
 
-export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>): Promise<void> {
+export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean } = {}): Promise<void> {
   const existing = await getPageRecord(record.url);
   const now = Date.now();
   const chunks = Array.isArray(record.chunks) ? record.chunks : [];
@@ -173,45 +175,40 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
   };
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(PAGES_STORE, 'readwrite');
-    tx.objectStore(PAGES_STORE).put(normalized);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-  await replaceEmbeddingsForPage(normalized.url, normalized.chunks);
-}
-
-async function replaceEmbeddingsForPage(pageUrl: string, chunks: PageChunkRecord[]): Promise<void> {
-  const db = await openDatabase();
-  const now = Date.now();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(EMBEDDINGS_STORE, 'readwrite');
-    const store = tx.objectStore(EMBEDDINGS_STORE);
-    const index = store.index('pageUrl');
-    const range = IDBKeyRange.only(pageUrl);
-    const request = index.openCursor(range);
-    request.onsuccess = () => {
-      const cursor = request.result as IDBCursorWithValue | null;
-      if (cursor) {
-        cursor.delete();
-        cursor.continue();
-        return;
-      }
-      chunks.forEach((chunk, chunkIndex) => {
-        const payload: EmbeddingRecord = {
-          key: `${pageUrl}::${chunkIndex}`,
-          pageUrl,
+    const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, HIGHLIGHTS_STORE, PROCESSING_STORE], 'readwrite');
+    const write = (): void => {
+      tx.objectStore(PAGES_STORE).put(normalized);
+      tx.objectStore(HIGHLIGHTS_STORE).clear();
+      const store = tx.objectStore(EMBEDDINGS_STORE);
+      const cursor = store.index('pageUrl').openCursor(IDBKeyRange.only(normalized.url));
+      cursor.onsuccess = () => {
+        if (cursor.result) {
+          cursor.result.delete();
+          cursor.result.continue();
+          return;
+        }
+        normalized.chunks.forEach((chunk, chunkIndex) => store.put({
+          key: `${normalized.url}::${chunkIndex}`,
+          pageUrl: normalized.url,
           chunkIndex,
-          text: chunk.text,
-          embedding: chunk.embedding || [],
+          ...chunk,
           createdAt: now
-        };
-        store.put(payload);
-      });
+        }));
+      };
     };
-    request.onerror = () => reject(request.error);
+    if (options.expectedUpdatedAt !== undefined) {
+      const check = tx.objectStore(PAGES_STORE).get(record.url);
+      check.onsuccess = () => {
+        if (!check.result || check.result.updatedAt !== options.expectedUpdatedAt) tx.abort();
+        else write();
+      };
+    } else if (options.requireProcessing) {
+      const check = tx.objectStore(PROCESSING_STORE).get(record.url);
+      check.onsuccess = () => { if (check.result) write(); else tx.abort(); };
+    } else write();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Page update aborted'));
   });
 }
 
@@ -322,11 +319,18 @@ export async function deletePages(urls: string[]): Promise<number> {
   if (!urls.length) return 0;
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(PAGES_STORE, 'readwrite');
+    const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, PROCESSING_STORE, HIGHLIGHTS_STORE], 'readwrite');
     const store = tx.objectStore(PAGES_STORE);
+    tx.objectStore(HIGHLIGHTS_STORE).clear();
     for (const url of urls) {
-      const req = store.delete(url);
-      req.onerror = () => reject(req.error);
+      store.delete(url);
+      tx.objectStore(PROCESSING_STORE).delete(url);
+      const cursor = tx.objectStore(EMBEDDINGS_STORE).index('pageUrl').openCursor(IDBKeyRange.only(url));
+      cursor.onsuccess = () => {
+        if (!cursor.result) return;
+        cursor.result.delete();
+        cursor.result.continue();
+      };
     }
     tx.oncomplete = () => resolve(urls.length);
     tx.onerror = () => reject(tx.error);

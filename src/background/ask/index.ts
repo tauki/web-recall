@@ -1,7 +1,7 @@
 import { storageManager } from '../storage/manager';
 import { searchStoredPages } from '../search/index';
 import { ToolsRuntime, type ToolMetric } from '../../shared/tools/index';
-import { callChat, callChatJson, getChatConfig, type ChatConfig } from '../providers/chat';
+import { callChat, callChatJson, getChatConfig, normalizeToolArguments, streamChat, type ChatConfig } from '../providers/chat';
 import { getSettings } from '../settings/index';
 import { getCalibrationSnapshot } from '../calibration/index';
 
@@ -11,6 +11,8 @@ export type AskSource = {
   url: string;
   snippet: string;
   domain: string;
+  evidence?: string;
+  excerpts?: string[];
 };
 
 export type AskResponse = {
@@ -30,7 +32,7 @@ type ToolCall = {
   type?: string;
   function?: {
     name?: string;
-    arguments?: string;
+    arguments?: string | Record<string, unknown>;
   };
 };
 
@@ -50,7 +52,7 @@ type ToolDefinition = {
 type ChatMessage = {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
-  name?: string;
+  tool_name?: string;
   tool_calls?: ToolCall[];
 };
 
@@ -88,7 +90,7 @@ function selectContextExcerpt(
   const chunkText = directChunkText || fallbackChunkText;
   const preferred = chunkText || hit.snippet || record?.text || record?.summary || '';
   const normalized = preferred.replace(/\s+/g, ' ').trim();
-  return normalized.slice(0, Math.min(contextLimit, 1200));
+  return normalized.slice(0, contextLimit);
 }
 
 function heuristicDecompose(question: string): string[] {
@@ -231,6 +233,7 @@ async function fetchPageContext(
       title: record?.title || hit.title || hit.url,
       url: hit.url,
       snippet,
+      evidence: contextText,
       domain
     }
   };
@@ -248,10 +251,11 @@ async function buildContextFromSources(sources: AskSource[], contextLimit: numbe
   const blocks = await Promise.all(
     sources.map(async (source) => {
       const record = await storageManager.getPageRecord(source.url);
-      const text = (record?.chunks?.find((chunk) => (chunk.text || '').trim())?.text || source.snippet || record?.text || record?.summary || '')
+      const excerpts = source.excerpts || [source.evidence || source.snippet || record?.text || record?.summary || ''];
+      const text = excerpts.map((excerpt) => excerpt.slice(0, Math.floor(contextLimit / excerpts.length))).join('\n')
         .replace(/\s+/g, ' ')
         .trim()
-        .slice(0, Math.min(contextLimit, 1200));
+        .slice(0, contextLimit);
       return `[${source.index}] Title: ${record?.title || source.title}\n${text.slice(0, contextLimit)}`;
     })
   );
@@ -344,7 +348,7 @@ function resolveToolStepBudget(maxToolSteps: number): number {
   return Math.max(1, Math.min(Math.round(maxToolSteps), MAX_INTERNAL_TOOL_STEPS));
 }
 
-async function createToolsRuntime(toolTimeoutMs: number): Promise<ToolsRuntime | null> {
+async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], contextLimit: number): Promise<ToolsRuntime | null> {
   try {
     const pages = await storageManager.listAllPages();
     const pageText = new Map<string, string>();
@@ -363,7 +367,18 @@ async function createToolsRuntime(toolTimeoutMs: number): Promise<ToolsRuntime |
       pages,
       searchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false }),
       quickSearchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false }),
-      toolTimeoutMs
+      toolTimeoutMs,
+      recordEvidence: (url, text) => {
+        let source = sources.find((entry) => entry.url === url);
+        if (!source) {
+          const page = pages.find((entry) => entry.url === url);
+          source = { index: sources.length + 1, url, title: page?.title || url, domain: new URL(url).hostname, snippet: summarizeSnippet(text), evidence: text.slice(0, contextLimit) };
+          sources.push(source);
+        } else if (text && !(source.evidence || '').includes(text)) {
+          source.excerpts = [...new Set([...(source.excerpts || [source.evidence || source.snippet]), text])];
+        }
+        return source.index;
+      }
     });
   } catch (err) {
     console.warn('[beta-background:ask] tools runtime unavailable', err);
@@ -435,6 +450,7 @@ async function composeAnswerFromContext(params: {
   notes?: string;
   answerStyle: 'concise' | 'detailed';
   retryStrict?: boolean;
+  requestId?: string;
 }): Promise<string> {
   const { config, question, contextBlocks, notes, answerStyle, retryStrict } = params;
   const systemPrompt =
@@ -444,16 +460,14 @@ async function composeAnswerFromContext(params: {
       answerStyle === 'detailed' ? 'detailed' : 'concise'
     } response while remaining faithful to the sources.`;
   const userPrompt = `Question: ${question}\n\nSources:\n${contextBlocks}${notes ? `\n\nAnalyst notes:\n${notes}` : ''}\n\nWrite the final answer with [n] citations.`;
-  const response = await callChat(config, {
+  return streamChat(config, {
     model: config.model,
-    stream: false,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
     ],
     options: { temperature: 0.2 }
-  });
-  return (response.message?.content || '').trim();
+  }, (text) => sendAnswerUpdate(text, params.requestId));
 }
 
 async function synthesizeGroundedAnswer(params: {
@@ -463,26 +477,30 @@ async function synthesizeGroundedAnswer(params: {
   notes?: string;
   answerStyle: 'concise' | 'detailed';
   sources: AskSource[];
+  requestId?: string;
 }): Promise<string> {
   const firstPass = await composeAnswerFromContext({
     config: params.config,
     question: params.question,
     contextBlocks: params.contextBlocks,
     notes: params.notes,
-    answerStyle: params.answerStyle
+    answerStyle: params.answerStyle,
+    requestId: params.requestId
   });
   if (firstPass.trim() && hasValidCitations(firstPass, params.sources)) {
     return firstPass;
   }
+  sendAnswerUpdate('', params.requestId);
   const retry = await composeAnswerFromContext({
     config: params.config,
     question: params.question,
     contextBlocks: params.contextBlocks,
     notes: params.notes,
     answerStyle: params.answerStyle,
+    requestId: params.requestId,
     retryStrict: true
   });
-  return retry.trim();
+  return hasValidCitations(retry, params.sources) ? retry.trim() : 'I could not verify the references for this answer. Please try again.';
 }
 
 function buildFallbackAnswer(sources: AskSource[]): string {
@@ -533,7 +551,7 @@ async function runExtractionWithTools(params: {
     });
     const toolCalls = resp.message?.tool_calls || [];
     content = resp.message?.content || content;
-    if (!toolCalls.length || step === steps - 1) {
+    if (!toolCalls.length) {
       return { notes: content || fallbackBulletsFromSources(sources), metrics: runtime.metrics, usedUrls: Array.from(runtime.usedUrlOrder) };
     }
     messages = [...messages, { role: 'assistant', content: resp.message?.content || '', tool_calls: toolCalls }];
@@ -542,9 +560,10 @@ async function runExtractionWithTools(params: {
       if (!name) continue;
       let args: Record<string, unknown> = {};
       try {
-        args = call.function?.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+        args = normalizeToolArguments(call.function?.arguments);
       } catch (err) {
-        console.warn('[beta-background:ask] unable to parse tool args', err);
+        messages.push({ role: 'tool', tool_name: name, content: JSON.stringify({ ok: false, error: String(err) }) });
+        continue;
       }
       sendProgress(`Tool: ${name}`, requestId);
       try {
@@ -552,40 +571,14 @@ async function runExtractionWithTools(params: {
           name as 'fetch_more' | 'get_page_summary' | 'search_memory' | 'get_page_chunks' | 'search_within_page',
           args
         );
-        messages.push({ role: 'tool', name, content: String(result.content || '') });
+        messages.push({ role: 'tool', tool_name: name, content: String(result.content || '') });
       } catch (err) {
-        messages.push({ role: 'tool', name, content: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) });
+        messages.push({ role: 'tool', tool_name: name, content: JSON.stringify({ ok: false, error: err instanceof Error ? err.message : String(err) }) });
       }
     }
-    messages.push({ role: 'user', content: 'Update the analyst notes based on tool results. Keep citations as [n] and keep the coverage line.' });
+    messages.push({ role: 'user', content: 'Update the analyst notes based on tool results. Use the sourceIndex returned by tools for [n] citations and keep the coverage line.' });
   }
   return { notes: content || fallbackBulletsFromSources(sources), metrics: runtime.metrics, usedUrls: Array.from(runtime.usedUrlOrder) };
-}
-
-async function mergeToolSources(sources: AskSource[], usedUrls: string[], contextLimit: number): Promise<AskSource[]> {
-  if (!usedUrls.length) return sources;
-  const known = new Map(sources.map((source) => [source.url, source]));
-  let cursor = sources.reduce((max, s) => Math.max(max, s.index || 0), sources.length);
-  for (const url of usedUrls) {
-    if (known.has(url)) continue;
-    const record = await storageManager.getPageRecord(url);
-    cursor += 1;
-    let domain = '';
-    try {
-      domain = new URL(url).hostname;
-    } catch {
-      domain = url;
-    }
-    const snippet = summarizeSnippet(record?.summary || record?.text || '', Math.min(DEFAULT_SNIPPET_CHARS, contextLimit));
-    known.set(url, {
-      index: cursor,
-      title: record?.title || url,
-      url,
-      snippet,
-      domain
-    });
-  }
-  return Array.from(known.values()).sort((a, b) => a.index - b.index);
 }
 
 function filterSourcesByCitations(sources: AskSource[], answerText: string): AskSource[] {
@@ -596,25 +589,18 @@ function filterSourcesByCitations(sources: AskSource[], answerText: string): Ask
     const num = Number(match[1]);
     if (!Number.isNaN(num) && num > 0) cited.add(num - 1);
   }
-  if (!cited.size) return sources;
+  if (!cited.size) return [];
   const citedByIndex = new Set(
     Array.from(cited)
       .map((zeroBased) => zeroBased + 1) // stored index values are 1-based
       .filter((num) => sources.some((s) => s.index === num))
   );
-  if (!citedByIndex.size) return sources;
+  if (!citedByIndex.size) return [];
   const picked: AskSource[] = [];
   sources.forEach((source) => {
     if (citedByIndex.has(source.index)) picked.push(source);
   });
-  return picked.length ? picked : sources;
-}
-
-function filterSourcesByUsedUrls(sources: AskSource[], usedUrls: string[]): AskSource[] {
-  if (!usedUrls.length) return sources;
-  const usedSet = new Set(usedUrls);
-  const ordered = sources.filter((source) => usedSet.has(source.url));
-  return ordered.length ? ordered : sources;
+  return picked;
 }
 
 function hasValidCitations(answerText: string, sources: AskSource[]): boolean {
@@ -624,10 +610,8 @@ function hasValidCitations(answerText: string, sources: AskSource[]): boolean {
   let found = false;
   while ((match = citationPattern.exec(answerText))) {
     const num = Number(match[1]);
-    if (valid.has(num)) {
-      found = true;
-      break;
-    }
+    if (!valid.has(num)) return false;
+    found = true;
   }
   return found;
 }
@@ -673,7 +657,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
     | { notes: string; metrics: ToolMetric[]; usedUrls: string[] }
     | null = null;
   if (useToolAugmentation) {
-    const runtime = await createToolsRuntime(toolTimeoutMs);
+    const runtime = await createToolsRuntime(toolTimeoutMs, sources, contextLimit);
     sendProgress('Running tool-augmented extraction…', requestId);
     extraction = await runExtractionWithTools({
       config,
@@ -697,7 +681,7 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   let answer = '';
   sendProgress('Composing final answer…', requestId);
   try {
-    const mergedSources = await mergeToolSources(sources, extraction?.usedUrls || [], contextLimit);
+    const mergedSources = sources;
     const mergedBlocks = await buildContextFromSources(mergedSources, contextLimit);
     answer = await synthesizeGroundedAnswer({
       config,
@@ -705,15 +689,13 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
       contextBlocks: mergedBlocks,
       notes: extraction ? stripCoverageLine(extraction.notes) : undefined,
       answerStyle: answerMode,
-      sources: mergedSources
+      sources: mergedSources,
+      requestId
     });
     if (!answer.trim()) {
       answer = buildFallbackAnswer(mergedSources);
     }
-    const filteredSources = filterSourcesByCitations(
-      filterSourcesByUsedUrls(mergedSources, extraction?.usedUrls || []),
-      answer
-    );
+    const filteredSources = filterSourcesByCitations(mergedSources, answer);
     sendAnswerUpdate(answer, requestId);
     sendProgress('Answer ready.', requestId);
     return {
@@ -729,6 +711,6 @@ export async function handleAskQuestion(question: string, options?: AskOptions):
   sendProgress('Answer ready.', requestId);
   return {
     answer,
-    sources
+    sources: filterSourcesByCitations(sources, answer)
   };
 }

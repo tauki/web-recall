@@ -1,46 +1,44 @@
-import { computeEmbeddingsForChunks } from './index';
-import { storageManager, type PageChunkRecord, type PageRecord } from '../storage/manager';
+import { computeEmbeddingsForChunks, getEmbeddingConfig } from './index';
+import { embeddingSpaceKey } from '../../shared/config/index';
+import { storageManager, type PageRecord } from '../storage/manager';
+import { invalidateOffscreenIndex } from '../offscreen/index';
 import { log } from '../../shared/logger/index';
-
-function needsEmbedding(page: PageRecord): boolean {
-  return !Array.isArray(page.chunks) || page.chunks.some((chunk) => !Array.isArray(chunk.embedding) || chunk.embedding.length === 0);
-}
 
 export async function backfillMissingEmbeddings(
   limit = 50,
   force = false,
   urls?: string[]
-): Promise<{ processed: number; updated: number; updatedUrls: string[] }> {
+): Promise<{ processed: number; updated: number; failed: number; updatedUrls: string[] }> {
   const pages = await storageManager.listAllPages();
-  const urlList = Array.isArray(urls) ? urls.filter((url) => typeof url === 'string' && url.length > 0) : [];
-  const urlSet = urlList.length ? new Set(urlList) : null;
-  const filtered = urlSet ? pages.filter((page) => urlSet.has(page.url)) : pages;
-  const ordered = urlList.length
-    ? urlList.map((url) => filtered.find((page) => page.url === url)).filter((page): page is PageRecord => Boolean(page))
-    : filtered;
-  const targets = ordered.filter((page) => (force ? true : needsEmbedding(page))).slice(0, limit);
-  let updated = 0;
+  const ordered = urls === undefined ? pages : [...new Set(urls)].map((url) => pages.find((page) => page.url === url))
+    .filter((page): page is PageRecord => Boolean(page));
+  const targets = ordered.filter((page) => page.chunks?.some((chunk) => force || !chunk.embedding?.length))
+    .slice(0, Math.max(0, Math.floor(limit)));
   const updatedUrls: string[] = [];
+  let failed = 0;
   for (const page of targets) {
-    const texts = (page.chunks || []).map((chunk) => chunk.text || '');
-    if (!texts.length) continue;
+    const indices = page.chunks.map((_, index) => index).filter((index) => force || !page.chunks[index]!.embedding?.length);
+    const key = embeddingSpaceKey(getEmbeddingConfig());
     try {
-      const embeddings = await computeEmbeddingsForChunks(texts);
-      const chunks: PageChunkRecord[] = texts.map((text, idx) => ({
-        text,
-        embedding: embeddings[idx] || []
-      }));
-      await storageManager.savePageRecord({
-        ...page,
-        chunks,
-        lastEmbeddedAt: Date.now()
-      });
-      updated += 1;
+      const embeddings = await computeEmbeddingsForChunks(indices.map((index) => page.chunks[index]!.text));
+      if (key !== embeddingSpaceKey(getEmbeddingConfig())) throw new Error('Embedding settings changed; retry this page.');
+      if (embeddings.length !== indices.length || embeddings.some((vector) => !vector.length || !vector.every(Number.isFinite)) ||
+          embeddings.some((vector) => vector.length !== embeddings[0]!.length)) {
+        throw new Error('Incomplete embedding response; existing vectors were preserved.');
+      }
+      // Do not resurrect a deleted page or overwrite a capture completed during inference.
+      const latest = await storageManager.getPageRecord(page.url);
+      if (!latest || latest.updatedAt !== page.updatedAt) throw new Error('Page changed during backfill; retry with the latest capture.');
+      const chunks = page.chunks.map((chunk) => ({ ...chunk }));
+      indices.forEach((index, offset) => { chunks[index] = { ...chunks[index]!, embedding: embeddings[offset]!, embeddingKey: key }; });
+      await storageManager.savePageRecord({ ...page, chunks, lastEmbeddedAt: Date.now() }, { expectedUpdatedAt: page.updatedAt });
+      await invalidateOffscreenIndex();
       updatedUrls.push(page.url);
-      await log('info', 'backfill embeddings updated page', { url: page.url, chunkCount: chunks.length });
+      await log('info', 'backfill embeddings updated page', { url: page.url, chunkCount: indices.length });
     } catch (err) {
+      failed += 1;
       await log('warn', 'backfill embeddings failed', { url: page.url, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { processed: targets.length, updated, updatedUrls };
+  return { processed: targets.length, updated: updatedUrls.length, failed, updatedUrls };
 }

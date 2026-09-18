@@ -17,6 +17,7 @@ export type ToolsRuntimeOptions = {
   pages: PageRecord[];
   maxSlice?: number;
   toolTimeoutMs?: number;
+  recordEvidence?: (url: string, text: string) => number;
   searchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
   quickSearchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
 };

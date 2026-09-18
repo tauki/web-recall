@@ -56,3 +56,10 @@ export const DEFAULT_EMBEDDING_CONFIG: EmbeddingConfig = {
   browserModel: 'onnx-community/embeddinggemma-300m-ONNX',
   browserRevision: '75a84c732f1884df76bec365346230e32f582c82'
 };
+
+// Model spaces cannot be mixed even when vector dimensions happen to match.
+export function embeddingSpaceKey(config: EmbeddingConfig): string {
+  return config.provider === 'browser'
+    ? JSON.stringify(['browser', config.browserModel, config.browserRevision, 'q8', 'embeddinggemma-prefix-v1'])
+    : JSON.stringify(['ollama', config.baseUrl, config.model]);
+}

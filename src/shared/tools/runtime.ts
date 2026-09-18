@@ -34,11 +34,13 @@ export class ToolsRuntime implements ToolsHandlerContext {
   metrics: ToolMetric[] = [];
   usedUrls = new Set<string>();
   usedUrlOrder: string[] = [];
+  private recordEvidence?: ToolsRuntimeOptions['recordEvidence'];
 
   constructor(opts: ToolsRuntimeOptions) {
     this.allowedUrls = opts.allowedUrls || new Set();
     this.pageText = opts.pageText || new Map();
     this.pages = opts.pages || [];
+    this.recordEvidence = opts.recordEvidence;
     this.maxSlice = typeof opts.maxSlice === 'number' ? opts.maxSlice : DEFAULT_MAX_SLICE;
     this.toolTimeoutMs = typeof opts.toolTimeoutMs === 'number' ? opts.toolTimeoutMs : DEFAULT_TOOL_TIMEOUT_MS;
     this.searchMemory = opts.searchMemory;
@@ -195,6 +197,19 @@ export class ToolsRuntime implements ToolsHandlerContext {
       this.metrics.push({ name, ms: elapsed, ok, error: error?.code });
     }
 
+    if (ok && this.recordEvidence) {
+      const payload = JSON.parse(content);
+      const rows = Array.isArray(payload.data) ? payload.data : [payload.data];
+      for (const row of rows) {
+        if (!row || typeof row !== 'object') continue;
+        const url = row.url || payload.usedArgs?.url;
+        if (typeof url !== 'string' || !this.allowedUrls.has(url)) continue;
+        const text = row.text || row.summary || row.snippet ||
+          (row.matches || row.chunks || []).map((item: { snippet?: string; preview?: string }) => item.snippet || item.preview || '').join('\n');
+        row.sourceIndex = this.recordEvidence(url, String(text || ''));
+      }
+      content = JSON.stringify(payload);
+    }
     return { content };
   }
 }

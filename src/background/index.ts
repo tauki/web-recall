@@ -36,14 +36,14 @@ let sidePanelListenersBound = false;
 
 function ensureSidePanelTracking(): void {
   if (sidePanelListenersBound || !chrome.sidePanel) return;
-  if (!chrome.sidePanel.onShown || !chrome.sidePanel.onHidden) return;
+  if (!chrome.sidePanel.onOpened || !chrome.sidePanel.onClosed) return;
   try {
-    chrome.sidePanel.onShown.addListener((event: SidePanelVisibilityEvent) => {
+    chrome.sidePanel.onOpened.addListener((event: SidePanelVisibilityEvent) => {
       if (typeof event.windowId === 'number') {
         openPanelWindows.add(event.windowId);
       }
     });
-    chrome.sidePanel.onHidden.addListener((event: SidePanelVisibilityEvent) => {
+    chrome.sidePanel.onClosed.addListener((event: SidePanelVisibilityEvent) => {
       if (typeof event.windowId === 'number') {
         openPanelWindows.delete(event.windowId);
       }
@@ -175,15 +175,9 @@ function setupCommands(): void {
 }
 
 function setupActionToggle(): void {
-  if (!chrome.action || !chrome.sidePanel) return;
-  chrome.action.onClicked.addListener(async (tab: TabLike | undefined) => {
-    const windowId = tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT;
-    try {
-      await toggleSidePanel(windowId);
-    } catch (err) {
-      console.warn('[beta-background] action toggle failed', err);
-    }
-  });
+  // Chrome owns toolbar toggling; lifecycle events keep shortcut state in sync.
+  void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
+  ensureSidePanelTracking();
 }
 
 setupContextMenus();

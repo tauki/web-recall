@@ -24,10 +24,27 @@ function normalizePayload(message: Record<string, unknown>): CapturePayload {
   };
 }
 
+const cancelHandlers = new Set<(urls: string[]) => void>();
+export function cancelCaptureJobs(urls: string[]): void {
+  cancelHandlers.forEach((cancel) => cancel(urls));
+}
+
 export function createCaptureQueue(processFn = processCapturePayload) {
   const queue: QueueItem[] = [];
   const enqueuedUrls = new Set<string>();
   let currentUrl: string | null = null;
+  let currentItem: QueueItem | undefined;
+  const cancelled = new WeakSet<QueueItem>();
+  cancelHandlers.add((urls) => {
+    const targets = new Set(urls);
+    if (currentItem && targets.has(currentItem.url)) cancelled.add(currentItem);
+    for (let index = queue.length - 1; index >= 0; index--) {
+      if (targets.has(queue[index]!.url)) {
+        enqueuedUrls.delete(queue[index]!.url);
+        queue.splice(index, 1);
+      }
+    }
+  });
   let processing = false;
   let processedCount = 0;
   let failedCount = 0;
@@ -60,12 +77,14 @@ export function createCaptureQueue(processFn = processCapturePayload) {
         if (!item) break;
         enqueuedUrls.delete(item.url);
         currentUrl = item.url;
-        await markProcessing(item.payload, item.attempts);
-        if (item.delayMs > 0) {
-          await sleep(item.delayMs);
-        }
+        currentItem = item;
         try {
-          await processFn(item.payload);
+          if (item.delayMs > 0) await sleep(item.delayMs);
+          if (cancelled.has(item)) continue;
+          await markProcessing(item.payload, item.attempts);
+          if (cancelled.has(item)) continue;
+          await processFn(item.payload, () => !cancelled.has(item));
+          if (cancelled.has(item)) continue;
           processedCount += 1;
           const includeBodies = getCachedSettingsSnapshot().logFullBodies;
           await log('info', 'capture processed', {
@@ -74,8 +93,11 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             chunkCount: item.payload.chunks.length,
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
-          await markDone(item.url);
+          const replacement = queue.find((entry) => entry.url === item.url);
+          if (replacement) await markQueued(replacement.payload, replacement.attempts);
+          else await markDone(item.url);
         } catch (err) {
+          if (cancelled.has(item)) continue;
           const includeBodies = getCachedSettingsSnapshot().logFullBodies;
           await log('error', 'capture failed', {
             url: item.url,
@@ -100,6 +122,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
           }
         } finally {
           currentUrl = null;
+          currentItem = undefined;
           logQueueState('after-iteration', { lastProcessed: item.url });
         }
       }
@@ -108,20 +131,37 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     }
   }
 
-  function enqueue(payload: CapturePayload, delayMs = 0): void {
-    if (!payload.url) return;
-    const existing = queue.find((it) => it.url === payload.url);
-    if (existing) {
-      existing.payload = payload;
-      existing.delayMs = Math.max(existing.delayMs, delayMs);
-      existing.attempts = 0;
-      return;
+  const ready = (async () => {
+    const entries = await listProcessingEntries();
+    for (const entry of entries) {
+      if (!entry.payload || (entry.status !== 'queued' && entry.status !== 'processing')) continue;
+      queue.push({ url: entry.url, payload: entry.payload, attempts: entry.attempts, delayMs: 0 });
+      enqueuedUrls.add(entry.url);
     }
-    queue.push({ url: payload.url, payload, delayMs, attempts: 0 });
-    enqueuedUrls.add(payload.url);
-    void markQueued(payload, 0);
-    void runQueue();
-    logQueueState('enqueue');
+  })();
+  void ready.then(runQueue).catch((err) => console.error('[capture] recovery failed', err));
+  let enqueueTail: Promise<void> = Promise.resolve();
+
+  function enqueue(payload: CapturePayload, delayMs = 0): Promise<void> {
+    const operation = enqueueTail.then(async () => {
+      await ready;
+      if (!payload.url) throw new Error('Capture URL is required');
+      // ACK only after the durable job exists. A restart can recover it from here.
+      await markQueued(payload, 0);
+      const existing = queue.find((item) => item.url === payload.url);
+      if (existing) {
+        existing.payload = payload;
+        existing.delayMs = Math.max(existing.delayMs, delayMs);
+        existing.attempts = 0;
+      } else {
+        queue.push({ url: payload.url, payload, delayMs, attempts: 0 });
+        enqueuedUrls.add(payload.url);
+      }
+      void runQueue().catch((err) => console.error('[capture] worker failed', err));
+      logQueueState('enqueue');
+    });
+    enqueueTail = operation.catch(() => {});
+    return operation;
   }
 
   async function requeueProcessing(urls: string[]): Promise<{ retried: number }> {
@@ -130,7 +170,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       try {
         const entry = await getProcessingEntryByUrl(url);
         if (entry?.payload) {
-          enqueue({
+          await enqueue({
             url: entry.payload.url,
             title: entry.payload.title,
             timestamp: entry.payload.timestamp,
@@ -153,10 +193,8 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       if (!message || typeof message !== 'object') return false;
       if (message.type === 'SAVE_PAGE') {
         const payload = normalizePayload(message);
-        enqueue(payload);
-        if (typeof sendResponse === 'function') {
-          sendResponse({ status: 'queued' });
-        }
+        void enqueue(payload).then(() => sendResponse?.({ status: 'queued' }))
+          .catch((err) => sendResponse?.({ error: err instanceof Error ? err.message : String(err) }));
         return true;
       }
       if (message.type === 'SHOULD_CAPTURE') {
@@ -199,6 +237,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
 
   return {
     enqueue,
+    ready,
     bindRuntimeListener,
     isProcessing: () => processing,
     peekQueue: (): readonly QueueItem[] => queue

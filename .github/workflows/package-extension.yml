@@ -1,6 +1,7 @@
 name: Package Extension
 
 on:
+  pull_request:
   workflow_dispatch:
   push:
     tags:
@@ -17,19 +18,24 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build:beta
+
       - name: Read extension version
         id: meta
         run: |
           VERSION=$(jq -r '.version' manifest.json)
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Create dist directory
-        run: mkdir -p dist
-
       - name: Package extension
-        run: |
-          zip -r dist/web-recall-${{ steps.meta.outputs.version }}.zip . \
-            -x "node_modules/*" "dist/*" ".github/*" ".git/*"
+        run: pnpm package:extension
 
       - name: Generate checksum
         run: shasum -a 256 dist/web-recall-${{ steps.meta.outputs.version }}.zip > dist/web-recall-${{ steps.meta.outputs.version }}.sha256

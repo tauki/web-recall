@@ -10,13 +10,14 @@ export type ChatConfig = {
 };
 
 export type ChatResponse = {
+  error?: string;
   message?: {
     content?: string;
     tool_calls?: Array<{
       type?: string;
       function?: {
         name?: string;
-        arguments?: string;
+        arguments?: string | Record<string, unknown>;
       };
     }>;
   };
@@ -30,7 +31,11 @@ export type ChatProbeResult = {
 };
 
 const DEFAULT_CHAT_MODEL = 'llama3.1';
-const textDecoder = new TextDecoder();
+export function normalizeToolArguments(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Tool arguments must be an object');
+  return parsed as Record<string, unknown>;
+}
 
 function normalizeProviderId(providerId: string | undefined): string {
   return providerId === 'ollama' ? providerId : DEFAULT_SETTINGS.activeProviderId;
@@ -70,6 +75,7 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
   try {
     const resp = await fetch(`${config.baseUrl}/api/chat`, {
       method: 'POST',
+    signal: AbortSignal.timeout(300_000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: config.model,
@@ -108,6 +114,7 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
   const resp = await fetch(`${config.baseUrl}/api/chat`, {
     method: 'POST',
+    signal: AbortSignal.timeout(300_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body)
   });
@@ -143,9 +150,11 @@ export async function streamChat(
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void
 ): Promise<string> {
+  const textDecoder = new TextDecoder();
   let assembled = '';
   const resp = await fetch(`${config.baseUrl}/api/chat`, {
     method: 'POST',
+    signal: AbortSignal.timeout(300_000),
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ ...body, stream: true })
   });
@@ -153,39 +162,30 @@ export async function streamChat(
     throw new Error(`Streaming chat failed (${resp.status})`);
   }
   const reader = resp.body.getReader();
+  const acceptLine = (line: string): void => {
+    if (!line.trim()) return;
+    const payload = JSON.parse(line) as ChatResponse;
+    if (payload.error) throw new Error(payload.error);
+    const chunk = payload.message?.content || '';
+    if (chunk) {
+      assembled += chunk;
+      onChunk(assembled);
+    }
+  };
   let buffer = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += textDecoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    for (const line of lines) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        const payload = JSON.parse(trimmed) as ChatResponse;
-        const chunk = payload.message?.content || '';
-        if (!chunk) continue;
-        assembled += chunk;
-        onChunk(assembled);
-      } catch {
-        // Ignore malformed chunks.
-      }
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += textDecoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      lines.forEach(acceptLine);
     }
+    acceptLine(buffer + textDecoder.decode());
+    return assembled;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
   }
-  const trailing = buffer.trim();
-  if (trailing) {
-    try {
-      const payload = JSON.parse(trailing) as ChatResponse;
-      const chunk = payload.message?.content || '';
-      if (chunk) {
-        assembled += chunk;
-        onChunk(assembled);
-      }
-    } catch {
-      // Ignore trailing malformed chunk.
-    }
-  }
-  return assembled;
 }

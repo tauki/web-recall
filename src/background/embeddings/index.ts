@@ -234,9 +234,9 @@ export function getEmbeddingConfig(): EmbeddingConfig {
 
 export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): Promise<void> {
   const nextConfig: EmbeddingConfig = {
-    baseUrl: sanitizeBaseUrl(partial.baseUrl) || currentConfig.baseUrl,
+    baseUrl: partial.baseUrl === undefined ? currentConfig.baseUrl : sanitizeBaseUrl(partial.baseUrl),
     model: partial.model || currentConfig.model,
-    provider: partial.provider === 'browser' ? 'browser' : currentConfig.provider || 'ollama',
+    provider: partial.provider ?? currentConfig.provider ?? 'ollama',
     browserModel: partial.browserModel || currentConfig.browserModel,
     browserRevision: partial.browserRevision || currentConfig.browserRevision,
     updatedAt: new Date().toISOString()
@@ -334,6 +334,10 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
       model: currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
       revision: currentConfig.browserRevision || DEFAULT_BROWSER_REVISION
     });
+    if (!Array.isArray(response.embeddings) || response.embeddings.length !== chunks.length ||
+        response.embeddings.some((vector) => !vector.length || !vector.every(Number.isFinite))) {
+      throw new Error('Browser model returned incomplete embeddings');
+    }
     if (!browserEmbedReady) {
       setBrowserEmbedReady(true);
       updateBrowserEmbedStatus({
@@ -347,6 +351,7 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
     return Array.isArray(response.embeddings) ? response.embeddings : [];
   } catch (err) {
     const failure = classifyBrowserEmbedFailure(err);
+    setBrowserEmbedReady(false);
     updateBrowserEmbedStatus({
       ready: false,
       runtimeAvailable: failure.code !== 'runtime_unavailable' && failure.code !== 'offscreen_unavailable',

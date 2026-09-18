@@ -1,6 +1,7 @@
+import { embeddingSpaceKey } from '../../shared/config/index';
 import { storageManager, type PageRecord } from '../storage/manager';
 import { getCalibrationSnapshot } from '../calibration/index';
-import { computeEmbeddingsForQueries } from '../embeddings/index';
+import { computeEmbeddingsForQueries, getEmbeddingConfig } from '../embeddings/index';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import { callChat, callChatJson, getChatConfig } from '../providers/chat';
 import { getSettings } from '../settings/index';
@@ -178,7 +179,8 @@ async function enrichRerankCandidates(
     candidates.map(async (candidate) => {
       const record = await storageManager.getPageRecord(candidate.url);
       const richerExcerpt = (
-        record?.chunks?.find((chunk) => (chunk.text || '').trim())?.text ||
+        (typeof candidate.chunkIndex === 'number' ? record?.chunks?.[candidate.chunkIndex]?.text : '') ||
+        candidate.snippet ||
         record?.text ||
         candidate.snippet ||
         ''
@@ -391,7 +393,9 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
   const normalized = query.trim();
   if (!normalized) return [];
   const variations = await generateQueryVariations(normalized, 3, options);
+  const embeddingKey = embeddingSpaceKey(getEmbeddingConfig());
   const embeddings = await computeEmbeddingsForQueries(variations).catch(() => []);
+  if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit);
   const validEmbeddings = embeddings.filter((emb) => Array.isArray(emb) && emb.length);
   if (!validEmbeddings.length) {
     return fallbackSearch(normalized, limit);
@@ -402,6 +406,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
     const topResp = await sendOffscreenMessage<OffscreenTopPageResponse>({
       type: 'OFFSCREEN_TOP_PAGES',
       variationEmbeddings: validEmbeddings,
+      embeddingKey,
       topN: Math.max(limit * 3, 30)
     });
     const pageUrls = (topResp.pages || []).map((p) => p.url);
@@ -410,6 +415,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       type: 'OFFSCREEN_SCORE_CHUNKS',
       pageUrls,
       variationEmbeddings: validEmbeddings,
+      embeddingKey,
       originalQuery: normalized
     });
     const candidates = chunkResp.candidates || [];
