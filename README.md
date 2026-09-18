@@ -109,7 +109,7 @@ Setup
 
 6. Manage & inspect captures
 
-   - **Memory Manager**: open `chrome://extensions`, click **Details** on Web Recall, then **Extension options**. Search, sort, delete, import, export, and re-embed stored pages. Exports follow `docs/Pack.md` (schema v1).
+   - **Memory Manager**: open `chrome://extensions`, click **Details** on Web Recall, then **Extension options**. Search, sort, delete, import, export, and re-embed stored pages. See [Export/Import](#exportimport) for the JSON format.
    - **Highlights dashboard**: navigate to `chrome-extension://<EXTENSION_ID>/dist/beta/ui/highlights/index.html` to review daily summaries.
    - **Logs viewer**: visit `chrome-extension://<EXTENSION_ID>/dist/beta/ui/logs/index.html` to inspect structured background logs.
 
@@ -174,6 +174,6 @@ Limitations
 
 Export/Import
 -------------
-- Export creates a JSON object with `schemaVersion: 1`, `exportedAt`, optional `embeddingMeta { model, dim }`, and `pages: []`.
-- Import accepts legacy arrays or the v1 object. If a file declares a newer schemaVersion, import is best-effort.
-- Embedding compatibility: if stored embedding dimension differs from imported items, incompatible items/versions are skipped and reported after import.
+- Export creates a JSON object with `schemaVersion: 1`, an `exportedAt` timestamp, and a `pages` array containing the stored page records and their chunks.
+- Import accepts legacy page arrays or an object with a `pages` array. A numeric `schemaVersion`, when provided, must be `1`; other versions are rejected.
+- Imported vectors are preserved. Pages with missing embeddings or a different/unknown embedding model need to be re-embedded before semantic search can use them.
