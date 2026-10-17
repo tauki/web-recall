@@ -90,6 +90,9 @@ function updateBrowserEmbedStatus(
 function classifyBrowserEmbedFailure(err: unknown): { code: NonNullable<BrowserEmbedStatus['code']>; message: string } {
   const message = err instanceof Error ? err.message : String(err);
   const normalized = message.toLowerCase();
+  if (normalized.includes('webgpu')) {
+    return { code: 'runtime_unavailable', message: 'EmbeddingGemma 2 requires WebGPU. Choose EmbeddingGemma 300M to use browser embeddings on this device.' };
+  }
   if (normalized.includes('onnx wasm backend')) {
     return {
       code: 'runtime_unavailable',
@@ -151,7 +154,7 @@ export async function probeBrowserEmbeddingRuntime(options?: { model?: string; r
   );
   try {
     await ensureOffscreenDocument();
-    await sendOffscreenMessage<{ runtimeAvailable: boolean }>({ type: 'OFFSCREEN_EMBED_CAPABILITIES' });
+    await sendOffscreenMessage<{ runtimeAvailable: boolean }>({ type: 'OFFSCREEN_EMBED_CAPABILITIES', model });
     return updateBrowserEmbedStatus(
       {
         runtimeAvailable: true,
@@ -319,7 +322,11 @@ async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<
 }
 
 async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<number[][]> {
+  const model = currentConfig.browserModel || DEFAULT_BROWSER_MODEL;
+  const revision = currentConfig.browserRevision || DEFAULT_BROWSER_REVISION;
+  const isCurrentModel = (): boolean => model === currentConfig.browserModel && revision === currentConfig.browserRevision;
   const runtimeStatus = await probeBrowserEmbeddingRuntime();
+  if (!isCurrentModel()) throw new Error('Embedding settings changed; retry with the selected model.');
   if (!runtimeStatus.runtimeAvailable) {
     throw new Error(runtimeStatus.lastError || 'Browser embedding runtime is unavailable.');
   }
@@ -331,9 +338,10 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
       type: 'OFFSCREEN_EMBED',
       inputs: chunks,
       prefix,
-      model: currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
-      revision: currentConfig.browserRevision || DEFAULT_BROWSER_REVISION
+      model,
+      revision
     });
+    if (!isCurrentModel()) throw new Error('Embedding settings changed; retry with the selected model.');
     if (!Array.isArray(response.embeddings) || response.embeddings.length !== chunks.length ||
         response.embeddings.some((vector) => !vector.length || !vector.every(Number.isFinite))) {
       throw new Error('Browser model returned incomplete embeddings');
@@ -350,6 +358,8 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
     }
     return Array.isArray(response.embeddings) ? response.embeddings : [];
   } catch (err) {
+    // An old download must not mark a newly selected model ready or failed.
+    if (!isCurrentModel()) throw err;
     const failure = classifyBrowserEmbedFailure(err);
     setBrowserEmbedReady(false);
     updateBrowserEmbedStatus({

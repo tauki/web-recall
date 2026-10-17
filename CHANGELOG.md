@@ -6,6 +6,8 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Added pinned EmbeddingGemma 2 as a text-only WebGPU browser model option alongside the original WASM default. Switching models never starts a backfill; existing vectors are preserved until explicitly re-embedded.
+- Updated Transformers.js to 4.3.1 and bundled its matching ONNX WASM assets for local extension execution.
 - Updated the development and CI runtime to Node.js 24 LTS; newer Node versions are allowed.
 - Fixed release packaging to build and include runtime bundles, with PR validation and artifact checks.
 - Made memory deletion remove chunk text, embeddings and queued jobs, and invalidate highlights atomically.

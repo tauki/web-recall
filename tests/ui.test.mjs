@@ -58,6 +58,41 @@ test('sidepanel IDs, tab relationships and keyboard focus stay unique across Set
   assert.equal(f.q('#embedding-browser-fields').hidden, true);
 });
 
+test('browser model selection saves the chosen pin without downloading or re-embedding pages', async t => {
+  let config = { ...DEFAULT_EMBEDDING_CONFIG };
+  const f = await ui('sidepanel', {
+    SET_EMBEDDING_CONFIG: message => ({ config: config = { ...config, ...message.payload } })
+  }); t.after(f.close);
+  f.change('#beta-embedding-provider', 'browser');
+  assert.equal(f.q('#beta-browser-model-select').value, DEFAULT_EMBEDDING_CONFIG.browserModel);
+  f.change('#beta-browser-model-select', 'onnx-community/embeddinggemma-2-ONNX');
+  assert.equal(f.q('#beta-embedding-browser-rev').value, 'daa72c51243991dfcaf9f9137d2c573d8f7790c0');
+  f.q('#beta-save-embedding').click(); await tick();
+  assert.equal(config.browserModel, 'onnx-community/embeddinggemma-2-ONNX');
+  assert.equal(config.browserRevision, 'daa72c51243991dfcaf9f9137d2c573d8f7790c0');
+  assert.ok(!f.requests.some(m => ['DOWNLOAD_BROWSER_EMBED', 'BACKFILL_EMBEDDINGS'].includes(m.type)));
+  f.change('#beta-browser-model-select', DEFAULT_EMBEDDING_CONFIG.browserModel);
+  f.q('#beta-save-embedding').click(); await tick();
+  assert.equal(config.browserRevision, DEFAULT_EMBEDDING_CONFIG.browserRevision);
+});
+
+test('custom browser revisions remain selectable and stale model status is ignored', async t => {
+  const f = await ui('sidepanel', {
+    GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG, provider: 'browser', browserRevision: 'custom-revision' } })
+  }); t.after(f.close);
+  assert.equal(f.q('#beta-browser-model-select').value, 'custom');
+  assert.equal(f.q('#beta-embedding-browser-rev').value, 'custom-revision');
+  f.change('#beta-browser-model-select', 'onnx-community/embeddinggemma-2-ONNX');
+  f.emit({ type: 'BROWSER_EMBED_STATUS', status: { ready: true, runtimeAvailable: true, state: 'ready', model: DEFAULT_EMBEDDING_CONFIG.browserModel, revision: DEFAULT_EMBEDDING_CONFIG.browserRevision } });
+  assert.doesNotMatch(f.q('#beta-embedding-browser-status').textContent, /Model ready/);
+  f.q('#beta-download-browser-model').click(); await tick();
+  const saved = f.requests.find(m => m.type === 'SET_EMBEDDING_CONFIG');
+  assert.equal(saved.payload.browserModel, 'onnx-community/embeddinggemma-2-ONNX');
+  assert.equal(saved.payload.browserRevision, 'daa72c51243991dfcaf9f9137d2c573d8f7790c0');
+  assert.ok(f.requests.some(m => m.type === 'DOWNLOAD_BROWSER_EMBED'));
+  assert.ok(!f.requests.some(m => m.type === 'BACKFILL_EMBEDDINGS'));
+});
+
 test('Ask prevents duplicate submissions, stops, and ignores all stale replies', async t => {
   const pending = [deferred(), deferred()]; let call = 0;
   const f = await ui('sidepanel', { ASK_QUESTION: () => pending[call++].promise, CANCEL_ASK: () => ({ cancelled: true }) }); t.after(f.close);

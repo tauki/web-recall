@@ -2,6 +2,7 @@
 import { build } from 'esbuild';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { createRequire } from 'node:module';
 
 import { fileURLToPath } from 'node:url';
 const REPO_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -34,11 +35,15 @@ async function copyHtml() {
 }
 
 async function copyTransformersWasm() {
-  const srcDir = path.resolve(REPO_ROOT, 'node_modules/@huggingface/transformers/dist');
+  // Transformers.js 4 ships its loader but gets WASM binaries from onnxruntime-web.
+  // Resolve through Transformers so the bundled loader and binaries use its exact runtime.
+  const require = createRequire(import.meta.resolve('@huggingface/transformers'));
+  const srcDir = path.dirname(require.resolve('onnxruntime-web'));
   const destDir = path.resolve(OUT_DIR, 'transformers');
   await fs.mkdir(destDir, { recursive: true });
   const entries = await fs.readdir(srcDir);
   const wasmFiles = entries.filter((name) => name.startsWith('ort-wasm'));
+  if (!wasmFiles.some((name) => name.endsWith('.wasm'))) throw new Error('Missing ONNX WASM binaries');
   await Promise.all(
     wasmFiles.map(async (name) => {
       await fs.copyFile(path.join(srcDir, name), path.join(destDir, name));

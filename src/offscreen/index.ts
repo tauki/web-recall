@@ -1,5 +1,6 @@
 import { openDatabase, PAGES_STORE, type PageRecord } from '../shared/db/index';
 import { computeCentroid, cosineSimilarity, recencyWeight } from '../shared/vectors';
+import { browserEmbeddingRuntime, DEFAULT_EMBEDDING_CONFIG } from '../shared/config/index';
 
 type CentroidEntry = {
   url: string;
@@ -21,18 +22,26 @@ type ScoreCandidate = {
 };
 
 const DISPLAY_SNIPPET_MAX = 200;
-const DEFAULT_WASM_DTYPE = 'q8';
 let centroidIndex: CentroidEntry[] | null = null;
 
 type BrowserEmbedder = {
   tokenizer: (inputs: string[], options: Record<string, unknown>) => Promise<Record<string, unknown>>;
   model: (inputs: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  dispose: () => Promise<void>;
 };
 
 let embedderPromise: Promise<BrowserEmbedder> | null = null;
 let embedderKey = '';
+let embeddingQueue: Promise<unknown> = Promise.resolve();
 
-async function getEmbeddingCapabilities(): Promise<{ runtimeAvailable: boolean; backend: 'onnx-wasm'; dtype: string }> {
+async function getEmbeddingCapabilities(model?: string): Promise<{ runtimeAvailable: boolean; backend: 'onnx-wasm' | 'onnx-webgpu'; dtype: string }> {
+  const runtime = browserEmbeddingRuntime(model);
+  if (runtime.device === 'webgpu') {
+    const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
+    if (!gpu || !await gpu.requestAdapter()) {
+      throw new Error('EmbeddingGemma 2 requires WebGPU. Choose EmbeddingGemma 300M to use browser embeddings on this device.');
+    }
+  }
   const { env } = await import('@huggingface/transformers');
   const wasmBackend = env.backends?.onnx?.wasm;
   if (!wasmBackend) {
@@ -40,17 +49,20 @@ async function getEmbeddingCapabilities(): Promise<{ runtimeAvailable: boolean; 
   }
   return {
     runtimeAvailable: true,
-    backend: 'onnx-wasm',
-    dtype: DEFAULT_WASM_DTYPE
+    backend: runtime.device === 'webgpu' ? 'onnx-webgpu' : 'onnx-wasm',
+    dtype: runtime.dtype
   };
 }
 
 async function getBrowserEmbedder(model: string, revision: string): Promise<BrowserEmbedder> {
   const key = `${model}@${revision}`;
   if (embedderPromise && embedderKey === key) return embedderPromise;
+  const previous = embedderPromise;
   embedderKey = key;
   embedderPromise = (async (): Promise<BrowserEmbedder> => {
-    const { AutoTokenizer, AutoModel, env } = await import('@huggingface/transformers');
+    const old = await previous?.catch(() => null);
+    if (old) await old.dispose();
+    const { AutoConfig, AutoTokenizer, AutoModel, env } = await import('@huggingface/transformers');
     env.allowRemoteModels = true;
     env.remoteHost = 'https://huggingface.co';
     const wasmBackend = env.backends?.onnx?.wasm;
@@ -61,14 +73,24 @@ async function getBrowserEmbedder(model: string, revision: string): Promise<Brow
     wasmBackend.numThreads = 1;
     wasmBackend.simd = true;
     wasmBackend.proxy = false;
+    // EmbeddingGemma 2 otherwise downloads vision and audio encoders as well.
+    // Keep the config and every model asset on the same pinned revision.
+    const config = model === 'onnx-community/embeddinggemma-2-ONNX'
+      ? await AutoConfig.from_pretrained(model, { revision })
+      : undefined;
+    if (config) {
+      Object.assign(config, { vision_config: null, audio_config: null });
+    }
     const tokenizer = await AutoTokenizer.from_pretrained(model, { revision });
     const embedder = await AutoModel.from_pretrained(model, {
       revision,
-      dtype: DEFAULT_WASM_DTYPE
+      config,
+      ...browserEmbeddingRuntime(model)
     });
     return {
-      tokenizer: (inputs, options) => tokenizer(inputs, options),
-      model: (inputs) => embedder(inputs)
+      tokenizer: async (inputs, options) => tokenizer(inputs, options),
+      model: (inputs) => embedder(inputs),
+      dispose: async () => { await embedder.dispose(); }
     };
   })().catch((error) => {
     if (embedderKey === key) embedderPromise = null;
@@ -89,7 +111,14 @@ async function toList(output: unknown): Promise<number[][]> {
   return [];
 }
 
-async function computeBrowserEmbeddings(inputs: string[], prefix: string, model: string, revision: string): Promise<number[][]> {
+function computeBrowserEmbeddings(inputs: string[], prefix: string, model: string, revision: string): Promise<number[][]> {
+  // One inference at a time keeps model replacement from disposing an active session.
+  const pending = embeddingQueue.then(() => computeBrowserEmbeddingsNow(inputs, prefix, model, revision));
+  embeddingQueue = pending.catch(() => {});
+  return pending;
+}
+
+async function computeBrowserEmbeddingsNow(inputs: string[], prefix: string, model: string, revision: string): Promise<number[][]> {
   if (!inputs.length) return [];
   const { tokenizer, model: embedder } = await getBrowserEmbedder(model, revision);
   const tagged = inputs.map((text) => `${prefix}${text || ''}`);
@@ -220,15 +249,15 @@ chrome.runtime.onMessage.addListener(
   if (message.type === 'OFFSCREEN_EMBED') {
     const inputs = Array.isArray(message.inputs) ? (message.inputs as string[]) : [];
     const prefix = typeof message.prefix === 'string' ? message.prefix : '';
-    const model = typeof message.model === 'string' ? message.model : 'onnx-community/embeddinggemma-300m-ONNX';
-    const revision = typeof message.revision === 'string' ? message.revision : '75a84c732f1884df76bec365346230e32f582c82';
+    const model = typeof message.model === 'string' ? message.model : DEFAULT_EMBEDDING_CONFIG.browserModel!;
+    const revision = typeof message.revision === 'string' ? message.revision : DEFAULT_EMBEDDING_CONFIG.browserRevision!;
     computeBrowserEmbeddings(inputs, prefix, model, revision)
       .then((embeddings) => sendResponse({ embeddings }))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;
   }
   if (message.type === 'OFFSCREEN_EMBED_CAPABILITIES') {
-    getEmbeddingCapabilities()
+    getEmbeddingCapabilities(typeof message.model === 'string' ? message.model : undefined)
       .then((capabilities) => sendResponse(capabilities))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
     return true;

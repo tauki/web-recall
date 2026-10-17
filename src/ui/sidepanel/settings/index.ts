@@ -1,6 +1,7 @@
 import { installSharedStyles } from '../../shared/presentation';
 import {
   DEFAULT_EMBEDDING_CONFIG as DEFAULT_EMBEDDING,
+  BROWSER_EMBEDDING_MODELS,
   DEFAULT_SETTINGS,
   type BetaSettings,
   type EmbeddingConfig
@@ -216,7 +217,15 @@ export function renderSettingsPanel(target: HTMLElement): void {
         </div>
         <div id="embedding-browser-fields" hidden>
         <p class="beta-help">Download EmbeddingGemma once from Hugging Face. It stays cached on this device; page text is processed locally. The initial download may take several minutes.</p>
-        <details><summary>Advanced model configuration</summary>
+        <div class="beta-field">
+          <label for="beta-browser-model-select">Browser model</label>
+          <select id="beta-browser-model-select" aria-describedby="beta-browser-model-help">
+            ${BROWSER_EMBEDDING_MODELS.map((model) => `<option value="${model.id}">${model.label}</option>`).join('')}
+            <option value="custom">Custom model or revision</option>
+          </select>
+        </div>
+        <p id="beta-browser-model-help" class="beta-help">EmbeddingGemma 2 requires WebGPU and downloads only its text model (about 175 MB of weights, plus tokenizer files). The original model works without WebGPU. Existing pages keep their embeddings when you switch. Use Re-embed in Memory Manager to update them explicitly; Fill missing does not replace existing vectors.</p>
+        <details id="beta-browser-model-advanced"><summary>Model configuration</summary>
         <div class="beta-field">
           <label for="beta-embedding-browser-model">Browser model (Hugging Face)</label>
           <input id="beta-embedding-browser-model" type="text" placeholder="onnx-community/embeddinggemma-300m-ONNX" />
@@ -368,6 +377,7 @@ function attachBehavior(root: HTMLElement): void {
   const baseInput = root.querySelector<HTMLInputElement>('#beta-embedding-base');
   const modelInput = root.querySelector<HTMLInputElement>('#beta-embedding-model');
   const embeddingProviderSelect = root.querySelector<HTMLSelectElement>('#beta-embedding-provider');
+  const browserModelSelect = root.querySelector<HTMLSelectElement>('#beta-browser-model-select');
   const browserModelInput = root.querySelector<HTMLInputElement>('#beta-embedding-browser-model');
   const browserRevisionInput = root.querySelector<HTMLInputElement>('#beta-embedding-browser-rev');
   const downloadBrowserBtn = root.querySelector<HTMLButtonElement>('#beta-download-browser-model');
@@ -575,6 +585,7 @@ function attachBehavior(root: HTMLElement): void {
     if (modelInput) modelInput.value = config.model || '';
     if (browserModelInput) browserModelInput.value = config.browserModel || DEFAULT_EMBEDDING.browserModel || '';
     if (browserRevisionInput) browserRevisionInput.value = config.browserRevision || DEFAULT_EMBEDDING.browserRevision || '';
+    syncBrowserModelSelection();
     if (embeddingProviderSelect) {
       embeddingProviderSelect.value = config.provider === 'browser' ? 'browser' : 'ollama';
       const isBrowser = embeddingProviderSelect.value === 'browser';
@@ -590,6 +601,31 @@ function attachBehavior(root: HTMLElement): void {
     }
   }
 
+  function syncBrowserModelSelection(): void {
+    const preset = BROWSER_EMBEDDING_MODELS.find((model) =>
+      model.id === browserModelInput?.value && model.revision === browserRevisionInput?.value);
+    if (browserModelSelect) browserModelSelect.value = preset?.id || 'custom';
+    if (browserModelInput) browserModelInput.readOnly = Boolean(preset);
+    if (browserRevisionInput) browserRevisionInput.readOnly = Boolean(preset);
+    const details = root.querySelector<HTMLDetailsElement>('#beta-browser-model-advanced');
+    if (details) details.open = !preset;
+  }
+
+  browserModelSelect?.addEventListener('change', () => {
+    const preset = BROWSER_EMBEDDING_MODELS.find((model) => model.id === browserModelSelect.value);
+    if (preset && browserModelInput && browserRevisionInput) {
+      browserModelInput.value = preset.id;
+      browserRevisionInput.value = preset.revision;
+      syncBrowserModelSelection();
+    } else {
+      if (browserModelInput) browserModelInput.readOnly = false;
+      if (browserRevisionInput) browserRevisionInput.readOnly = false;
+      const details = root.querySelector<HTMLDetailsElement>('#beta-browser-model-advanced');
+      if (details) details.open = true;
+    }
+    updateBrowserStatus('Selection changed. Save settings to use this model, or Save & download to prepare it. Existing pages will not be re-embedded.');
+  });
+
   function updateBrowserStatus(text: string, isError = false): void {
     if (!browserStatusLine) return;
     browserStatusLine.textContent = text;
@@ -600,6 +636,10 @@ function attachBehavior(root: HTMLElement): void {
   function renderBrowserEmbedStatus(status?: BrowserEmbedStatus): void {
     if (!status) {
       updateBrowserStatus('Unable to determine browser embedding status', true);
+      return;
+    }
+    if (status.model !== browserModelInput?.value.trim() || status.revision !== browserRevisionInput?.value.trim()) {
+      updateBrowserStatus('Save settings to use the selected model. Existing pages will not be re-embedded.');
       return;
     }
     if (!status.runtimeAvailable) {

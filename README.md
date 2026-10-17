@@ -93,9 +93,18 @@ Setup
    * Open the Chrome side panel, switch to the Web Recall tab, and visit **Settings**.
    * Toggle **Pause automatic capture**, add allowlist/denylist domains (one per line), and click **Save capture rules**.
    * Enter the Ollama base URL/model in **Embedding provider** and click **Save embedding settings**.
-   * Optional: switch the embedding provider to **In-browser (experimental)** to
-     download the pinned local embedding model. If the browser runtime is not
-     available, the extension will report an error.
+   * Optional: switch the embedding provider to **In-browser (experimental)** and
+     choose **EmbeddingGemma 300M (original)** or **EmbeddingGemma 2 (text only, WebGPU)**.
+     The original model remains the default. **Save embedding settings** changes
+     the selection; **Save & download model** also downloads and prepares it.
+     EmbeddingGemma 2 requires WebGPU and loads only q4 text weights (about 175 MB,
+     plus tokenizer files). The original model uses q8 WASM and works without WebGPU.
+     Both options use pinned model revisions and process page text on this device.
+     Switching models does not re-embed stored pages. Use **Re-embed** in Memory
+     Manager to replace their vectors explicitly; **Fill missing** preserves existing
+     vectors, including those from another model. Search uses vectors from the selected
+     model only, so older pages need explicit re-embedding to match semantically with it.
+     If the browser runtime is not available, the extension will report an error.
    * Run a smoke query from the **Search** tab to ensure captured pages appear and the runtime path works.
 
 5. Browse as usual
