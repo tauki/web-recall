@@ -5,6 +5,15 @@ import { setLogLevel } from '../../shared/logger/index';
 import { getNormalizedOrigin } from '../../shared/providerOrigin';
 
 let cachedSettings: BetaSettings = { ...DEFAULT_SETTINGS };
+let pendingSettingsOperation: Promise<unknown> = Promise.resolve();
+
+// The service worker owns settings writes. Include upgrade reads in this queue
+// so a delayed migration cannot overwrite a user's first settings change.
+function serializeSettings<T>(operation: () => Promise<T>): Promise<T> {
+  const result = pendingSettingsOperation.then(operation);
+  pendingSettingsOperation = result.catch(() => {});
+  return result;
+}
 
 function clampNumber(value: number | undefined, min: number, max: number): number {
   if (typeof value !== 'number' || Number.isNaN(value)) return min;
@@ -82,14 +91,33 @@ export function getCachedSettingsSnapshot(): BetaSettings {
   return cachedSettings;
 }
 
-function readSettingsFromStorage(): Promise<BetaSettings> {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([SETTINGS_KEY], (result: Record<string, unknown>) => {
-      const settings = hydrateSettings(result?.[SETTINGS_KEY] as Partial<BetaSettings>);
-      setCached(settings);
-      resolve(settings);
+async function readSettingsFromStorage(): Promise<BetaSettings> {
+  const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
+    chrome.storage.local.get([SETTINGS_KEY, 'paused', 'whitelistDomains', 'blacklistDomains'], (stored: Record<string, unknown>) => {
+      if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
+      else resolve(stored);
     });
   });
+  const current = result[SETTINGS_KEY];
+  if (current && typeof current === 'object' && !Array.isArray(current)) {
+    return setCached(hydrateSettings(current as Partial<BetaSettings>));
+  }
+  const hasLegacyPolicy = typeof result.paused === 'boolean' ||
+    Array.isArray(result.whitelistDomains) || Array.isArray(result.blacklistDomains);
+  if (hasLegacyPolicy) {
+    const migrated = hydrateSettings({
+      ...DEFAULT_SETTINGS,
+      paused: typeof result.paused === 'boolean' ? result.paused : DEFAULT_SETTINGS.paused,
+      allowlist: normalizeDomains(result.whitelistDomains),
+      denylist: normalizeDomains(result.blacklistDomains),
+      captureSetupComplete: true
+    });
+    // Persist once and keep the legacy keys as a backup. Existing beta settings
+    // always win, including intentionally cleared domain lists.
+    await writeSettingsToStorage(migrated);
+    return setCached(migrated);
+  }
+  return setCached({ ...DEFAULT_SETTINGS });
 }
 
 function writeSettingsToStorage(settings: BetaSettings): Promise<void> {
@@ -123,10 +151,14 @@ function updateActionBadge(paused: boolean): void {
 }
 
 export async function getSettings(): Promise<BetaSettings> {
-  return readSettingsFromStorage();
+  return serializeSettings(readSettingsFromStorage);
 }
 
 export async function updateSettings(partial: Partial<BetaSettings>): Promise<BetaSettings> {
+  return serializeSettings(() => updateStoredSettings(partial));
+}
+
+async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<BetaSettings> {
   const current = await readSettingsFromStorage();
   const next: BetaSettings = {
     paused: typeof partial.paused === 'boolean' ? partial.paused : current.paused,
@@ -193,7 +225,7 @@ export async function shouldCaptureUrl(
   url: string,
   options: { ignorePaused?: boolean } = {}
 ): Promise<boolean> {
-  const settings = await readSettingsFromStorage();
+  const settings = await getSettings();
   if (!options.ignorePaused && settings.paused) {
     return false;
   }
@@ -224,7 +256,7 @@ try {
   console.warn('[beta-background:settings] unable to bind storage listener', err);
 }
 
-void readSettingsFromStorage()
+void getSettings()
   .then((settings) => {
     try {
       setLogLevel(settings.logLevel);

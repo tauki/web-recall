@@ -1,11 +1,15 @@
 import type { PageChunkRecord, PageRecord } from './index';
 
-const MAX_IMPORT_TEXT_CHARS = 500_000;
-const MAX_IMPORT_TITLE_CHARS = 2048;
-const MAX_IMPORT_SUMMARY_CHARS = 20_000;
-const MAX_IMPORT_CHUNKS = 512;
-const MAX_IMPORT_CHUNK_TEXT_CHARS = 20_000;
-const MAX_IMPORT_EMBEDDING_DIM = 4096;
+const IMPORT_LIMITS = {
+  text: 500_000,
+  title: 2048,
+  summary: 20_000,
+  chunks: 512,
+  chunkText: 20_000,
+  embeddingDimension: 4096,
+  url: 4096
+};
+type RecordLimits = Partial<typeof IMPORT_LIMITS>;
 
 function isHttpUrl(value: string): boolean {
   try {
@@ -20,13 +24,14 @@ function readBoundedString(
   value: unknown,
   fallback: string,
   field: string,
-  maxLength: number
+  maxLength?: number
 ): string {
-  const trimmed = (typeof value === 'string' ? value : fallback).trim();
-  if (trimmed.length > maxLength) {
+  const text = typeof value === 'string' ? value : fallback;
+  const normalized = maxLength === undefined ? text : text.trim();
+  if (maxLength !== undefined && normalized.length > maxLength) {
     throw new Error(`${field} exceeds the maximum length of ${maxLength} characters.`);
   }
-  return trimmed;
+  return normalized;
 }
 
 function readTimestamp(value: unknown, fallback: number, field: string): number {
@@ -37,11 +42,11 @@ function readTimestamp(value: unknown, fallback: number, field: string): number 
   return Math.floor(value);
 }
 
-function normalizeImportedChunks(raw: unknown, pageIndex: number): PageChunkRecord[] {
+function normalizeChunks(raw: unknown, pageIndex: number, limits: RecordLimits): PageChunkRecord[] {
   if (!Array.isArray(raw)) return [];
-  if (raw.length > MAX_IMPORT_CHUNKS) {
+  if (limits.chunks !== undefined && raw.length > limits.chunks) {
     throw new Error(
-      `Page ${pageIndex + 1} exceeds the maximum chunk count of ${MAX_IMPORT_CHUNKS}.`
+      `Page ${pageIndex + 1} exceeds the maximum chunk count of ${limits.chunks}.`
     );
   }
   return raw.map((chunk, chunkIndex) => {
@@ -52,15 +57,15 @@ function normalizeImportedChunks(raw: unknown, pageIndex: number): PageChunkReco
       (chunk as { text?: unknown }).text,
       '',
       `Page ${pageIndex + 1} chunk ${chunkIndex + 1} text`,
-      MAX_IMPORT_CHUNK_TEXT_CHARS
+      limits.chunkText
     );
     const embeddingRaw = (chunk as { embedding?: unknown }).embedding;
     if (!Array.isArray(embeddingRaw)) {
       return { text, embedding: [] };
     }
-    if (embeddingRaw.length > MAX_IMPORT_EMBEDDING_DIM) {
+    if (limits.embeddingDimension !== undefined && embeddingRaw.length > limits.embeddingDimension) {
       throw new Error(
-        `Page ${pageIndex + 1} chunk ${chunkIndex + 1} embedding exceeds ${MAX_IMPORT_EMBEDDING_DIM} values.`
+        `Page ${pageIndex + 1} chunk ${chunkIndex + 1} embedding exceeds ${limits.embeddingDimension} values.`
       );
     }
     const embedding = embeddingRaw.map((value) => {
@@ -77,42 +82,43 @@ function normalizeImportedChunks(raw: unknown, pageIndex: number): PageChunkReco
 }
 
 export function normalizeImportedPage(raw: Record<string, unknown>, pageIndex: number): PageRecord {
-  return normalizePage(raw, pageIndex, false);
+  return normalizePage(raw, pageIndex, 'import');
 }
 
 export function normalizeLegacyPage(raw: Record<string, unknown>, pageIndex: number): PageRecord {
-  // 0.1.0 persisted empty items when embedding failed. Keep those captures and
-  // their history during upgrades; external imports still require content.
-  return normalizePage(raw, pageIndex, true);
+  // Existing captures predate import limits and can be empty after inference
+  // failures. Preserve their contents and history while validating structure.
+  return normalizePage(raw, pageIndex, 'legacy');
 }
 
-function normalizePage(raw: Record<string, unknown>, pageIndex: number, allowEmpty: boolean): PageRecord {
+function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 'import' | 'legacy'): PageRecord {
+  const limits: RecordLimits = source === 'import' ? IMPORT_LIMITS : {};
   const now = Date.now();
-  const url = readBoundedString(raw.url, '', `Page ${pageIndex + 1} url`, 4096);
+  const url = readBoundedString(raw.url, '', `Page ${pageIndex + 1} url`, limits.url);
   if (!url || !isHttpUrl(url)) {
     throw new Error(`Page ${pageIndex + 1} must use an http(s) URL.`);
   }
   const versions = Array.isArray(raw.versions) ? raw.versions.map((version) => {
     if (!version || typeof version !== 'object') throw new Error(`Page ${pageIndex + 1} has an invalid version.`);
     const value = version as Record<string, unknown>;
-    const chunks = normalizeImportedChunks(value.chunks ?? value.items, pageIndex);
+    const chunks = normalizeChunks(value.chunks ?? value.items, pageIndex, limits);
     return {
       timestamp: readTimestamp(value.timestamp, now, `Page ${pageIndex + 1} version timestamp`),
-      text: readBoundedString(value.text, chunks.map(chunk => chunk.text).join('\n\n'), `Page ${pageIndex + 1} version text`, MAX_IMPORT_TEXT_CHARS),
+      text: readBoundedString(value.text, chunks.map(chunk => chunk.text).join('\n\n'), `Page ${pageIndex + 1} version text`, limits.text),
       chunks,
-      summary: readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, MAX_IMPORT_SUMMARY_CHARS)
+      summary: readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, limits.summary)
     };
   }) : undefined;
   const latest = versions?.[typeof raw.latestVersionIndex === 'number' ? raw.latestVersionIndex : -1]
     ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!);
-  const chunks = normalizeImportedChunks(raw.chunks ?? raw.items ?? latest?.chunks, pageIndex);
-  const text = readBoundedString(raw.text, chunks.map(chunk => chunk.text).join('\n\n') || latest?.text || '', `Page ${pageIndex + 1} text`, MAX_IMPORT_TEXT_CHARS);
-  if (!allowEmpty && !text && !chunks.some(chunk => chunk.text)) {
+  const chunks = normalizeChunks(raw.chunks ?? raw.items ?? latest?.chunks, pageIndex, limits);
+  const text = readBoundedString(raw.text, chunks.map(chunk => chunk.text).join('\n\n') || latest?.text || '', `Page ${pageIndex + 1} text`, limits.text);
+  if (source === 'import' && !text && !chunks.some(chunk => chunk.text)) {
     throw new Error(`Page ${pageIndex + 1} has no supported captured content (text, chunks, or legacy items).`);
   }
   return {
     url,
-    title: readBoundedString(raw.title, url, `Page ${pageIndex + 1} title`, MAX_IMPORT_TITLE_CHARS),
+    title: readBoundedString(raw.title, url, `Page ${pageIndex + 1} title`, limits.title),
     text,
     timestamp: readTimestamp(raw.timestamp, latest?.timestamp ?? now, `Page ${pageIndex + 1} timestamp`),
     manual: Boolean(raw.manual),
@@ -130,7 +136,7 @@ function normalizePage(raw: Record<string, unknown>, pageIndex: number, allowEmp
             raw.summary,
             '',
             `Page ${pageIndex + 1} summary`,
-            MAX_IMPORT_SUMMARY_CHARS
+            limits.summary
           )
         : latest?.summary
   };

@@ -240,7 +240,7 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
   });
 }
 
-export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean } = {}): Promise<void> {
+export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean } = {}): Promise<void> {
   const existing = await getPageRecord(record.url);
   const now = Date.now();
   const chunks = Array.isArray(record.chunks) ? record.chunks : [];
@@ -261,7 +261,17 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, HIGHLIGHTS_STORE, PROCESSING_STORE], 'readwrite');
-    const write = (): void => {
+    const write = (current?: PageRecord): void => {
+      if (options.preserveMissingEmbeddings) {
+        const savedChunks = new Map<string, PageChunkRecord>();
+        for (const chunk of current?.chunks || []) {
+          if (chunk.embedding?.length && chunk.embedding.every(Number.isFinite)) savedChunks.set(chunk.text, chunk);
+        }
+        // Reuse only exact text matches, retaining the original model identity.
+        // Read and merge within this transaction so concurrent backfills survive.
+        normalized.chunks = chunks.map(chunk => chunk.embedding?.length ? chunk : savedChunks.get(chunk.text) || chunk);
+        normalized.lastEmbeddedAt = record.lastEmbeddedAt ?? current?.lastEmbeddedAt;
+      }
       tx.objectStore(PAGES_STORE).put(normalized);
       tx.objectStore(HIGHLIGHTS_STORE).clear();
       const store = tx.objectStore(EMBEDDINGS_STORE);
@@ -281,16 +291,21 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
         }));
       };
     };
+    const writeLatest = (): void => {
+      if (!options.preserveMissingEmbeddings) { write(); return; }
+      const latest = tx.objectStore(PAGES_STORE).get(record.url);
+      latest.onsuccess = () => write(latest.result as PageRecord | undefined);
+    };
     if (options.expectedUpdatedAt !== undefined) {
       const check = tx.objectStore(PAGES_STORE).get(record.url);
       check.onsuccess = () => {
         if (!check.result || check.result.updatedAt !== options.expectedUpdatedAt) tx.abort();
-        else write();
+        else write(check.result as PageRecord);
       };
     } else if (options.requireProcessing) {
       const check = tx.objectStore(PROCESSING_STORE).get(record.url);
-      check.onsuccess = () => { if (check.result) write(); else tx.abort(); };
-    } else write();
+      check.onsuccess = () => { if (check.result) writeLatest(); else tx.abort(); };
+    } else writeLatest();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Page update aborted'));

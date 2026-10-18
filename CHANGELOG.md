@@ -6,6 +6,9 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Migrate legacy pause, allowlist and denylist choices before capture resumes; preserve existing 0.2.0 settings and serialize partial updates to avoid lost changes.
+- Preserve valid legacy captures and version history beyond external-import size limits, while keeping imported JSON bounded and validated.
+- Retain saved vectors and model identity for unchanged chunks when recapture inference fails, including concurrent backfill results; changed chunks remain unembedded until inference succeeds.
 - Preserve empty 0.1.0 captures during migration so failed legacy embeddings cannot block access to the library; keep import validation strict.
 - Show the full library in Memory Manager so pages beyond the newest 500 remain available for filtering and maintenance.
 - Migrate the 0.1.0 IndexedDB library once, preserving passages, vectors and version history; accept legacy JSON exports without silently discarding content. Retain the old database as an upgrade backup.

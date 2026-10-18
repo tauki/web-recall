@@ -19,7 +19,7 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
     embeddings = await embedPayloadChunks(payload);
     if (key !== embeddingSpaceKey(getEmbeddingConfig())) throw new Error('Embedding settings changed during capture');
   } catch (err) {
-    console.warn('[beta-background:capture] embedding request failed, storing without vectors', err);
+    console.warn('[beta-background:capture] embedding request failed; retaining matching saved vectors', err);
     embeddings = [];
   }
   if (!shouldContinue()) return;
@@ -37,7 +37,7 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
     manual: Boolean(payload.manual),
     chunks: items,
     lastEmbeddedAt: hasEmbeddings ? Date.now() : undefined
-  }, { requireProcessing: true });
+  }, { requireProcessing: true, preserveMissingEmbeddings: true });
   console.info('[beta-background:capture] stored page snapshot', {
     url: payload.url,
     chunkCount: items.length
