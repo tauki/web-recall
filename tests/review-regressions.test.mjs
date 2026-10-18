@@ -59,6 +59,41 @@ test('migration failure retains the source and retries without a partial library
   assert.equal((await mod.listAllPages()).length, 2);
 });
 
+test('empty legacy captures do not block migration or discard metadata and older versions', async () => {
+  const indexedDB = new IDBFactory();
+  const empty = { url: 'https://empty.test', title: 'Capture without embeddings', timestamp: 30, manual: true, items: [] };
+  const versioned = { url: 'https://versions.test', title: 'Latest capture empty', timestamp: 40, latestVersionIndex: 1, versions: [
+    { timestamp: 10, items: [{ text: 'Previous captured passage', embedding: [0, 1] }] },
+    { timestamp: 40, items: [], summary: 'Saved summary' }
+  ] };
+  await seedLegacy(indexedDB, [empty, legacyPage(), versioned]);
+  const mod = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB, IDBKeyRange });
+  assert.equal((await mod.listAllPages()).length, 3);
+  assert.equal((await mod.getPageRecord(url)).text, 'latest passage');
+  const migrated = await mod.getPageRecord(empty.url);
+  assert.equal(migrated.title, empty.title);
+  assert.equal(migrated.timestamp, empty.timestamp);
+  assert.equal(migrated.manual, true);
+  assert.equal(migrated.text, '');
+  assert.deepEqual(plain(migrated.chunks), []);
+  const history = await mod.getPageRecord(versioned.url);
+  assert.equal(history.text, '');
+  assert.deepEqual(plain(history.chunks), []);
+  assert.equal(history.summary, 'Saved summary');
+  assert.equal(history.versions.length, 2);
+  assert.equal(history.versions[0].text, 'Previous captured passage');
+  assert.deepEqual(plain(history.versions[0].chunks[0].embedding), [0, 1]);
+  const db = await mod.openDatabase();
+  const count = await new Promise(resolve => { const r = db.transaction('embeddings').objectStore('embeddings').count(); r.onsuccess = () => resolve(r.result); });
+  assert.equal(count, 1, 'empty captures must not manufacture vectors or reuse older versions as current');
+  await mod.deletePages([empty.url]);
+  db.close();
+  const restarted = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB, IDBKeyRange });
+  assert.equal((await restarted.listAllPages()).length, 2);
+  assert.equal(await restarted.getPageRecord(empty.url), undefined, 'the completed migration must not restore a deleted empty capture');
+  (await restarted.openDatabase()).close();
+});
+
 test('upgrade preserves existing 0.2 captures and copies the old versions only once across contexts', async () => {
   const indexedDB = new IDBFactory();
   const target = await new Promise(resolve => {
@@ -100,8 +135,31 @@ test('legacy exports retain text, vectors and version history through import and
   assert.equal(saved.length, 2);
   await assert.rejects(mod.importManagePages({ schemaVersion: 1, pages: [legacyPage(), { url, title: 'Invalid second page' }] }));
   assert.equal(saved.length, 2, 'validate every page before replacing existing content');
+  await assert.rejects(mod.importManagePages({ schemaVersion: 1, pages: [{ url, items: [] }] }), /content|chunks|text/i);
+  assert.equal(saved.length, 2, 'empty imports must not replace saved content');
   await mod.importManagePages({ schemaVersion: 1, pages: [exported[0]] });
   assert.deepEqual(saved[2].versions, exported[0].versions);
+});
+
+test('Memory Manager includes older pages beyond 500 captures and returns summaries newest first', async () => {
+  const db = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+  await Promise.all(Array.from({ length: 501 }, (_, index) => db.savePageRecord(page({ url: `https://example.test/${index}`, timestamp: index + 1 }))));
+  const mod = await loadSource('src/background/manage/index.ts', '', {
+    '../capture/index': { cancelCaptureJobs() {} },
+    '../embeddings/index': { getEmbeddingConfig: () => ({}) },
+    '../storage/manager': { storageManager: db },
+    '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+  });
+  const summaries = await mod.getManagePages();
+  assert.equal(summaries.length, 501);
+  assert.equal(summaries[0].url, 'https://example.test/500');
+  assert.equal(summaries.at(-1).url, 'https://example.test/0');
+  assert.ok(summaries.every((record, index) => index === 0 || summaries[index - 1].timestamp >= record.timestamp));
+  assert.ok(summaries.every(record => !('text' in record) && !('chunks' in record)), 'the UI receives summaries, not captured text or vectors');
+  await mod.deleteManagePages([summaries.at(-1).url]);
+  assert.equal(await db.getPageRecord('https://example.test/0'), undefined);
+  assert.equal((await mod.getManagePages()).length, 500);
+  (await db.openDatabase()).close();
 });
 
 test('processing transitions racing deletion cannot recreate durable jobs or recover deleted text', async () => {

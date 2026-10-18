@@ -1,4 +1,4 @@
-import { normalizeImportedPage } from './records';
+import { normalizeLegacyPage } from './records';
 
 const DB_NAME = 'webRecallBeta';
 const DB_VERSION = 3;
@@ -162,7 +162,7 @@ async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
     }
     // Validate the complete source before committing any records or the marker.
     const pages = new Map<string, PageRecord>();
-    for (const page of records.map(normalizeImportedPage).sort((a, b) => b.timestamp - a.timestamp)) {
+    for (const page of records.map(normalizeLegacyPage).sort((a, b) => b.timestamp - a.timestamp)) {
       const newer = pages.get(page.url);
       if (newer) newer.versions = [...(newer.versions || [pageVersion(newer)]), ...(page.versions || [pageVersion(page)])];
       else pages.set(page.url, page);

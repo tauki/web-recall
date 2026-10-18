@@ -77,6 +77,16 @@ function normalizeImportedChunks(raw: unknown, pageIndex: number): PageChunkReco
 }
 
 export function normalizeImportedPage(raw: Record<string, unknown>, pageIndex: number): PageRecord {
+  return normalizePage(raw, pageIndex, false);
+}
+
+export function normalizeLegacyPage(raw: Record<string, unknown>, pageIndex: number): PageRecord {
+  // 0.1.0 persisted empty items when embedding failed. Keep those captures and
+  // their history during upgrades; external imports still require content.
+  return normalizePage(raw, pageIndex, true);
+}
+
+function normalizePage(raw: Record<string, unknown>, pageIndex: number, allowEmpty: boolean): PageRecord {
   const now = Date.now();
   const url = readBoundedString(raw.url, '', `Page ${pageIndex + 1} url`, 4096);
   if (!url || !isHttpUrl(url)) {
@@ -97,7 +107,7 @@ export function normalizeImportedPage(raw: Record<string, unknown>, pageIndex: n
     ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!);
   const chunks = normalizeImportedChunks(raw.chunks ?? raw.items ?? latest?.chunks, pageIndex);
   const text = readBoundedString(raw.text, chunks.map(chunk => chunk.text).join('\n\n') || latest?.text || '', `Page ${pageIndex + 1} text`, MAX_IMPORT_TEXT_CHARS);
-  if (!text && !chunks.some(chunk => chunk.text)) {
+  if (!allowEmpty && !text && !chunks.some(chunk => chunk.text)) {
     throw new Error(`Page ${pageIndex + 1} has no supported captured content (text, chunks, or legacy items).`);
   }
   return {

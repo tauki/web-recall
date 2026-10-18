@@ -24,8 +24,8 @@ type ImportPayload = {
 const MAX_IMPORT_PAGES = 2000;
 
 export async function getManagePages(): Promise<ManagePageSummary[]> {
-  const pages = await storageManager.listRecentPages(500);
-  return pages.map((page) => ({
+  const pages = await storageManager.listAllPages();
+  return pages.sort((a, b) => b.timestamp - a.timestamp).map((page) => ({
     url: page.url,
     title: page.title || page.url,
     timestamp: page.timestamp,
