@@ -1,5 +1,6 @@
 import {
   appendProcessing,
+  updateProcessingEntry,
   clearLogs,
   deletePages,
   deleteProcessing,
@@ -32,6 +33,7 @@ export type StorageBackend = {
   clearLogs: () => Promise<void>;
   listProcessing: () => ReturnType<typeof listProcessing>;
   appendProcessing: (entry: Parameters<typeof appendProcessing>[0]) => Promise<void>;
+  updateProcessingEntry: typeof updateProcessingEntry;
   deleteProcessing: (url: string) => Promise<void>;
   getProcessingEntry: (url: string) => ReturnType<typeof getProcessingEntry>;
   upsertHighlight: (record: Parameters<typeof upsertHighlight>[0]) => Promise<void>;
@@ -48,6 +50,7 @@ export const storageManager: StorageBackend = {
   clearLogs,
   listProcessing,
   appendProcessing,
+  updateProcessingEntry,
   deleteProcessing,
   getProcessingEntry,
   upsertHighlight,

@@ -89,8 +89,7 @@ function selectContextExcerpt(
 ): string {
   const directChunkText = typeof hit.chunkIndex === 'number' ? record?.chunks?.[hit.chunkIndex]?.text || '' : '';
   const fallbackChunkText = record?.chunks?.find((chunk) => (chunk.text || '').trim())?.text || '';
-  const chunkText = directChunkText || fallbackChunkText;
-  const preferred = chunkText || hit.snippet || record?.text || record?.summary || '';
+  const preferred = directChunkText || hit.snippet || fallbackChunkText || record?.text || record?.summary || '';
   const normalized = preferred.replace(/\s+/g, ' ').trim();
   return normalized.slice(0, contextLimit);
 }

@@ -102,8 +102,9 @@ Setup
      Both options use pinned model revisions and process page text on this device.
      Switching models does not re-embed stored pages. Use **Re-embed** in Memory
      Manager to replace their vectors explicitly; **Fill missing** preserves existing
-     vectors, including those from another model. Search uses vectors from the selected
-     model only, so older pages need explicit re-embedding to match semantically with it.
+     vectors, including those from another model. Search combines text matches with
+     vectors from the selected model. Older pages remain searchable by text; explicit
+     re-embedding enables semantic matches with the new model.
      If the browser runtime is not available, the extension will report an error.
    * Run a smoke query from the **Search** tab to ensure captured pages appear and the runtime path works.
 
@@ -154,6 +155,19 @@ Setup
    - Configure allowlist/denylist domain rules in Settings. When the allowlist
      is non-empty, only listed domains are captured. Use the Pause toggle to
      temporarily stop auto-capture.
+
+Upgrading from 0.1.0
+--------------------
+
+The first storage read copies the previous IndexedDB library into the 0.2.0 database,
+including captured passages, existing vectors, summaries, and version history.
+Existing 0.2.0 captures take precedence, and the old versions remain available in
+exports. Migration completes atomically and is recorded once, so deleted pages are
+not imported again after a restart. No embeddings are regenerated during migration.
+
+The original `webMemoryDB` database is retained as a local upgrade backup. Memory
+Manager deletions affect the active 0.2.0 library, not this retained backup. Legacy
+schema-version-1 JSON backups can also be imported without dropping their passages.
 
 Release
 -------

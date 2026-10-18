@@ -10,11 +10,12 @@ async function ui(view, overrides = {}) {
   const dom = new JSDOM('<div id="app-root"></div>', { url: 'https://extension.test/' });
   const { window } = dom;
   window.HTMLElement.prototype.scrollIntoView = () => {};
-  const listeners = [], requests = [];
+  const listeners = [], requests = [], polls = [];
   const responses = {
     GET_SETTINGS: () => ({ settings: { ...DEFAULT_SETTINGS, captureSetupComplete: true } }),
     GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG } }),
     GET_PROVIDERS: () => ({ providers: [] }),
+    GET_PROVIDER_CONFIG: () => ({ baseUrl: 'http://localhost:11434' }),
     GET_BROWSER_EMBED_STATUS: () => ({ status: { ready: false, state: 'idle', runtimeAvailable: true } }),
     GET_CALIBRATION: () => ({ calibration: { wSim: .6, wLLM: .4 } }),
     GET_PROCESSING: () => ({ queue: [] }),
@@ -25,7 +26,7 @@ async function ui(view, overrides = {}) {
   await loadSource(`src/ui/${view}/index.ts`, '', {
     '../shared/runtime': { sendRuntimeMessage: send },
     '../../shared/runtime': { sendRuntimeMessage: send },
-    '../shared/polling': { startPolling: task => { void task(); return () => {}; } }
+    '../shared/polling': { startPolling: task => { polls.push(task); void task(); return () => {}; } }
   }, {
     window, document: window.document, HTMLElement: window.HTMLElement,
     chrome: { runtime: { getURL: p => 'https://extension.test/' + p, onMessage: { addListener: f => listeners.push(f) } }, tabs: { create() {} } }
@@ -33,9 +34,29 @@ async function ui(view, overrides = {}) {
   await tick(); await tick();
   const q = selector => window.document.querySelector(selector);
   const change = (selector, value) => { q(selector).value = value; q(selector).dispatchEvent(new window.Event('change', { bubbles: true })); };
-  return { window, q, change, requests, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
+  return { window, q, change, requests, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
     submit: selector => q(selector).dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })) };
 }
+
+test('repeated sidepanel banner refreshes read configuration without health or model probes', async t => {
+  const f = await ui('sidepanel', { GET_PROVIDER_CONFIG: () => ({ baseUrl: 'https://provider.example.test' }) });
+  t.after(f.close);
+  const providerReads = f.requests.filter(message => message.type === 'GET_PROVIDERS').length;
+  await f.poll(); await f.poll();
+  assert.equal(f.requests.filter(message => message.type === 'GET_PROVIDERS').length, providerReads);
+  assert.ok(f.requests.some(message => message.type === 'GET_PROVIDER_CONFIG'));
+  assert.equal(f.q('#beta-remote-provider-banner').hidden, false);
+  assert.match(f.q('#beta-remote-provider-banner').textContent, /provider.example.test/);
+});
+
+test('text retrieval results do not display term scores as semantic similarity', async t => {
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => ({ results: [{ ...pages[0], snippet: 'Exact match', score: 6.5, textMatch: true }] }) });
+  t.after(f.close);
+  f.q('#beta-search-input').value = 'Cats';
+  f.submit('#beta-search-form'); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /Text match/);
+  assert.doesNotMatch(f.q('#beta-search-results').textContent, /sim .*%/);
+});
 
 test('sidepanel IDs, tab relationships and keyboard focus stay unique across Settings and Ask', async t => {
   const f = await ui('sidepanel'); t.after(f.close);

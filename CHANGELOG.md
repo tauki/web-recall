@@ -6,6 +6,10 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Migrate the 0.1.0 IndexedDB library once, preserving passages, vectors and version history; accept legacy JSON exports without silently discarding content. Retain the old database as an upgrade backup.
+- Prevent processing transitions and retries from recreating deleted capture jobs.
+- Keep fragment URLs and matched passages through Search and Ask, and combine text matches with semantic results during partial re-embedding.
+- Use the same installed-model fallback in Settings and Ask; reserve chat health probes for explicit connection tests instead of sidepanel polling.
 - Added pinned EmbeddingGemma 2 as a text-only WebGPU browser model option alongside the original WASM default. Switching models never starts a backfill; existing vectors are preserved until explicitly re-embedded.
 - Updated Transformers.js to 4.3.1 and bundled its matching ONNX WASM assets for local extension execution.
 - Updated the development and CI runtime to Node.js 24 LTS; newer Node versions are allowed.

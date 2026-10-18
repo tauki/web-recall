@@ -1,5 +1,9 @@
+import { normalizeImportedPage } from './records';
+
 const DB_NAME = 'webRecallBeta';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+const MIGRATIONS_STORE = 'migrations';
+const LEGACY_DATABASE = 'webMemoryDB';
 
 export const PAGES_STORE = 'pages';
 export const HIGHLIGHTS_STORE = 'highlights';
@@ -37,6 +41,7 @@ export type PageRecord = {
   updatedAt: number;
   lastEmbeddedAt?: number;
   summary?: string;
+  versions?: Array<{ timestamp: number; text: string; chunks: PageChunkRecord[]; summary?: string }>;
 };
 
 export type HighlightRecord = {
@@ -91,7 +96,7 @@ export function openDatabase(): Promise<IDBDatabase> {
   if (typeof indexedDB === 'undefined') {
     return Promise.reject(new Error('IndexedDB is not available in this context'));
   }
-  openPromise = new Promise((resolve, reject) => {
+  openPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onupgradeneeded = (event) => {
       const db = request.result;
@@ -112,11 +117,90 @@ export function openDatabase(): Promise<IDBDatabase> {
           db.createObjectStore(PROCESSING_STORE, { keyPath: 'url' });
         }
       }
+      if (oldVersion < 3) db.createObjectStore(MIGRATIONS_STORE, { keyPath: 'key' });
     };
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      db.onversionchange = () => { db.close(); openPromise = null; };
+      // Every reader (including offscreen search) waits for the upgrade copy.
+      migrateLegacyDatabase(db).then(() => resolve(db)).catch((error) => { db.close(); reject(error); });
+    };
     request.onerror = () => reject(request.error);
+  }).catch((error) => {
+    openPromise = null;
+    throw error;
   });
   return openPromise;
+}
+
+async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
+  const migrated = await new Promise<boolean>((resolve, reject) => {
+    const request = db.transaction(MIGRATIONS_STORE).objectStore(MIGRATIONS_STORE).get(LEGACY_DATABASE);
+    request.onsuccess = () => resolve(Boolean(request.result));
+    request.onerror = () => reject(request.error);
+  });
+  if (migrated) return;
+  // Do not create an empty legacy database on a fresh installation.
+  const databases = await indexedDB.databases();
+  let legacy: IDBDatabase | undefined;
+  try {
+    let records: Record<string, unknown>[] = [];
+    if (databases.some((entry) => entry.name === LEGACY_DATABASE)) {
+      legacy = await new Promise<IDBDatabase>((resolve, reject) => {
+        const request = indexedDB.open(LEGACY_DATABASE);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      legacy.onversionchange = () => legacy?.close();
+      if (legacy.objectStoreNames.contains(PAGES_STORE)) {
+        records = await new Promise((resolve, reject) => {
+          const request = legacy!.transaction(PAGES_STORE).objectStore(PAGES_STORE).getAll();
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      }
+    }
+    // Validate the complete source before committing any records or the marker.
+    const pages = new Map<string, PageRecord>();
+    for (const page of records.map(normalizeImportedPage).sort((a, b) => b.timestamp - a.timestamp)) {
+      const newer = pages.get(page.url);
+      if (newer) newer.versions = [...(newer.versions || [pageVersion(newer)]), ...(page.versions || [pageVersion(page)])];
+      else pages.set(page.url, page);
+    }
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, MIGRATIONS_STORE], 'readwrite');
+      const markers = tx.objectStore(MIGRATIONS_STORE);
+      const check = markers.get(LEGACY_DATABASE);
+      check.onsuccess = () => {
+        if (check.result) return; // Another extension context already completed the copy.
+        for (const page of pages.values()) {
+          const existing = tx.objectStore(PAGES_STORE).get(page.url);
+          existing.onsuccess = () => {
+            if (existing.result) {
+              // Preserve the active 0.2 capture and retain the old content in history.
+              const current = existing.result as PageRecord;
+              tx.objectStore(PAGES_STORE).put({ ...current, versions: [...(current.versions || []), ...(page.versions || [pageVersion(page)])] });
+              return;
+            }
+            tx.objectStore(PAGES_STORE).put(page);
+            page.chunks.forEach((chunk, chunkIndex) => tx.objectStore(EMBEDDINGS_STORE).put({
+              key: `${page.url}::${chunkIndex}`, pageUrl: page.url, chunkIndex, ...chunk, createdAt: page.createdAt
+            }));
+          };
+        }
+        markers.put({ key: LEGACY_DATABASE, completedAt: Date.now() });
+      };
+      tx.oncomplete = () => resolve();
+      tx.onabort = () => reject(tx.error || new Error('Legacy library migration aborted'));
+      tx.onerror = () => reject(tx.error);
+    });
+  } finally {
+    legacy?.close();
+  }
+}
+
+function pageVersion(page: PageRecord): NonNullable<PageRecord['versions']>[number] {
+  return { timestamp: page.timestamp, text: page.text, chunks: page.chunks, summary: page.summary };
 }
 
 export async function getPageRecord(url: string): Promise<PageRecord | undefined> {
@@ -171,7 +255,8 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
     createdAt: existing?.createdAt ?? record.createdAt ?? now,
     updatedAt: now,
     lastEmbeddedAt: record.lastEmbeddedAt ?? existing?.lastEmbeddedAt ?? (hasEmbeddings ? now : undefined),
-    summary: record.summary ?? existing?.summary
+    summary: record.summary ?? existing?.summary,
+    versions: record.versions ?? existing?.versions
   };
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
@@ -385,6 +470,25 @@ export async function appendProcessing(entry: ProcessingEntry): Promise<void> {
     tx.objectStore(PROCESSING_STORE).put(entry);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function updateProcessingEntry(entry: ProcessingEntry, create = false): Promise<boolean> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PROCESSING_STORE, 'readwrite');
+    const store = tx.objectStore(PROCESSING_STORE);
+    let updated = false;
+    const request = store.get(entry.url);
+    request.onsuccess = () => {
+      const existing = request.result as ProcessingEntry | undefined;
+      if (!existing && !create) return;
+      store.put({ ...entry, createdAt: existing?.createdAt ?? entry.createdAt, payload: entry.payload ?? existing?.payload });
+      updated = true;
+    };
+    tx.oncomplete = () => resolve(updated);
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Processing transition aborted'));
   });
 }
 

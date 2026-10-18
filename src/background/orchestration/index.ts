@@ -19,6 +19,7 @@ import {
 import { getHighlightForDate, listHighlightDates } from '../highlights/index';
 import { getModelSettings, updateModelSettings } from '../models/index';
 import { providerManager } from '../providers/manager';
+import { getProviderBaseUrl } from '../providers/config';
 import { listLogs, clearLogs } from '../logs/index';
 import { listProcessingEntries } from '../processing/index';
 import { getCalibration, updateCalibration } from '../calibration/index';
@@ -37,6 +38,7 @@ type RuntimeMessage =
   | { type: 'SET_MODEL'; key: 'chatModel' | 'summaryModel'; value?: string }
   | { type: 'LIST_MODELS' }
   | { type: 'GET_PROVIDERS' }
+  | { type: 'GET_PROVIDER_CONFIG'; providerId: string }
   | { type: 'SET_PROVIDER_SETTING'; providerId: string; key: string; value?: string }
   | { type: 'PROVIDER_ACTION'; providerId: string; action: string; baseOverride?: string }
   | { type: 'GET_PAGE_LIST' }
@@ -238,6 +240,9 @@ const runtimeHandlers: RuntimeHandlerMap = {
       sendResponse
     ),
 
+  GET_PROVIDER_CONFIG: (message, sendResponse) =>
+    respondWith(getProviderBaseUrl(message.providerId).then(baseUrl => ({ baseUrl })), sendResponse),
+
   SET_PROVIDER_SETTING: (message, sendResponse) =>
     respondWith(
       providerManager
@@ -283,6 +288,7 @@ const runtimeHandlers: RuntimeHandlerMap = {
   IMPORT_PAGES: (message, sendResponse) =>
     respondWith(
       importManagePages({
+        schemaVersion: message.schemaVersion,
         pages: Array.isArray(message.pages)
           ? message.pages.map((entry) => ({ ...(entry as Record<string, unknown>) }))
           : []

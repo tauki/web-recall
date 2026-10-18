@@ -81,7 +81,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
         try {
           if (item.delayMs > 0) await sleep(item.delayMs);
           if (cancelled.has(item)) continue;
-          await markProcessing(item.payload, item.attempts);
+          if (await markProcessing(item.payload, item.attempts) === false) continue;
           if (cancelled.has(item)) continue;
           await processFn(item.payload, () => !cancelled.has(item));
           if (cancelled.has(item)) continue;
@@ -94,7 +94,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
           const replacement = queue.find((entry) => entry.url === item.url);
-          if (replacement) await markQueued(replacement.payload, replacement.attempts);
+          if (replacement) await markQueued(replacement.payload, replacement.attempts, false);
           else await markDone(item.url);
         } catch (err) {
           if (cancelled.has(item)) continue;
@@ -115,7 +115,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             });
             enqueuedUrls.add(item.url);
             retryCount += 1;
-            await markQueued(item.payload, nextAttempt);
+            await markQueued(item.payload, nextAttempt, false);
           } else {
             failedCount += 1;
             await markFailed(item.payload, nextAttempt);

@@ -19,6 +19,7 @@ export type SearchResult = {
   chunkIndex?: number;
   crossScore?: number;
   hitsFromPage?: number;
+  textMatch?: boolean;
 };
 
 export type SearchOptions = {
@@ -30,7 +31,7 @@ export type SearchOptions = {
 type OffscreenTopPageResponse = { pages?: Array<{ url: string }> };
 type OffscreenScoreResponse = {
   candidates?: Array<
-    Pick<SearchResult, 'url' | 'title' | 'snippet' | 'chunkIndex' | 'score' | 'weightedScore' | 'recencyWeight' | 'containsExact' | 'hitsFromPage'> & {
+    Pick<SearchResult, 'url' | 'title' | 'snippet' | 'chunkIndex' | 'score' | 'weightedScore' | 'recencyWeight' | 'containsExact' | 'hitsFromPage' | 'textMatch'> & {
       timestamp?: number;
       crossScore?: number;
     }
@@ -98,7 +99,7 @@ function textFallbackScore(page: PageRecord, tokens: string[]): { score: number;
 async function fallbackSearch(query: string, limit: number): Promise<SearchResult[]> {
   const tokens = tokenize(query);
   if (!tokens.length) return [];
-  const pages = await storageManager.listRecentPages(200);
+  const pages = await storageManager.listAllPages();
   const scored: SearchResult[] = pages
     .map((page) => {
       const { score, snippet } = textFallbackScore(page, tokens);
@@ -107,10 +108,11 @@ async function fallbackSearch(query: string, limit: number): Promise<SearchResul
         title: page.title || page.url,
         snippet,
         timestamp: page.timestamp,
-        score
+        score,
+        textMatch: true
       };
     })
-    .filter((entry) => entry.score > 0.1);
+    .filter((entry) => entry.score > 0);
   scored.sort((a, b) => b.score - a.score);
   const calibration = getCalibrationSnapshot();
   const dynamicLimit = Math.max(1, Math.min(50, Math.round(limit * (1 + calibration.wLLM))));
@@ -145,7 +147,8 @@ function toSearchResult(res: Partial<SearchResult> & { url: string }): SearchRes
     containsExact: res.containsExact,
     chunkIndex: res.chunkIndex,
     crossScore: res.crossScore,
-    hitsFromPage: res.hitsFromPage
+    hitsFromPage: res.hitsFromPage,
+    textMatch: res.textMatch
   };
 }
 
@@ -155,7 +158,7 @@ function dedupeByUrl(results: Array<Partial<SearchResult> & { url: string }>): S
     const normalized = toSearchResult(res);
     const key = canonicalizeUrl(normalized.url);
     if (!grouped.has(key)) {
-      grouped.set(key, { ...normalized, hitsFromPage: 1, url: key });
+      grouped.set(key, { ...normalized, hitsFromPage: normalized.hitsFromPage || 1 });
       continue;
     }
     const existing = grouped.get(key)!;
@@ -164,6 +167,27 @@ function dedupeByUrl(results: Array<Partial<SearchResult> & { url: string }>): S
     grouped.set(key, { ...better, hitsFromPage: count });
   }
   return Array.from(grouped.values());
+}
+
+function mergeRetrievalResults(semantic: SearchResult[], text: SearchResult[]): SearchResult[] {
+  // Reciprocal rank fusion combines rankings without treating term counts as cosine scores.
+  // Text wins ties so an exact text hit stays visible during partial re-embedding.
+  const results = new Map<string, { result: SearchResult; rank: number }>();
+  for (const list of [dedupeByUrl(text), semantic]) {
+    list.forEach((result, index) => {
+      const key = canonicalizeUrl(result.url);
+      const existing = results.get(key);
+      const rank = 1 / (60 + index + 1);
+      if (existing) {
+        existing.rank += rank;
+        if (existing.result.url === result.url) {
+          // Retain semantic metrics without replacing the retrieved text evidence.
+          existing.result = { ...result, snippet: existing.result.snippet, chunkIndex: existing.result.chunkIndex };
+        }
+      } else results.set(key, { result, rank });
+    });
+  }
+  return [...results.values()].sort((a, b) => b.rank - a.rank).map(entry => entry.result);
 }
 
 function extractDomain(url: string): string {
@@ -428,7 +452,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       const bw = b.weightedScore ?? b.score ?? 0;
       return bw - aw;
     });
-    const dedupedCandidates = dedupeByUrl(candidates);
+    const dedupedCandidates = mergeRetrievalResults(dedupeByUrl(candidates), await fallbackSearch(normalized, limit));
     const reranked = await rerankWithCrossEncoder(normalized, dedupedCandidates, options);
     const calibration = getCalibrationSnapshot();
     const dynamicLimit = Math.max(1, Math.min(50, Math.round(limit * (1 + calibration.wLLM))));
@@ -443,7 +467,8 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       containsExact: cand.containsExact,
       chunkIndex: cand.chunkIndex,
       crossScore: cand.crossScore,
-      hitsFromPage: cand.hitsFromPage
+      hitsFromPage: cand.hitsFromPage,
+      textMatch: cand.textMatch
     }));
   } catch (err) {
     options.signal?.throwIfAborted();

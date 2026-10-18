@@ -56,7 +56,7 @@ providerManager.register({
   setSetting: updateOllamaSetting,
   action: async (action, payload) => {
     if (action === 'test') {
-      const status = await getOllamaStatus(payload?.baseOverride);
+      const status = await getOllamaStatus(payload?.baseOverride, true);
       return { status };
     }
     if (action === 'refreshModels') {

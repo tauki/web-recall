@@ -28,29 +28,29 @@ async function saveEntry(params: {
   status: ProcessingEntry['status'];
   attempts: number;
   payload?: CapturePayload;
-}): Promise<void> {
-  const existing = await storageManager.getProcessingEntry(params.url);
+}, create = false): Promise<boolean> {
   const now = Date.now();
   const entry: ProcessingEntry = {
     url: params.url,
-    title: params.title || existing?.title || params.url,
+    title: params.title || params.url,
     status: params.status,
     attempts: params.attempts,
-    createdAt: existing?.createdAt ?? now,
+    createdAt: now,
     lastAttemptAt: now,
     updatedAt: now,
-    payload: params.payload ? toStoredPayload(params.payload) : existing?.payload
+    payload: params.payload ? toStoredPayload(params.payload) : undefined
   };
-  await storageManager.appendProcessing(entry);
+  const updated = await storageManager.updateProcessingEntry(entry, create);
   await broadcastQueue();
+  return updated;
 }
 
-export async function markQueued(payload: CapturePayload, attempts: number): Promise<void> {
-  await saveEntry({ url: payload.url, title: payload.title, status: 'queued', attempts, payload });
+export async function markQueued(payload: CapturePayload, attempts: number, create = true): Promise<boolean> {
+  return saveEntry({ url: payload.url, title: payload.title, status: 'queued', attempts, payload }, create);
 }
 
-export async function markProcessing(payload: CapturePayload, attempts: number): Promise<void> {
-  await saveEntry({ url: payload.url, title: payload.title, status: 'processing', attempts, payload });
+export async function markProcessing(payload: CapturePayload, attempts: number): Promise<boolean> {
+  return saveEntry({ url: payload.url, title: payload.title, status: 'processing', attempts, payload });
 }
 
 export async function markFailed(payload: CapturePayload, attempts: number): Promise<void> {

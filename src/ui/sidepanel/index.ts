@@ -15,6 +15,7 @@ type SearchResult = {
   score: number;
   hitsFromPage?: number;
   crossScore?: number;
+  textMatch?: boolean;
 };
 
 type RecentPage = {
@@ -29,12 +30,6 @@ type AskSource = {
   url: string;
   snippet: string;
   domain: string;
-};
-
-type ProviderView = {
-  id: string;
-  name: string;
-  settings: Array<{ key: string; value: string }>;
 };
 
 function ensureStyles(): void {
@@ -366,7 +361,8 @@ function formatScoreLabel(result: SearchResult): string {
   const simPct = Number.isFinite(result.score) ? Math.round(((result.score + 1) / 2) * 100) : undefined;
   const llmScore = Number.isFinite(result.crossScore) ? Number(result.crossScore).toFixed(1) : undefined;
   const parts: string[] = [];
-  if (simPct !== undefined && simPct >= 0) parts.push(`sim ${simPct}%`);
+  if (result.textMatch) parts.push('Text match');
+  else if (simPct !== undefined && simPct >= 0) parts.push(`sim ${simPct}%`);
   parts.push(llmScore ? `LLM ${llmScore}/10` : 'Not reranked');
   return parts.join(' · ');
 }
@@ -401,10 +397,7 @@ async function refreshRemoteProviderBanner(
       settingsOverride ||
       (await sendRuntimeMessage<{ settings?: BetaSettings }>({ type: 'GET_SETTINGS' })).settings ||
       DEFAULT_SETTINGS;
-    const response = await sendRuntimeMessage<{ providers?: ProviderView[] }>({ type: 'GET_PROVIDERS' });
-    const providers = response.providers || [];
-    const active = providers.find((provider) => provider.id === settings.activeProviderId) || providers[0];
-    const baseUrl = active?.settings.find((setting) => setting.key === 'baseUrl')?.value || '';
+    const { baseUrl = '' } = await sendRuntimeMessage<{ baseUrl?: string }>({ type: 'GET_PROVIDER_CONFIG', providerId: settings.activeProviderId });
     const info = getProviderOriginInfo(baseUrl);
     if (info.isValid && info.isRemote) {
       banner.hidden = false;

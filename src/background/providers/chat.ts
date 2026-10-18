@@ -1,5 +1,5 @@
 import { DEFAULT_SETTINGS } from '../../shared/config/index';
-import { getModelSettings } from '../models/index';
+import { resolveOllamaChatModel } from './ollamaModels';
 import { getSettings } from '../settings/index';
 import { getProviderBaseUrl } from './config';
 
@@ -31,7 +31,6 @@ export type ChatProbeResult = {
   suggestion?: string;
 };
 
-const DEFAULT_CHAT_MODEL = 'llama3.1';
 export function normalizeToolArguments(value: unknown): Record<string, unknown> {
   const parsed = typeof value === 'string' ? JSON.parse(value) : value;
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Tool arguments must be an object');
@@ -56,12 +55,13 @@ function buildOriginSuggestion(message: string): string | undefined {
 }
 
 export async function getChatConfig(): Promise<ChatConfig> {
-  const [settings, modelSettings] = await Promise.all([getSettings(), getModelSettings()]);
+  const settings = await getSettings();
   const providerId = normalizeProviderId(settings.activeProviderId);
+  const baseUrl = await getProviderBaseUrl(providerId);
   return {
     providerId,
-    baseUrl: await getProviderBaseUrl(providerId),
-    model: modelSettings.chatModel || DEFAULT_CHAT_MODEL
+    baseUrl,
+    model: await resolveOllamaChatModel(baseUrl)
   };
 }
 
