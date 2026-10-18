@@ -354,7 +354,7 @@ function resolveToolStepBudget(maxToolSteps: number): number {
   return Math.max(1, Math.min(Math.round(maxToolSteps), MAX_INTERNAL_TOOL_STEPS));
 }
 
-async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], contextLimit: number, signal?: AbortSignal): Promise<ToolsRuntime | null> {
+async function createToolsRuntime(sources: AskSource[], contextLimit: number, signal?: AbortSignal): Promise<ToolsRuntime | null> {
   try {
     const pages = await storageManager.listAllPages();
     const pageText = new Map<string, string>();
@@ -373,7 +373,6 @@ async function createToolsRuntime(toolTimeoutMs: number, sources: AskSource[], c
       pages,
       searchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
       quickSearchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
-      toolTimeoutMs,
       recordEvidence: (url, text) => {
         let source = sources.find((entry) => entry.url === url);
         if (!source) {
@@ -645,7 +644,6 @@ async function runAskQuestion(question: string, options?: AskOptions): Promise<A
   const maxResults = typeof maxResultsInput === 'number' && maxResultsInput > 0 ? Math.max(1, maxResultsInput) : dynamicLimit;
   const enableTools = settings.enableTools !== false;
   const maxToolSteps = Math.max(0, settings.maxToolSteps ?? 0);
-  const toolTimeoutMs = Math.max(1000, settings.toolTimeoutMs ?? 8000);
   const queryRewriteEnabled = settings.queryRewrite !== false;
   const askRerankEnabled = settings.askRerank !== false;
   const useToolAugmentation = enableTools;
@@ -673,7 +671,7 @@ async function runAskQuestion(question: string, options?: AskOptions): Promise<A
     | { notes: string; metrics: ToolMetric[]; usedUrls: string[] }
     | null = null;
   if (useToolAugmentation) {
-    const runtime = await createToolsRuntime(toolTimeoutMs, sources, contextLimit, signal);
+    const runtime = await createToolsRuntime(sources, contextLimit, signal);
     sendProgress('Running tool-augmented extraction…', requestId);
     extraction = await runExtractionWithTools({
       config,

@@ -1,3 +1,5 @@
+import { runInference } from './inference';
+import { ollamaResponseError } from './ollamaErrors';
 import { DEFAULT_SETTINGS } from '../../shared/config/index';
 import { resolveOllamaChatModel } from './ollamaModels';
 import { getSettings } from '../settings/index';
@@ -73,56 +75,59 @@ export async function ensureChatReady(config: ChatConfig): Promise<void> {
 }
 
 export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
-  try {
-    const resp = await fetch(`${config.baseUrl}/api/chat`, {
-      method: 'POST',
-      signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: config.model,
-        stream: false,
-        messages: [{ role: 'user', content: 'Reply with the single word ok.' }],
-        options: { temperature: 0 }
-      })
-    });
-    if (!resp.ok) {
-      const message = `Chat provider probe failed (${resp.status})`;
-      return { ok: false, lastError: message, suggestion: buildOriginSuggestion(message) };
-    }
-    const payload = (await resp.json()) as ChatResponse;
-    const content = payload.message?.content?.trim();
-    if (!content) {
+  return runInference(async () => {
+    try {
+      const resp = await fetch(`${config.baseUrl}/api/chat`, {
+        method: 'POST',
+        signal: config.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: config.model,
+          stream: false,
+          messages: [{ role: 'user', content: 'Reply with the single word ok.' }],
+          options: { temperature: 0 }
+        })
+      });
+      if (!resp.ok) {
+        return { ok: false, lastError: (await ollamaResponseError(resp, 'chat probe')).message };
+      }
+      const payload = (await resp.json()) as ChatResponse;
+      const content = payload.message?.content?.trim();
+      if (!content) {
+        return {
+          ok: false,
+          lastError: 'Chat provider returned an empty response.',
+          suggestion: 'Check the selected chat model and verify Ollama can answer /api/chat requests from the extension.'
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to reach the chat provider.';
       return {
         ok: false,
-        lastError: 'Chat provider returned an empty response.',
-        suggestion: 'Check the selected chat model and verify Ollama can answer /api/chat requests from the extension.'
+        lastError: message,
+        suggestion: buildOriginSuggestion(message)
       };
     }
-    return { ok: true };
-  } catch (err) {
-    const message =
-      err instanceof Error
-        ? err.message
-        : 'Unable to reach the chat provider.';
-    return {
-      ok: false,
-      lastError: message,
-      suggestion: buildOriginSuggestion(message)
-    };
-  }
+  });
 }
 
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
-  const resp = await fetch(`${config.baseUrl}/api/chat`, {
-    method: 'POST',
-    signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+  return runInference(async () => {
+    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+      method: 'POST',
+      signal: config.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      throw await ollamaResponseError(resp, 'chat request');
+    }
+    return (await resp.json()) as ChatResponse;
   });
-  if (!resp.ok) {
-    throw new Error(`Chat request failed (${resp.status})`);
-  }
-  return (await resp.json()) as ChatResponse;
 }
 
 export function stripJsonFences(content: string): string {
@@ -151,42 +156,43 @@ export async function streamChat(
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  const textDecoder = new TextDecoder();
-  let assembled = '';
-  const resp = await fetch(`${config.baseUrl}/api/chat`, {
-    method: 'POST',
-    signal: config.signal ? AbortSignal.any([config.signal, AbortSignal.timeout(300_000)]) : AbortSignal.timeout(300_000),
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ...body, stream: true })
+  return runInference(async () => {
+    const textDecoder = new TextDecoder();
+    let assembled = '';
+    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+      method: 'POST',
+      signal: config.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, stream: true })
+    });
+    if (!resp.ok) throw await ollamaResponseError(resp, 'streaming chat');
+    if (!resp.body) throw new Error('Ollama returned no chat stream.');
+    const reader = resp.body.getReader();
+    const acceptLine = (line: string): void => {
+      if (!line.trim()) return;
+      const payload = JSON.parse(line) as ChatResponse;
+      if (payload.error) throw new Error(payload.error);
+      const chunk = payload.message?.content || '';
+      if (chunk) {
+        assembled += chunk;
+        onChunk(assembled);
+      }
+    };
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += textDecoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        lines.forEach(acceptLine);
+      }
+      acceptLine(buffer + textDecoder.decode());
+      return assembled;
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
   });
-  if (!resp.ok || !resp.body) {
-    throw new Error(`Streaming chat failed (${resp.status})`);
-  }
-  const reader = resp.body.getReader();
-  const acceptLine = (line: string): void => {
-    if (!line.trim()) return;
-    const payload = JSON.parse(line) as ChatResponse;
-    if (payload.error) throw new Error(payload.error);
-    const chunk = payload.message?.content || '';
-    if (chunk) {
-      assembled += chunk;
-      onChunk(assembled);
-    }
-  };
-  let buffer = '';
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += textDecoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      lines.forEach(acceptLine);
-    }
-    acceptLine(buffer + textDecoder.decode());
-    return assembled;
-  } finally {
-    await reader.cancel().catch(() => {});
-    reader.releaseLock();
-  }
 }

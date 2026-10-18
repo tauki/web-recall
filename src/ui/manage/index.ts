@@ -505,12 +505,17 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
     showStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}`, Boolean(result.failed));
     return true;
   } catch (err) {
-    showStatus(`Backfill failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    const message = err instanceof Error ? err.message : String(err);
+    showStatus(message === 'Stopped by user' ? 'Stopped. Completed pages are saved; unfinished pages keep their existing vectors.' : `Backfill failed: ${message}`, message !== 'Stopped by user');
+    rowProgress.clear();
+    await fetchPages().catch(() => {});
     return false;
   } finally { backfillRequestId = null; syncBackfillControls(); sortAndRender(); }
 }
 
 function syncBackfillControls(): void {
+  const stop = document.querySelector<HTMLButtonElement>('#manage-backfill-stop');
+  if (stop) stop.hidden = !backfillRequestId;
   const run = document.querySelector<HTMLButtonElement>('#manage-backfill-run');
   const force = document.querySelector<HTMLInputElement>('#manage-backfill-force');
   const limit = document.querySelector<HTMLInputElement>('#manage-backfill-limit');
@@ -555,6 +560,7 @@ function renderApp(rootEl: HTMLElement): void {
           <button type="button" id="manage-backfill-run">Backfill missing</button>
         </div>
         <p class="wr-help">Applies to your library, up to the page limit. By default, only missing chunks are filled. Use Re-embed on a row to replace that page’s vectors.</p>
+        <button type="button" id="manage-backfill-stop" hidden>Stop</button>
         <p id="manage-backfill-status" class="status-line" role="status"></p>
       </section>
       <table>
@@ -576,6 +582,11 @@ function renderApp(rootEl: HTMLElement): void {
   installSharedStyles();
   rootEl.dataset.view = 'manage';
   syncBackfillControls();
+  rootEl.querySelector('#manage-backfill-stop')?.addEventListener('click', () => {
+    if (!backfillRequestId) return;
+    void sendRuntimeMessage({ type: 'CANCEL_BACKFILL', requestId: backfillRequestId })
+      .catch((err) => updateStatus(`Unable to stop backfill: ${String(err)}`, true));
+  });
   rootEl.querySelector('#manage-backfill-limit')?.addEventListener('input', syncBackfillControls);
   rootEl.querySelector('#manage-backfill-force')?.addEventListener('change', syncBackfillControls);
 

@@ -15,14 +15,12 @@ import type {
 } from './types';
 
 const DEFAULT_MAX_SLICE = 1200;
-const DEFAULT_TOOL_TIMEOUT_MS = 10_000;
 
 export class ToolsRuntime implements ToolsHandlerContext {
   allowedUrls: Set<string>;
   pageText: Map<string, string>;
   pages: PageRecord[];
   maxSlice: number;
-  toolTimeoutMs: number;
   searchMemory: (query: string, k: number) => Promise<Awaited<ReturnType<ToolsRuntimeOptions['searchMemory']>>>;
   quickSearchMemory: (query: string, k: number) => Promise<Awaited<ReturnType<ToolsRuntimeOptions['quickSearchMemory']>>>;
   cache: ToolsCache = {
@@ -42,7 +40,6 @@ export class ToolsRuntime implements ToolsHandlerContext {
     this.pages = opts.pages || [];
     this.recordEvidence = opts.recordEvidence;
     this.maxSlice = typeof opts.maxSlice === 'number' ? opts.maxSlice : DEFAULT_MAX_SLICE;
-    this.toolTimeoutMs = typeof opts.toolTimeoutMs === 'number' ? opts.toolTimeoutMs : DEFAULT_TOOL_TIMEOUT_MS;
     this.searchMemory = opts.searchMemory;
     this.quickSearchMemory = opts.quickSearchMemory;
   }
@@ -53,18 +50,6 @@ export class ToolsRuntime implements ToolsHandlerContext {
     } catch {
       return name;
     }
-  }
-
-  private withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    return Promise.race([
-      promise,
-      new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms))
-    ]);
-  }
-
-  maybeWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-    if (!ms || ms <= 0) return promise;
-    return this.withTimeout(promise, ms);
   }
 
   extractDomain(url: string): string {

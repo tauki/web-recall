@@ -10,8 +10,10 @@ export async function backfillMissingEmbeddings(
   limit = 50,
   force = false,
   urls?: string[],
-  onProgress?: (progress: BackfillProgress) => void
+  onProgress?: (progress: BackfillProgress) => void,
+  signal?: AbortSignal
 ): Promise<{ processed: number; updated: number; failed: number; updatedUrls: string[] }> {
+  signal?.throwIfAborted();
   const pages = await storageManager.listAllPages();
   const ordered = urls === undefined ? pages : [...new Set(urls)].map((url) => pages.find((page) => page.url === url))
     .filter((page): page is PageRecord => Boolean(page));
@@ -22,11 +24,13 @@ export async function backfillMissingEmbeddings(
   let completed = 0;
   const report = (progress: BackfillProgress): void => { try { onProgress?.(progress); } catch { /* UI progress must not fail persistence. */ } };
   for (const page of targets) {
+    signal?.throwIfAborted();
     report({ url: page.url, status: 'running', completed, total: targets.length });
     const indices = page.chunks.map((_, index) => index).filter((index) => force || !page.chunks[index]!.embedding?.length);
     const key = embeddingSpaceKey(getEmbeddingConfig());
     try {
-      const embeddings = await computeEmbeddingsForChunks(indices.map((index) => page.chunks[index]!.text));
+      const embeddings = await computeEmbeddingsForChunks(indices.map((index) => page.chunks[index]!.text), signal);
+      signal?.throwIfAborted();
       if (key !== embeddingSpaceKey(getEmbeddingConfig())) throw new Error('Embedding settings changed; retry this page.');
       if (embeddings.length !== indices.length || embeddings.some((vector) => !vector.length || !vector.every(Number.isFinite)) ||
           embeddings.some((vector) => vector.length !== embeddings[0]!.length)) {
@@ -37,12 +41,14 @@ export async function backfillMissingEmbeddings(
       if (!latest || latest.updatedAt !== page.updatedAt) throw new Error('Page changed during backfill; retry with the latest capture.');
       const chunks = page.chunks.map((chunk) => ({ ...chunk }));
       indices.forEach((index, offset) => { chunks[index] = { ...chunks[index]!, embedding: embeddings[offset]!, embeddingKey: key }; });
+      signal?.throwIfAborted();
       await storageManager.savePageRecord({ ...page, chunks, lastEmbeddedAt: Date.now() }, { expectedUpdatedAt: page.updatedAt });
       await invalidateOffscreenIndex();
       updatedUrls.push(page.url);
       report({ url: page.url, status: 'complete', completed: ++completed, total: targets.length });
       await log('info', 'backfill embeddings updated page', { url: page.url, chunkCount: indices.length }).catch(() => {});
     } catch (err) {
+      signal?.throwIfAborted();
       failed += 1;
       report({ url: page.url, status: 'error', completed: ++completed, total: targets.length, error: err instanceof Error ? err.message : String(err) });
       await log('warn', 'backfill embeddings failed', { url: page.url, error: err instanceof Error ? err.message : String(err) }).catch(() => {});

@@ -211,3 +211,34 @@ test('Memory targets one page, reports progress there, and makes replacement opt
   f.q('#manage-backfill-force').click();
   assert.match(f.q('#manage-backfill-run').textContent, /Re-embed/);
 });
+
+test('Search Stop cancels the request and discards late results; Clear also cancels', async t => {
+  const pending=deferred();
+  const f=await ui('sidepanel',{SEARCH_QUERY:()=>pending.promise,CANCEL_SEARCH:()=>({cancelled:true})}); t.after(f.close);
+  f.q('#beta-search-input').value='slow query'; f.submit('#beta-search-form');
+  const first=f.requests.find(m=>m.type==='SEARCH_QUERY');
+  assert.equal(f.q('#beta-search-stop').hidden,false);
+  f.q('#beta-search-stop').click();
+  assert.equal(f.requests.find(m=>m.type==='CANCEL_SEARCH').requestId,first.requestId);
+  pending.resolve({results:[{...pages[0],score:.8,snippet:'late'}]}); await tick();
+  assert.match(f.q('#beta-search-status').textContent,/Stopped/);
+  assert.equal(f.q('#beta-search-results').children.length,0);
+  assert.equal(f.q('#beta-search-stop').hidden,true);
+  f.submit('#beta-search-form'); f.q('#beta-search-clear').click(); await tick();
+  assert.equal(f.requests.filter(m=>m.type==='CANCEL_SEARCH').length,2);
+  assert.equal(f.q('#beta-search-status').textContent,'');
+});
+
+test('Memory Stop targets the running backfill and restores controls when cancelled', async t => {
+  const pending=deferred();
+  const f=await ui('manage',{BACKFILL_EMBEDDINGS:()=>pending.promise,CANCEL_BACKFILL:()=>({cancelled:true})}); t.after(f.close);
+  f.q('#manage-backfill-run').click(); await tick();
+  const request=f.requests.find(m=>m.type==='BACKFILL_EMBEDDINGS');
+  assert.equal(f.q('#manage-backfill-stop').hidden,false);
+  f.q('#manage-backfill-stop').click();
+  assert.equal(f.requests.find(m=>m.type==='CANCEL_BACKFILL').requestId,request.requestId);
+  pending.resolve({error:'Stopped by user'}); await tick(); await tick();
+  assert.equal(f.q('#manage-backfill-stop').hidden,true);
+  assert.equal(f.q('#manage-backfill-run').disabled,false);
+  assert.match(f.q('#manage-backfill-status').textContent,/Stopped.*existing vectors/);
+});

@@ -471,6 +471,7 @@ function createSearchView(container: HTMLElement): void {
     <form class="beta-search-form" id="beta-search-form">
       <input type="search" id="beta-search-input" placeholder="Search captured pages" aria-label="Search query" />
       <button type="submit">Search</button>
+      <button type="button" id="beta-search-stop" data-secondary hidden>Stop</button>
       <button type="button" id="beta-search-clear" data-secondary hidden>Clear</button>
     </form>
     <div id="beta-search-status" role="status" aria-live="polite" class="beta-status"></div>
@@ -517,6 +518,16 @@ function createSearchView(container: HTMLElement): void {
   let currentSettings: BetaSettings = { ...DEFAULT_SETTINGS };
   let captureQueue: Array<{ url: string; title: string; status: string; attempts: number; updatedAt?: number }> = [];
   let recentPages: RecentPage[] = [];
+  let searchRequestId: string | null = null;
+  const stopSearch = container.querySelector<HTMLButtonElement>('#beta-search-stop')!;
+  function cancelSearch(): void {
+    const requestId = searchRequestId;
+    searchRequestId = null; stopSearch.hidden = true;
+    if (requestId) void sendRuntimeMessage({ type: 'CANCEL_SEARCH', requestId }).catch((err) => console.warn('Unable to cancel search', err));
+  }
+  stopSearch.addEventListener('click', () => {
+    searchGeneration++; cancelSearch(); setStatus('Stopped.');
+  });
   let searchGeneration = 0;
   let searching = false;
   const clearSearch = container.querySelector<HTMLButtonElement>('#beta-search-clear')!;
@@ -528,6 +539,7 @@ function createSearchView(container: HTMLElement): void {
     clearSearch.hidden = !searching;
   }
   function resetSearch(): void {
+    cancelSearch();
     searchGeneration++; searching = false;
     if (input) input.value = '';
     resultsWrap?.replaceChildren(); setStatus(''); syncSearchLayout();
@@ -674,12 +686,15 @@ function createSearchView(container: HTMLElement): void {
       resetSearch();
       return;
     }
+    cancelSearch();
+    const requestId = crypto.randomUUID(); searchRequestId = requestId; stopSearch.hidden = false;
     const generation = ++searchGeneration;
     searching = true; syncSearchLayout(); resultsWrap?.replaceChildren();
     setStatus('Searching…');
     try {
       const response = await sendRuntimeMessage<{ results: SearchResult[] }>({
         type: 'SEARCH_QUERY',
+        requestId,
         query,
         limit: 20
       });
@@ -690,6 +705,8 @@ function createSearchView(container: HTMLElement): void {
       if (generation !== searchGeneration) return;
       setStatus(`Search failed: ${err instanceof Error ? err.message : String(err)}`, true);
       renderResults([]);
+    } finally {
+      if (searchRequestId === requestId) { searchRequestId = null; stopSearch.hidden = true; }
     }
   });
 

@@ -77,7 +77,6 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
     askRerank: typeof payload.askRerank === 'boolean' ? payload.askRerank : DEFAULT_SETTINGS.askRerank,
     enableTools: typeof payload.enableTools === 'boolean' ? payload.enableTools : DEFAULT_SETTINGS.enableTools,
     maxToolSteps: clampNumber(payload.maxToolSteps, 0, 100),
-    toolTimeoutMs: clampNumber(payload.toolTimeoutMs, 1000, 30000),
     logFullBodies: typeof payload.logFullBodies === 'boolean' ? payload.logFullBodies : DEFAULT_SETTINGS.logFullBodies
   };
 }
@@ -182,7 +181,6 @@ async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<Bet
     askRerank: typeof partial.askRerank === 'boolean' ? partial.askRerank : current.askRerank,
     enableTools: typeof partial.enableTools === 'boolean' ? partial.enableTools : current.enableTools,
     maxToolSteps: typeof partial.maxToolSteps === 'number' ? clampNumber(partial.maxToolSteps, 0, 100) : current.maxToolSteps,
-    toolTimeoutMs: typeof partial.toolTimeoutMs === 'number' ? clampNumber(partial.toolTimeoutMs, 1000, 30000) : current.toolTimeoutMs,
     logFullBodies: typeof partial.logFullBodies === 'boolean' ? partial.logFullBodies : current.logFullBodies
   };
   await writeSettingsToStorage(next);

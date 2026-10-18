@@ -1,3 +1,5 @@
+import { runInference } from '../providers/inference';
+import { OllamaRequestError, ollamaResponseError } from '../providers/ollamaErrors';
 import { abortable } from '../../shared/abort';
 import type { CapturePayload } from '../capture/types';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
@@ -15,7 +17,6 @@ const DOC_PREFIX = 'title: none | text: ';
 const CONFIG_STORAGE_KEY = 'embeddingConfig';
 const BROWSER_READY_KEY = 'browserEmbedReady';
 const MAX_EMBED_RETRIES = 3;
-const EMBED_TIMEOUT_MS = 10_000;
 
 export type BrowserEmbedStatus = {
   ready: boolean;
@@ -286,39 +287,37 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
 
 async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<number[][]> {
   if (!inputs.length) return [];
-  const endpoint = `${currentConfig.baseUrl}/api/embed`;
-  for (let attempt = 1; attempt <= MAX_EMBED_RETRIES; attempt++) {
+  // Retries must use the same model space even if Settings changes mid-request.
+  const { baseUrl, model } = currentConfig;
+  for (let attempt = 1; ; attempt++) {
     try {
       signal?.throwIfAborted();
-      const resp = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: currentConfig.model, input: inputs }),
-        signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(EMBED_TIMEOUT_MS)]) : AbortSignal.timeout(EMBED_TIMEOUT_MS)
+      return await runInference(async () => {
+        const resp = await fetch(`${baseUrl}/api/embed`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ model, input: inputs }),
+          signal
+        });
+        if (!resp.ok) throw await ollamaResponseError(resp, 'embedding request');
+        const data = await resp.json().catch(() => {
+          throw new OllamaRequestError('Ollama returned invalid embedding JSON.');
+        });
+        const vectors = data?.embeddings ?? (Array.isArray(data?.embedding) ? [data.embedding] : undefined);
+        if (!Array.isArray(vectors) || vectors.length !== inputs.length ||
+            vectors.some((vector) => !Array.isArray(vector) || !vector.length || !vector.every(Number.isFinite)) ||
+            vectors.some((vector) => vector.length !== vectors[0].length)) {
+          throw new OllamaRequestError('Ollama returned incomplete or invalid embeddings; existing vectors were preserved.');
+        }
+        return vectors as number[][];
       });
-      if (!resp.ok) {
-        throw new Error(`Embedding request failed: ${resp.status}`);
-      }
-      const data = await resp.json();
-      if (Array.isArray(data.embeddings)) {
-        return data.embeddings as number[][];
-      }
-      if (Array.isArray(data.embedding)) {
-        return [data.embedding as number[]];
-      }
-      console.warn('[beta-background:embeddings] unexpected embed response shape', data);
-      return [];
     } catch (err) {
       signal?.throwIfAborted();
-      const delayMs = Math.min(2000 * attempt, 5000);
+      if (attempt >= MAX_EMBED_RETRIES || (err instanceof OllamaRequestError && !err.retryable)) throw err;
       console.warn('[beta-background:embeddings] embed attempt failed', { attempt, err });
-      if (attempt === MAX_EMBED_RETRIES) {
-        throw err;
-      }
-      await abortable(delay(delayMs), signal);
+      await abortable(delay(Math.min(2000 * attempt, 5000)), signal);
     }
   }
-  return [];
 }
 
 async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<number[][]> {
@@ -379,39 +378,15 @@ export async function computeEmbeddingsForChunks(chunks: string[], signal?: Abor
   if (chunks.length === 0) return [];
   const sanitized = chunks.map((text) => text || '');
   if (currentConfig.provider === 'browser') {
-    return abortable(computeBrowserEmbeddings(sanitized, DOC_PREFIX), signal);
+    return runInference(() => abortable(computeBrowserEmbeddings(sanitized, DOC_PREFIX), signal));
   }
-  try {
-    const batch = await callOllamaEmbed(sanitized, signal);
-    if (batch.length === sanitized.length) {
-      return batch;
-    }
-  } catch (err) {
-    signal?.throwIfAborted();
-    console.warn('[beta-background:embeddings] batch call failed', err);
-  }
-  const results: number[][] = [];
-  for (const text of sanitized) {
-    if (!text) {
-      results.push([]);
-      continue;
-    }
-    try {
-      const single = await callOllamaEmbed([text], signal);
-      results.push(single[0] || []);
-    } catch (err) {
-      signal?.throwIfAborted();
-      console.warn('[beta-background:embeddings] per-item call failed', err);
-      results.push([]);
-    }
-  }
-  return results;
+  return callOllamaEmbed(sanitized, signal);
 }
 
 export async function computeEmbeddingsForQueries(queries: string[], signal?: AbortSignal): Promise<number[][]> {
   if (currentConfig.provider === 'browser') {
     signal?.throwIfAborted();
-    return abortable(computeBrowserEmbeddings(queries, QUERY_PREFIX), signal);
+    return runInference(() => abortable(computeBrowserEmbeddings(queries, QUERY_PREFIX), signal));
   }
   return computeEmbeddingsForChunks(queries, signal);
 }

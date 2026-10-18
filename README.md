@@ -59,7 +59,7 @@ Setup
    ollama serve
    ```
 
-   Tip: If you run into CORS errors accessing Ollama from the extension, see
+   If Ollama returns **HTTP 403** or a CORS error from the extension, see
    [FIX_OLLAMA_ORIGINS.md](./FIX_OLLAMA_ORIGINS.md) for step-by-step instructions
    to allow your Chrome extension origin.
 

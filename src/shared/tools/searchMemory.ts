@@ -41,7 +41,7 @@ export async function runSearchMemory(ctx: ToolsHandlerContext, rawArgs: unknown
   }
 
   try {
-    const hits = await ctx.maybeWithTimeout(ctx.searchMemory(query, k), ctx.toolTimeoutMs);
+    const hits = await ctx.searchMemory(query, k);
     const content = JSON.stringify({
       ok: true,
       data: normalizeHits(ctx, hits),

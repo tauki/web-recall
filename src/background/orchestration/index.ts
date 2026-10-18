@@ -1,5 +1,6 @@
 /// <reference types="chrome" />
 
+import { runOperation, cancelOperation } from './operations';
 import { getSettings, shouldCaptureUrl, updateSettings } from '../settings/index';
 import {
   getEmbeddingConfig,
@@ -28,11 +29,13 @@ import type { BetaSettings, EmbeddingConfig } from '../../shared/config/index';
 
 type RuntimeMessage =
   | { type: 'CANCEL_ASK'; requestId: string }
+  | { type: 'CANCEL_SEARCH'; requestId: string }
+  | { type: 'CANCEL_BACKFILL'; requestId: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'SET_SETTINGS'; payload?: Partial<BetaSettings> }
   | { type: 'GET_EMBEDDING_CONFIG' }
   | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig> }
-  | { type: 'SEARCH_QUERY'; query: string; limit?: number }
+  | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string }
   | { type: 'ASK_QUESTION'; question: string; options?: { useSearch?: boolean; maxResults?: number; requestId?: string } }
   | { type: 'GET_MODEL_SETTINGS' }
   | { type: 'SET_MODEL'; key: 'chatModel' | 'summaryModel'; value?: string }
@@ -156,6 +159,14 @@ function handleCaptureActiveTab(sendResponse: SendResponse): boolean {
 }
 
 const runtimeHandlers: RuntimeHandlerMap = {
+  CANCEL_SEARCH: (message, sendResponse) => {
+    sendResponse({ cancelled: cancelOperation('search', message.requestId) });
+    return false;
+  },
+  CANCEL_BACKFILL: (message, sendResponse) => {
+    sendResponse({ cancelled: cancelOperation('backfill', message.requestId) });
+    return false;
+  },
   CANCEL_ASK: (message, sendResponse) => {
     sendResponse({ cancelled: cancelAskQuestion(String(message.requestId || '')) });
     return false;
@@ -188,10 +199,11 @@ const runtimeHandlers: RuntimeHandlerMap = {
 
   SEARCH_QUERY: (message, sendResponse) =>
     respondWith(
-      searchStoredPages(
+      runOperation('search', message.requestId, (signal) => searchStoredPages(
         String(message.query || ''),
-        typeof message.limit === 'number' ? message.limit : 10
-      ).then((results) => ({ results })),
+        typeof message.limit === 'number' ? message.limit : 10,
+        { signal }
+      )).then((results) => ({ results })),
       sendResponse
     ),
 
@@ -343,12 +355,13 @@ const runtimeHandlers: RuntimeHandlerMap = {
 
   BACKFILL_EMBEDDINGS: (message, sendResponse) =>
     respondWith(
-      backfillMissingEmbeddings(
+      runOperation('backfill', message.requestId, (signal) => backfillMissingEmbeddings(
         typeof message.limit === 'number' ? message.limit : 50,
         Boolean(message.force),
         Array.isArray(message.urls) ? (message.urls as string[]) : undefined,
-        (progress) => { void chrome.runtime.sendMessage({ type: 'BACKFILL_PROGRESS', requestId: message.requestId, ...progress }).catch(() => {}); }
-      ).then((result) => ({ result })),
+        (progress) => { void chrome.runtime.sendMessage({ type: 'BACKFILL_PROGRESS', requestId: message.requestId, ...progress }).catch(() => {}); },
+        signal
+      )).then((result) => ({ result })),
       sendResponse
     ),
 

@@ -16,7 +16,6 @@ export type ToolsRuntimeOptions = {
   pageText: Map<string, string>;
   pages: PageRecord[];
   maxSlice?: number;
-  toolTimeoutMs?: number;
   recordEvidence?: (url: string, text: string) => number;
   searchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
   quickSearchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
@@ -78,14 +77,12 @@ export interface ToolsHandlerContext {
   pageText: Map<string, string>;
   pages: PageRecord[];
   maxSlice: number;
-  toolTimeoutMs: number;
   searchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
   quickSearchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
   cache: ToolsCache;
   metrics: ToolMetric[];
   usedUrls: Set<string>;
   usedUrlOrder: string[];
-  maybeWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T>;
   getPage(url: string): PageRecord | undefined;
   extractDomain(url: string): string;
   cleanPreview(text: string, limit?: number): string;

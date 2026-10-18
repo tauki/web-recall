@@ -6,6 +6,8 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Report Ollama HTTP failures and origin configuration guidance instead of misleading incomplete-vector errors; retry only transient failures and preserve saved vectors.
+- Remove automatic inference and Ask tool deadlines, add Stop to Search and embedding backfill, retain Ask cancellation, and keep the service worker active only while model work is pending.
 - Add extension and toolbar icons in 16, 32, 48 and 128px sizes; include them in release ZIPs and reject missing or incorrectly sized declared icons during packaging.
 - Migrate legacy pause, allowlist and denylist choices before capture resumes; preserve existing 0.2.0 settings and serialize partial updates to avoid lost changes.
 - Preserve valid legacy captures and version history beyond external-import size limits, while keeping imported JSON bounded and validated.

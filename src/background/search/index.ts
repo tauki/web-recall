@@ -233,7 +233,8 @@ async function generateQueryVariations(query: string, n = 3, options: SearchOpti
   const rewriteEnabled = typeof options.rewrite === 'boolean' ? options.rewrite : settings.queryRewrite !== false;
   if (!rewriteEnabled) return variations;
   try {
-    const config = await getChatConfig();
+    const config = { ...await getChatConfig(), signal: options.signal };
+    options.signal?.throwIfAborted();
     const body = {
       model: config.model,
       messages: [
@@ -259,6 +260,7 @@ async function generateQueryVariations(query: string, n = 3, options: SearchOpti
         if (!variations.includes(line)) variations.push(line);
       });
   } catch {
+    options.signal?.throwIfAborted();
     // fallback to original
   }
   return variations.slice(0, Math.max(1, n + 1));
@@ -384,7 +386,8 @@ async function rerankWithCrossEncoder(
   if (!rerankEnabled) return pool;
   const limited = pool.slice(0, Math.min(12, pool.length));
   try {
-    const config = await getChatConfig();
+    const config = { ...await getChatConfig(), signal: options.signal };
+    options.signal?.throwIfAborted();
     const enriched = await enrichRerankCandidates(limited);
     const batchScores = await batchScoreCandidatesWithLLM(query, enriched, config);
     if (batchScores.size) {
@@ -403,6 +406,7 @@ async function rerankWithCrossEncoder(
       }
     }
   } catch (err) {
+    options.signal?.throwIfAborted();
     console.warn('[beta-background:search] cross-encoder rerank failed', err);
   }
   const merged = [...limited, ...pool.slice(limited.length)];
@@ -420,6 +424,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
   const normalized = query.trim();
   if (!normalized) return [];
   const variations = await generateQueryVariations(normalized, 3, options);
+  options.signal?.throwIfAborted();
   const embeddingKey = embeddingSpaceKey(getEmbeddingConfig());
   const embeddings = await computeEmbeddingsForQueries(variations, options.signal).catch((err) => { options.signal?.throwIfAborted(); console.warn(err); return []; });
   if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit);

@@ -15,7 +15,6 @@ export type BetaSettings = {
   askRerank: boolean;
   enableTools: boolean;
   maxToolSteps: number;
-  toolTimeoutMs: number;
   logFullBodies: boolean;
 };
 
@@ -36,7 +35,6 @@ export const DEFAULT_SETTINGS: BetaSettings = {
   askRerank: true,
   enableTools: true,
   maxToolSteps: 2,
-  toolTimeoutMs: 8000,
   logFullBodies: false
 };
 

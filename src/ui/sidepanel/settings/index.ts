@@ -300,12 +300,8 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-max-tool-steps">Max tool steps</label>
           <input id="beta-max-tool-steps" type="number" min="0" />
         </div>
-        <div class="beta-field">
-          <label for="beta-tool-timeout">Tool timeout (ms)</label>
-          <input id="beta-tool-timeout" type="number" min="1000" step="500" />
-        </div>
         <label class="beta-toggle"><input type="checkbox" id="beta-log-full" /> Log full capture payloads</label>
-        <p class="beta-help">These settings control query rewriting, Search reranking, and how Ask builds answers from captured pages. Max tool steps uses 0 as no user limit.</p>
+        <p class="beta-help">These settings control query rewriting, Search reranking, and how Ask builds answers from captured pages. Max tool steps uses 0 as no user limit. Model inference has no automatic timeout; use Stop in Ask, Search or embedding backfill to cancel.</p>
       </section>
 
       <section class="beta-card" aria-labelledby="calibration-heading">
@@ -394,7 +390,6 @@ function attachBehavior(root: HTMLElement): void {
   const askRerankToggle = root.querySelector<HTMLInputElement>('#beta-ask-rerank');
   const enableToolsToggle = root.querySelector<HTMLInputElement>('#beta-enable-tools');
   const maxToolStepsInput = root.querySelector<HTMLInputElement>('#beta-max-tool-steps');
-  const toolTimeoutInput = root.querySelector<HTMLInputElement>('#beta-tool-timeout');
   const logFullBodiesToggle = root.querySelector<HTMLInputElement>('#beta-log-full');
   const providerBaseInput = root.querySelector<HTMLInputElement>('#beta-provider-base');
   const chatModelSelect = root.querySelector<HTMLSelectElement>('#beta-chat-model');
@@ -568,7 +563,6 @@ function attachBehavior(root: HTMLElement): void {
     if (askRerankToggle) askRerankToggle.checked = settings.askRerank ?? true;
     if (enableToolsToggle) enableToolsToggle.checked = !!settings.enableTools;
     if (maxToolStepsInput) maxToolStepsInput.value = String(settings.maxToolSteps ?? DEFAULT_SETTINGS.maxToolSteps);
-    if (toolTimeoutInput) toolTimeoutInput.value = String(settings.toolTimeoutMs ?? DEFAULT_SETTINGS.toolTimeoutMs);
     if (logFullBodiesToggle) logFullBodiesToggle.checked = !!settings.logFullBodies;
     applyTheme(settings.theme || 'light');
     const allowlistCount = settings.allowlist.length;
@@ -1051,17 +1045,6 @@ function attachBehavior(root: HTMLElement): void {
     } catch (err) {
       setStatus(`Unable to update tool steps: ${err instanceof Error ? err.message : String(err)}`, true);
       maxToolStepsInput.value = String(currentSettings.maxToolSteps);
-    }
-  });
-
-  toolTimeoutInput?.addEventListener('change', async () => {
-    const value = Number(toolTimeoutInput.value);
-    try {
-      await runtimeMessage<{ settings: BetaSettings }>({ type: 'SET_SETTINGS', payload: { toolTimeoutMs: value } });
-      setStatus('Tool timeout saved');
-    } catch (err) {
-      setStatus(`Unable to update tool timeout: ${err instanceof Error ? err.message : String(err)}`, true);
-      toolTimeoutInput.value = String(currentSettings.toolTimeoutMs);
     }
   });
 
