@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <title>Web Recall</title>
+  <rect x="12" y="12" width="104" height="104" rx="22" fill="#6d4ae6"/>
+  <path fill="#fff" d="m27 38 11 52h13l13-30 13 30h13l11-52H88l-6 33-12-28H58L46 71l-6-33Z"/>
+</svg>

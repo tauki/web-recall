@@ -67,6 +67,12 @@ async function main() {
     treeShaking: true
   });
   await copyHtml();
+  const iconDir = path.join(OUT_DIR, 'icons');
+  await fs.mkdir(iconDir, { recursive: true });
+  for (const size of [16, 32, 48, 128]) {
+    const name = `icon-${size}.png`;
+    await fs.copyFile(path.join(REPO_ROOT, 'src/assets/icons', name), path.join(iconDir, name));
+  }
   await copyTransformersWasm();
   console.info(`Beta workspace bundled to ${OUT_DIR}`);
 }

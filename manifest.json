@@ -41,7 +41,11 @@
   },
   "options_page": "dist/beta/ui/manage/index.html",
   "action": {
-    "default_title": "Open Web Recall"
+    "default_title": "Open Web Recall",
+    "default_icon": {
+      "16": "dist/beta/icons/icon-16.png",
+      "32": "dist/beta/icons/icon-32.png"
+    }
   },
   "commands": {
     "open-side-panel": {
@@ -58,5 +62,11 @@
       },
       "description": "Capture the current page now"
     }
+  },
+  "icons": {
+    "16": "dist/beta/icons/icon-16.png",
+    "32": "dist/beta/icons/icon-32.png",
+    "48": "dist/beta/icons/icon-48.png",
+    "128": "dist/beta/icons/icon-128.png"
   }
 }

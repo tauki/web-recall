@@ -6,6 +6,7 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.0 - Unreleased
 ------------------
+- Add extension and toolbar icons in 16, 32, 48 and 128px sizes; include them in release ZIPs and reject missing or incorrectly sized declared icons during packaging.
 - Migrate legacy pause, allowlist and denylist choices before capture resumes; preserve existing 0.2.0 settings and serialize partial updates to avoid lost changes.
 - Preserve valid legacy captures and version history beyond external-import size limits, while keeping imported JSON bounded and validated.
 - Retain saved vectors and model identity for unchanged chunks when recapture inference fails, including concurrent backfill results; changed chunks remain unembedded until inference succeeds.
