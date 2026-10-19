@@ -8,6 +8,28 @@ and provides a side-panel UI for semantic search. You can also ask questions
 about what you've read using retrieval-augmented generation (RAG) powered by
 locally running models.
 
+Screenshots
+-----------
+
+These screenshots use a fictional sample library.
+
+**Search your saved pages alongside the page you're browsing.**
+
+![Web Recall in Chrome's side panel, showing two sample search results beside a generic webpage](.github/assets/screenshots/sidepanel-search.png)
+
+<details>
+<summary>More screenshots: Memory Manager and browser model settings</summary>
+
+**Review saved pages and their embedding status in Memory Manager.**
+
+![Memory Manager showing sample saved pages, embedding status, and re-embed controls](.github/assets/screenshots/memory-manager.png)
+
+**Choose and download an embedding model to run in your browser.**
+
+![Browser embedding settings with EmbeddingGemma 2 selected and explicit model download controls](.github/assets/screenshots/browser-models.png)
+
+</details>
+
 Directory contents
 ------------------
 
