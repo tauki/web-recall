@@ -1,323 +1,86 @@
-# 🔐 Allow Chrome Extension Access to Ollama (CORS Configuration)
+# Allow Web Recall to access Ollama
 
-By default, the local Ollama server only accepts requests from trusted origins.
-To securely connect your Chrome Extension to http://127.0.0.1:11434, you must explicitly allow your extension’s origin.
+If Ollama responds with **HTTP 403**, it may be rejecting the extension's origin.
+This is an access configuration problem, not a missing or incomplete embedding.
+Changing the embedding model or retrying individual passages will not fix it.
 
-Unfortunately, Ollama does not currently provide a built-in way to set OLLAMA_ORIGINS via its GUI or config files.
-Which is a shame, but we can work around this by setting environment variables for the Ollama service.
+1. Open `chrome://extensions`, enable Developer mode, and copy Web Recall's ID.
+2. Add `chrome-extension://YOUR_EXTENSION_ID` to `OLLAMA_ORIGINS` on the machine
+   running Ollama. Keep any other origins you intentionally use, separated by commas.
+3. Restart Ollama, then retry the failed operation. In Memory Manager, use
+   **Backfill missing**; leave **Force re-embed all** unchecked.
 
-This guide explains how to configure OLLAMA_ORIGINS across macOS, Linux, and Windows, and how to verify that everything is working.
+Use the ID of the extension you actually loaded. An unpacked checkout, a separate
+worktree and a Chrome Web Store installation may have different IDs. The error
+message includes the requesting extension's exact origin.
 
----
+## macOS app
 
-## 🧩 1. Identify Your Extension Origin
+Quit Ollama from its menu bar icon. In Terminal, run the following with your actual ID,
+then reopen the Ollama app:
 
-Every Chrome extension has a unique ID, visible under chrome://extensions.
-
-Example:
-
-chrome-extension://<extension-id>
-
-This full URL prefix is your extension origin — you’ll use it in the configuration steps below.
-
----
-
-## 🍏 macOS: Set OLLAMA_ORIGINS with LaunchAgent
-
-The Ollama app runs as a background service managed by launchd.
-To make your extension origin permanent, set it via a LaunchAgent.
-
-### 1️⃣ Create a new plist file
-
-```bash
-mkdir -p ~/Library/LaunchAgents
-nano ~/Library/LaunchAgents/ai.ollama.origin.plist
+```sh
+launchctl setenv OLLAMA_ORIGINS "chrome-extension://YOUR_EXTENSION_ID"
 ```
 
-Paste the following XML (update USERNAME and your extension ID if needed):
+This sets the environment for applications started in the current login session.
+If you already manage Ollama with a LaunchAgent or another service manager, add the
+variable to that existing service configuration and restart that service instead
+of creating a second server.
 
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple Computer//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>ai.ollama.serve</string>
+## Terminal server (macOS or Linux)
 
-    <key>ProgramArguments</key>
-    <array>
-      <string>/usr/local/bin/ollama</string>
-      <string>serve</string>
-    </array>
+Stop the existing terminal server, then start it with:
 
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>OLLAMA_ORIGINS</key>
-      <string>chrome-extension://<extension-id></string>
-    </dict>
-
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key>
-    <string>/Users/USERNAME/Library/Logs/ollama-serve.out</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/USERNAME/Library/Logs/ollama-serve.err</string>
-  </dict>
-</plist>
+```sh
+OLLAMA_ORIGINS="chrome-extension://YOUR_EXTENSION_ID" ollama serve
 ```
 
-Tip: Replace /usr/local/bin/ollama with /opt/homebrew/bin/ollama on Apple Silicon.
+## Linux systemd service
 
----
+Run `sudo systemctl edit ollama.service` and add:
 
-### 2️⃣ Load the new configuration
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.ollama.origin.plist 2>/dev/null || true
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.ollama.origin.plist
-launchctl enable gui/$(id -u)/ai.ollama.serve
-launchctl kickstart -k gui/$(id -u)/ai.ollama.serve
-```
-
----
-
-### 3️⃣ Verify the environment variable
-
-```bash
-lsof -nP -iTCP:11434 -sTCP:LISTEN
-# Find the PID of the Ollama process:
-PID=<the_pid_here>
-
-ps eww -p $PID | tr ' ' '\n' | grep ^OLLAMA_ORIGINS=
-```
-
-Expected output:
-
-```text
-OLLAMA_ORIGINS=chrome-extension://<extension-id>
-```
-
----
-
-### 4️⃣ Test it from your extension
-
-manifest.json
-```json
-{
-  "manifest_version": 3,
-  "name": "My Extension",
-  "version": "0.0.1",
-  "host_permissions": [
-    "http://127.0.0.1:11434/*"
-  ]
-}
-```
-
-popup.js or offscreen.js
-```js
-async function chat() {
-  const res = await fetch('http://127.0.0.1:11434/api/chat', {
-    method: 'POST',
-    mode: 'cors',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      model: 'gpt-oss:latest',
-      messages: [{ role: 'user', content: 'Hello Ollama!' }],
-      stream: false
-    })
-  });
-  console.log(await res.json());
-}
-chat();
-```
-
----
-
-### 5️⃣ Revert to default
-
-```bash
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/ai.ollama.origin.plist
-rm ~/Library/LaunchAgents/ai.ollama.origin.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.ollama.ollama.plist 2>/dev/null || true
-```
-
----
-
-## 🐧 Linux: Set OLLAMA_ORIGINS with systemd
-
-Most Linux systems run Ollama as a systemd service.
-
-### 1️⃣ Add the environment variable
-
-```bash
-sudo mkdir -p /etc/systemd/system/ollama.service.d
-sudo tee /etc/systemd/system/ollama.service.d/override.conf >/dev/null <<'EOF'
+```ini
 [Service]
-Environment=OLLAMA_ORIGINS=chrome-extension://<extension-id>
-EOF
+Environment="OLLAMA_ORIGINS=chrome-extension://YOUR_EXTENSION_ID"
+```
 
+Then run:
+
+```sh
 sudo systemctl daemon-reload
 sudo systemctl restart ollama
-sudo systemctl status ollama --no-pager
 ```
 
-If Ollama runs as a user service:
+## Windows app
 
-```bash
-systemctl --user edit ollama
-```
+Quit Ollama from the taskbar. Add or edit the user environment variable
+`OLLAMA_ORIGINS` in Windows' environment-variable settings, set it to
+`chrome-extension://YOUR_EXTENSION_ID`, and restart Ollama from the Start menu.
 
-and add the same [Service] block.
+## Verify
 
----
+This checks access without generating embeddings or modifying your library:
 
-### 2️⃣ Verify
-
-```bash
+```sh
 curl -i -X OPTIONS \
-  -H 'Origin: chrome-extension://<extension-id>' \
+  -H 'Origin: chrome-extension://YOUR_EXTENSION_ID' \
   -H 'Access-Control-Request-Method: POST' \
-  http://127.0.0.1:11434/api/chat | head
+  -H 'Access-Control-Request-Headers: content-type' \
+  http://localhost:11434/api/embed
 ```
 
-Expected:
+A successful response includes `Access-Control-Allow-Origin` for the extension.
+A successful `curl` call **without** an Origin header does not establish that Chrome
+can access the server. Both `localhost` and `127.0.0.1` work when configured correctly;
+neither bypasses the server's origin rules. No extra extension permissions or header
+rewriting are needed.
 
-```http
-Access-Control-Allow-Origin: chrome-extension://<extension-id>
-```
+Web Recall does not impose an inference deadline: slow local embeddings, answers,
+query rewriting and reranking can finish in their own time. Use **Stop** in Ask,
+Search or Memory Manager's embedding backfill to cancel the active request. Connection checks and model-list requests still have short
+timeouts because they do not perform inference. Server, proxy, browser shutdown or
+network failures can still interrupt requests.
 
----
-
-### 3️⃣ Docker example
-
-```bash
-docker run -d --name ollama \
-  -p 11434:11434 \
-  -e OLLAMA_ORIGINS=chrome-extension://<extension-id> \
-  ollama/ollama:latest
-```
-
-docker-compose.yml
-```yaml
-services:
-  ollama:
-    image: ollama/ollama:latest
-    ports: ["11434:11434"]
-    environment:
-      - OLLAMA_ORIGINS=chrome-extension://<extension-id>
-```
-
----
-
-### 4️⃣ Revert
-
-```bash
-sudo rm /etc/systemd/system/ollama.service.d/override.conf
-sudo systemctl daemon-reload
-sudo systemctl restart ollama
-```
-
----
-
-## 🪟 Windows: Set OLLAMA_ORIGINS via Environment Variable
-
-Ollama on Windows runs as a service.
-You can allow your extension by defining the variable system-wide.
-
-### 1️⃣ Set the variable (Admin PowerShell)
-
-```powershell
-[Environment]::SetEnvironmentVariable(
-  "OLLAMA_ORIGINS",
-  "chrome-extension://<extension-id>",
-  "Machine"
-)
-```
-
-Or set it via Control Panel → System → Advanced → Environment Variables…
-
----
-
-### 2️⃣ Restart the Ollama service
-
-```powershell
-Restart-Service -Name ollama
-```
-
-If that fails, open Services (services.msc) and restart the Ollama service manually.
-
----
-
-### 3️⃣ Verify
-
-```powershell
-[Environment]::GetEnvironmentVariable("OLLAMA_ORIGINS","Machine")
-
-Invoke-WebRequest -Method Options `
-  -Uri http://127.0.0.1:11434/api/chat `
-  -Headers @{ Origin = "chrome-extension://<extension-id>"; "Access-Control-Request-Method"="POST" } `
-  -UseBasicParsing | Select-String "Access-Control-Allow-Origin"
-```
-
----
-
-### 4️⃣ Revert
-
-```powershell
-[Environment]::SetEnvironmentVariable("OLLAMA_ORIGINS", $null, "Machine")
-Restart-Service -Name ollama
-```
-
----
-
-## 🌐 Chrome Extension Requirements (All Platforms)
-
-1. Use http://127.0.0.1:11434 instead of localhost — it consistently includes the correct Origin header.
-2. manifest.json must include:
-
-```json
-{
-  "manifest_version": 3,
-  "host_permissions": [
-    "http://127.0.0.1:11434/*",
-    "http://localhost:11434/*"
-  ]
-}
-```
-
-3. If you call from a background service worker:
-   - The Origin header might be missing.
-   - Use a popup/offscreen page to perform the fetch, or inject the header with webRequest:
-
-```js
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => ({
-    requestHeaders: [...details.requestHeaders, { name: 'Origin', value: 'chrome-extension://' + chrome.runtime.id }]
-  }),
-  { urls: ["http://127.0.0.1:11434/*"] },
-  ["blocking", "requestHeaders", "extraHeaders"]
-);
-```
-
----
-
-## 🧠 Troubleshooting
-
-| Symptom                               | Cause                               | Fix                                                       |
-|---------------------------------------|-------------------------------------|-----------------------------------------------------------|
-| 403 Forbidden on POST                 | Request had no Origin header        | Run from extension page/offscreen doc or inject header    |
-| Works with 127.0.0.1 but not localhost| Browser omits Origin on localhost   | Use 127.0.0.1 consistently                                |
-| Preflight fails (no ACAO headers)     | Wrong extension ID or CORS not applied | Check OLLAMA_ORIGINS and restart service               |
-| Change didn’t apply                   | Service not restarted               | Restart Ollama and verify via PID environment             |
-| Extension can’t reach API             | Missing host_permissions            | Add 127.0.0.1 and localhost URLs                          |
-
----
-
-## ✅ Summary
-
-1. Identify your Chrome extension ID
-2. Set OLLAMA_ORIGINS for your platform
-3. Restart Ollama
-4. Use http://127.0.0.1:11434 in all extension calls
-5. Test with fetch() or curl
+See the [official Ollama FAQ](https://docs.ollama.com/faq#how-can-i-allow-additional-web-origins-to-access-ollama)
+for environment configuration on other installations.

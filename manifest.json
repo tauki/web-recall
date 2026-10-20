@@ -1,16 +1,17 @@
 {
   "manifest_version": 3,
-  "minimum_chrome_version": "109",
+  "minimum_chrome_version": "142",
   "name": "Web Recall",
-  "version": "0.1.0",
-  "description": "A privacy‑preserving extension for semantic browsing history",
+  "version": "0.2.0",
+  "description": "A privacy-preserving extension for semantic browsing history",
   "permissions": [
     "sidePanel",
     "activeTab",
     "storage",
     "tabs",
     "offscreen",
-    "contextMenus"
+    "contextMenus",
+    "scripting"
   ],
   "host_permissions": [
     "http://localhost:11434/*",
@@ -18,30 +19,33 @@
     "<all_urls>"
   ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "dist/beta/background.js",
     "type": "module"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
   "content_scripts": [
     {
       "matches": [
         "<all_urls>"
       ],
-      "exclude_matches": [
-        "*://*.google.com/*",
-        "*://*.facebook.com/*",
-        "*://*.twitter.com/*"
-      ],
       "js": [
-        "content.js"
+        "dist/beta/content.js"
       ],
       "run_at": "document_idle"
     }
   ],
   "side_panel": {
-    "default_path": "sidepanel.html"
+    "default_path": "dist/beta/ui/sidepanel/index.html"
   },
+  "options_page": "dist/beta/ui/manage/index.html",
   "action": {
-    "default_title": "Open Web Recall"
+    "default_title": "Open Web Recall",
+    "default_icon": {
+      "16": "dist/beta/icons/icon-16.png",
+      "32": "dist/beta/icons/icon-32.png"
+    }
   },
   "commands": {
     "open-side-panel": {
@@ -50,6 +54,19 @@
         "mac": "Command+Shift+Y"
       },
       "description": "Open Web Recall side panel"
+    },
+    "capture-this-page": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+K",
+        "mac": "Command+Shift+K"
+      },
+      "description": "Capture the current page now"
     }
+  },
+  "icons": {
+    "16": "dist/beta/icons/icon-16.png",
+    "32": "dist/beta/icons/icon-32.png",
+    "48": "dist/beta/icons/icon-48.png",
+    "128": "dist/beta/icons/icon-128.png"
   }
 }

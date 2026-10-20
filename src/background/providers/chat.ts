@@ -1,0 +1,198 @@
+import { runInference } from './inference';
+import { ollamaResponseError } from './ollamaErrors';
+import { DEFAULT_SETTINGS } from '../../shared/config/index';
+import { resolveOllamaChatModel } from './ollamaModels';
+import { getSettings } from '../settings/index';
+import { getProviderBaseUrl } from './config';
+
+export type ChatConfig = {
+  signal?: AbortSignal;
+  providerId: string;
+  baseUrl: string;
+  model: string;
+};
+
+export type ChatResponse = {
+  error?: string;
+  message?: {
+    content?: string;
+    tool_calls?: Array<{
+      type?: string;
+      function?: {
+        name?: string;
+        arguments?: string | Record<string, unknown>;
+      };
+    }>;
+  };
+};
+
+export type CoverageLevel = 'low' | 'medium' | 'high';
+export type ChatProbeResult = {
+  ok: boolean;
+  lastError?: string;
+  suggestion?: string;
+};
+
+export function normalizeToolArguments(value: unknown): Record<string, unknown> {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Tool arguments must be an object');
+  return parsed as Record<string, unknown>;
+}
+
+function normalizeProviderId(providerId: string | undefined): string {
+  return providerId === 'ollama' ? providerId : DEFAULT_SETTINGS.activeProviderId;
+}
+
+function buildOriginSuggestion(message: string): string | undefined {
+  const normalized = message.toLowerCase();
+  if (
+    normalized.includes('failed to fetch') ||
+    normalized.includes('networkerror') ||
+    normalized.includes('load failed') ||
+    normalized.includes('cors')
+  ) {
+    return 'If Ollama is running locally, ensure OLLAMA_ORIGINS includes your chrome-extension://<extension-id> origin.';
+  }
+  return undefined;
+}
+
+export async function getChatConfig(): Promise<ChatConfig> {
+  const settings = await getSettings();
+  const providerId = normalizeProviderId(settings.activeProviderId);
+  const baseUrl = await getProviderBaseUrl(providerId);
+  return {
+    providerId,
+    baseUrl,
+    model: await resolveOllamaChatModel(baseUrl)
+  };
+}
+
+export async function ensureChatReady(config: ChatConfig): Promise<void> {
+  const probe = await probeChat(config);
+  if (!probe.ok) {
+    throw new Error(probe.suggestion ? `${probe.lastError || 'Unable to reach the chat provider.'} ${probe.suggestion}` : probe.lastError || 'Unable to reach the chat provider.');
+  }
+}
+
+export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
+  return runInference(async () => {
+    try {
+      const resp = await fetch(`${config.baseUrl}/api/chat`, {
+        method: 'POST',
+        signal: config.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: config.model,
+          stream: false,
+          messages: [{ role: 'user', content: 'Reply with the single word ok.' }],
+          options: { temperature: 0 }
+        })
+      });
+      if (!resp.ok) {
+        return { ok: false, lastError: (await ollamaResponseError(resp, 'chat probe')).message };
+      }
+      const payload = (await resp.json()) as ChatResponse;
+      const content = payload.message?.content?.trim();
+      if (!content) {
+        return {
+          ok: false,
+          lastError: 'Chat provider returned an empty response.',
+          suggestion: 'Check the selected chat model and verify Ollama can answer /api/chat requests from the extension.'
+        };
+      }
+      return { ok: true };
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to reach the chat provider.';
+      return {
+        ok: false,
+        lastError: message,
+        suggestion: buildOriginSuggestion(message)
+      };
+    }
+  });
+}
+
+export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
+  return runInference(async () => {
+    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+      method: 'POST',
+      signal: config.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!resp.ok) {
+      throw await ollamaResponseError(resp, 'chat request');
+    }
+    return (await resp.json()) as ChatResponse;
+  });
+}
+
+export function stripJsonFences(content: string): string {
+  return content
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/g, '')
+    .trim();
+}
+
+export function parseJsonResponse<T>(content: string): T | null {
+  if (!content) return null;
+  try {
+    return JSON.parse(stripJsonFences(content)) as T;
+  } catch {
+    return null;
+  }
+}
+
+export async function callChatJson<T>(config: ChatConfig, body: Record<string, unknown>): Promise<T | null> {
+  const response = await callChat(config, body);
+  return parseJsonResponse<T>(response.message?.content || '');
+}
+
+export async function streamChat(
+  config: ChatConfig,
+  body: Record<string, unknown>,
+  onChunk: (chunk: string) => void
+): Promise<string> {
+  return runInference(async () => {
+    const textDecoder = new TextDecoder();
+    let assembled = '';
+    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+      method: 'POST',
+      signal: config.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...body, stream: true })
+    });
+    if (!resp.ok) throw await ollamaResponseError(resp, 'streaming chat');
+    if (!resp.body) throw new Error('Ollama returned no chat stream.');
+    const reader = resp.body.getReader();
+    const acceptLine = (line: string): void => {
+      if (!line.trim()) return;
+      const payload = JSON.parse(line) as ChatResponse;
+      if (payload.error) throw new Error(payload.error);
+      const chunk = payload.message?.content || '';
+      if (chunk) {
+        assembled += chunk;
+        onChunk(assembled);
+      }
+    };
+    let buffer = '';
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += textDecoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        lines.forEach(acceptLine);
+      }
+      acceptLine(buffer + textDecoder.decode());
+      return assembled;
+    } finally {
+      await reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  });
+}
