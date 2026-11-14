@@ -1,4 +1,5 @@
 import { DEFAULT_EMBEDDING_CONFIG } from '../../shared/config/index';
+import { authorizeProviderOrigin, type ProviderConsentOptions } from './access';
 
 const PROVIDER_SETTINGS_KEY = 'betaProviderSettings';
 const DEFAULT_PROVIDER_ID = 'ollama';
@@ -57,9 +58,9 @@ async function readProviderSettings(): Promise<ProviderSettingsMap> {
 }
 
 async function writeProviderSettings(settings: ProviderSettingsMap): Promise<void> {
-  settingsCache = mergeWithDefaults(settings);
+  const next = mergeWithDefaults(settings);
   await new Promise<void>((resolve, reject) => {
-    chrome.storage.local.set({ [PROVIDER_SETTINGS_KEY]: settingsCache }, () => {
+    chrome.storage.local.set({ [PROVIDER_SETTINGS_KEY]: next }, () => {
       if (chrome.runtime.lastError) {
         reject(chrome.runtime.lastError);
       } else {
@@ -67,6 +68,7 @@ async function writeProviderSettings(settings: ProviderSettingsMap): Promise<voi
       }
     });
   });
+  settingsCache = next;
 }
 
 export async function getProviderSettings(providerId: string): Promise<Record<string, string>> {
@@ -74,7 +76,18 @@ export async function getProviderSettings(providerId: string): Promise<Record<st
   return { ...(settings[providerId] || {}) };
 }
 
-export async function updateProviderSettings(providerId: string, partial: Record<string, string>): Promise<Record<string, string>> {
+let updateTail: Promise<unknown> = Promise.resolve();
+
+export function updateProviderSettings(providerId: string, partial: Record<string, string>, options: ProviderConsentOptions = {}): Promise<Record<string, string>> {
+  const operation = updateTail.then(() => saveProviderSettings(providerId, partial, options));
+  updateTail = operation.catch(() => {});
+  return operation;
+}
+
+async function saveProviderSettings(providerId: string, partial: Record<string, string>, options: ProviderConsentOptions): Promise<Record<string, string>> {
+  if (typeof partial.baseUrl === 'string') {
+    await authorizeProviderOrigin(sanitizeBaseUrl(partial.baseUrl.trim()), options);
+  }
   const settings = await readProviderSettings();
   const next = {
     ...settings,

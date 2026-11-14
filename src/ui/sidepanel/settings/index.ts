@@ -779,18 +779,31 @@ function attachBehavior(root: HTMLElement): void {
 
   allowInput?.addEventListener('input', syncAllowlistSetupButton);
 
+  function confirmRemoteProvider(baseUrl: string): boolean {
+    const info = getProviderOriginInfo(baseUrl);
+    if (!info.isValid || !info.isRemote || !info.origin || getAcknowledgedRemoteOrigins().includes(info.origin)) return true;
+    const confirmed = window.confirm(
+      `This provider is remote (${info.origin}). Captured text, Ask context, and prompts may leave this machine. Save this provider anyway?`
+    );
+    if (!confirmed) setStatus('Remote provider change cancelled');
+    return confirmed;
+  }
+
   saveEmbeddingBtn?.addEventListener('click', async () => {
     if (!baseInput || !modelInput) return;
     const baseUrl = baseInput.value.trim();
     const model = modelInput.value.trim();
     const provider = embeddingProviderSelect?.value === 'browser' ? 'browser' : 'ollama';
+    if (provider === 'ollama' && !confirmRemoteProvider(baseUrl)) return;
     const browserModel = browserModelInput?.value.trim();
     const browserRevision = browserRevisionInput?.value.trim();
     try {
-      const response = await runtimeMessage<{ config: EmbeddingConfig }>({
+      const response = await runtimeMessage<{ config: EmbeddingConfig; settings?: BetaSettings }>({
         type: 'SET_EMBEDDING_CONFIG',
-        payload: { baseUrl, model, provider, browserModel, browserRevision }
+        payload: { baseUrl, model, provider, browserModel, browserRevision },
+        acknowledgeRemoteOrigin: provider === 'ollama'
       });
+      if (response.settings) applySettings(response.settings);
       applyEmbedding(response.config || { baseUrl, model });
       if (provider === 'browser') {
         await refreshBrowserEmbedStatus();
@@ -832,32 +845,16 @@ function attachBehavior(root: HTMLElement): void {
   providerSaveBtn?.addEventListener('click', async () => {
     if (!providerBaseInput) return;
     const baseUrl = providerBaseInput.value.trim();
-    const providerInfo = getProviderOriginInfo(baseUrl);
-    let acknowledgedOrigins = getAcknowledgedRemoteOrigins();
-    if (providerInfo.isValid && providerInfo.isRemote && providerInfo.origin && !acknowledgedOrigins.includes(providerInfo.origin)) {
-      const confirmed = window.confirm(
-        `This provider is remote (${providerInfo.origin}). Captured text, Ask context, and prompts may leave this machine. Save this provider anyway?`
-      );
-      if (!confirmed) {
-        setStatus('Remote provider change cancelled');
-        return;
-      }
-      acknowledgedOrigins = [...acknowledgedOrigins, providerInfo.origin];
-    }
+    if (!confirmRemoteProvider(baseUrl)) return;
     try {
-      await runtimeMessage<{ providers: unknown }>({
+      const response = await runtimeMessage<{ providers: unknown; settings?: BetaSettings }>({
         type: 'SET_PROVIDER_SETTING',
         providerId: providerSelect?.value || 'ollama',
         key: 'baseUrl',
-        value: baseUrl
+        value: baseUrl,
+        acknowledgeRemoteOrigin: true
       });
-      if (acknowledgedOrigins !== getAcknowledgedRemoteOrigins()) {
-        const response = await runtimeMessage<{ settings: BetaSettings }>({
-          type: 'SET_SETTINGS',
-          payload: { acknowledgedRemoteProviderOrigins: acknowledgedOrigins }
-        });
-        applySettings(response.settings || { ...currentSettings, acknowledgedRemoteProviderOrigins: acknowledgedOrigins });
-      }
+      if (response.settings) applySettings(response.settings);
       await refreshProvider();
       setStatus('Provider settings saved');
     } catch (err) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, chromeFixture, plain, tick } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, tick, waitFor } from './helpers.mjs';
 
 const page = (url = 'https://example.test') => ({ url, title: 'Article', text: 'text', timestamp: 1, manual: false, chunks: [{ text: 'private text', embedding: [1, 0], embeddingKey: 'test' }] });
 async function database() { return loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange }); }
@@ -93,7 +93,7 @@ test('vector dimensions must match and a missing first vector does not hide the 
 
 const chatMocks = {
   '../models/index': { getModelSettings: async () => ({}) },
-  '../settings/index': { getSettings: async () => ({}) },
+  '../settings/index': { getSettings: async () => ({}), acknowledgeRemoteProviderOrigin: async () => assert.fail('Local inference must not request remote acknowledgement') },
   './config': { getProviderBaseUrl: async () => 'http://localhost:11434' }
 };
 test('provider accepts object and JSON tool arguments but rejects malformed data', async () => {
@@ -152,14 +152,18 @@ test('Ask cancellation interrupts retrieval and does not start synthesis after i
 
 test('chat cancellation reaches the underlying fetch', async () => {
   let requestSignal;
+  let requestStarted;
+  const started = new Promise(resolve => { requestStarted = resolve; });
   const mod = await loadSource('src/background/providers/chat.ts', '', chatMocks, {
     fetch: async (_url, { signal }) => {
       requestSignal = signal;
+      requestStarted();
       return new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
     }
   });
   const controller = new AbortController();
   const pending = mod.callChat({ baseUrl: 'http://localhost', signal: controller.signal }, {});
+  await started;
   controller.abort(Error('User stopped'));
   await assert.rejects(pending, /User stopped/);
   assert.equal(requestSignal.aborted, true);
@@ -182,6 +186,39 @@ test('Ollama embeddings stop without retrying when the Ask signal is cancelled',
   controller.abort(Error('User stopped'));
   await assert.rejects(pending, /User stopped/);
   assert.equal(attempts, 1);
+});
+
+test('a failed capture never retries over a newer durable capture of the same URL', async t => {
+  const db = await database();
+  t.after(async () => (await db.openDatabase()).close());
+  const processing = await loadSource('src/background/processing/index.ts', '', { '../storage/manager': { storageManager: db } }, { chrome: chromeFixture });
+  let failFirst, reportStarted;
+  const first = new Promise((_resolve, reject) => { failFirst = reject; });
+  const started = new Promise(resolve => { reportStarted = resolve; });
+  const writes = [];
+  let failedNewer = false;
+  const capture = await loadSource('src/background/capture/index.ts', '', {
+    './processor': { processCapturePayload: async () => {} },
+    '../processing/index': processing,
+    '../settings/index': { shouldCaptureUrl: async () => true, getCachedSettingsSnapshot: () => ({}) },
+    '../../shared/logger/index': { log: async () => {} }
+  }, { console: { info() {}, error() {} }, setTimeout: callback => setTimeout(callback, 0) });
+  const queue = capture.createCaptureQueue(async payload => {
+    if (!writes.length) { writes.push('attempt'); reportStarted(); await first; }
+    if (payload.timestamp === 2 && !failedNewer) { failedNewer = true; throw Error('Transient failure of latest content'); }
+    await db.savePageRecord({ ...payload, manual: false, chunks: [{ text: payload.text, embedding: [] }] }, { requireProcessing: true });
+    writes.push(payload.text);
+  });
+  const older = { url: 'https://capture.test/article', title: 'Article', text: 'Old content', timestamp: 1, chunks: ['Old content'] };
+  await queue.enqueue(older);
+  await started;
+  await queue.enqueue({ ...older, text: 'New content', chunks: ['New content'], timestamp: 2 });
+  failFirst(Error('Temporary write failure'));
+  await waitFor(() => !queue.isProcessing() && !queue.peekQueue().length, 'capture retries to drain');
+  assert.deepEqual(writes, ['attempt', 'New content']);
+  assert.equal((await db.getPageRecord(older.url)).text, 'New content');
+  assert.equal((await db.getPageRecord(older.url)).timestamp, 2);
+  assert.equal(await db.getProcessingEntry(older.url), undefined);
 });
 
 test('queued and interrupted captures are recovered and completed on worker startup', async () => {

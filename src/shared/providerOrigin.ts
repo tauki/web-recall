@@ -22,6 +22,7 @@ export function getProviderOriginInfo(url: string | undefined): ProviderOriginIn
   }
   try {
     const parsed = new URL(url.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return { isValid: false, isRemote: false };
     const hostname = parsed.hostname.toLowerCase();
     const origin = parsed.origin.toLowerCase();
     const isRemote = !LOOPBACK_HOSTS.has(hostname);

@@ -5,6 +5,7 @@ import {
   deletePages,
   deleteProcessing,
   getPageRecord,
+  getNextPageRecord,
   getProcessingEntry,
   listAllPages,
   listLogs,
@@ -27,6 +28,7 @@ export type StorageBackend = {
   listAllPages: () => ReturnType<typeof listAllPages>;
   listRecentPages: (limit?: number) => ReturnType<typeof listRecentPages>;
   getPageRecord: (url: string) => ReturnType<typeof getPageRecord>;
+  getNextPageRecord: typeof getNextPageRecord;
   savePageRecord: typeof savePageRecord;
   deletePages: (urls: string[]) => Promise<number>;
   listLogs: (limit?: number) => ReturnType<typeof listLogs>;
@@ -44,6 +46,7 @@ export const storageManager: StorageBackend = {
   listAllPages,
   listRecentPages,
   getPageRecord,
+  getNextPageRecord,
   savePageRecord,
   deletePages,
   listLogs,

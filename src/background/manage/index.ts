@@ -1,4 +1,5 @@
 import { normalizeImportedPage } from '../../shared/db/records';
+import { encodeBackupPage, decodeBackupPage } from '../../shared/backup';
 import { cancelCaptureJobs } from '../capture/index';
 import { embeddingSpaceKey } from '../../shared/config/index';
 import { getEmbeddingConfig } from '../embeddings/index';
@@ -39,7 +40,7 @@ export async function getManagePages(): Promise<ManagePageSummary[]> {
 
 export async function deleteManagePages(urls: string[]): Promise<number> {
   if (!Array.isArray(urls) || urls.length === 0) return 0;
-  cancelCaptureJobs(urls);
+  await cancelCaptureJobs(urls);
   const deleted = await storageManager.deletePages(urls);
   if (deleted > 0) {
     await invalidateOffscreenIndex();
@@ -49,6 +50,22 @@ export async function deleteManagePages(urls: string[]): Promise<number> {
 
 export async function exportManagePages(): Promise<PageRecord[]> {
   return storageManager.listAllPages();
+}
+
+export async function exportBackupPage(afterUrl?: string): Promise<{ line?: string; url?: string }> {
+  const page = await storageManager.getNextPageRecord(afterUrl);
+  return page ? { line: encodeBackupPage(page), url: page.url } : {};
+}
+
+export async function importBackupPage(line: string): Promise<{ imported: number }> {
+  await restorePage(decodeBackupPage(line));
+  await invalidateOffscreenIndex();
+  return { imported: 1 };
+}
+
+async function restorePage(record: PageRecord): Promise<void> {
+  await cancelCaptureJobs([record.url]);
+  await storageManager.savePageRecord(record, { discardProcessing: true, replace: true });
 }
 
 export async function importManagePages(payload: ImportPayload): Promise<{ imported: number }> {
@@ -70,7 +87,7 @@ export async function importManagePages(payload: ImportPayload): Promise<{ impor
   });
   let imported = 0;
   for (const record of records) {
-    await storageManager.savePageRecord(record);
+    await restorePage(record);
     imported += 1;
   }
   if (imported > 0) {

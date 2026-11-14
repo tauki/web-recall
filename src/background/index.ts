@@ -1,4 +1,5 @@
 import { createCaptureQueue } from './capture/index';
+import { captureTab } from './capture/manual';
 import { configureEmbeddings } from './embeddings/index';
 import { initStorage } from './storage/index';
 import { orchestrateLifecycle } from './orchestration/index';
@@ -101,15 +102,9 @@ async function toggleSidePanel(windowId?: number): Promise<void> {
   }
 }
 
-function sendForceCaptureToTab(tabId?: number | null): void {
-  if (typeof tabId !== 'number' || tabId < 0) return;
+async function sendForceCaptureToTab(tabId?: number | null): Promise<void> {
   try {
-    chrome.tabs.sendMessage(tabId, { type: 'FORCE_CAPTURE' }, () => {
-      const err = chrome.runtime.lastError;
-      if (err) {
-        console.warn('[beta-background] force capture failed', err);
-      }
-    });
+    await captureTab(tabId);
   } catch (err) {
     console.warn('[beta-background] force capture failed', err);
   }
@@ -137,7 +132,7 @@ function setupContextMenus(): void {
       return;
     }
     if (info.menuItemId === 'wr_capture_now') {
-      sendForceCaptureToTab(tab?.id);
+      await sendForceCaptureToTab(tab?.id);
       return;
     }
     if (info.menuItemId === 'wr_toggle_pause') {
@@ -169,7 +164,7 @@ function setupCommands(): void {
     }
     if (command === 'capture-this-page') {
       const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      sendForceCaptureToTab(tab?.id);
+      await sendForceCaptureToTab(tab?.id);
     }
   });
 }

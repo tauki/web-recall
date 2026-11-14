@@ -1,4 +1,5 @@
 import { runInference } from '../providers/inference';
+import { fetchProvider, ProviderAccessError, authorizeProviderOrigin, type ProviderConsentOptions } from '../providers/access';
 import { OllamaRequestError, ollamaResponseError } from '../providers/ollamaErrors';
 import { abortable } from '../../shared/abort';
 import type { CapturePayload } from '../capture/types';
@@ -237,7 +238,15 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   return currentConfig;
 }
 
-export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): Promise<void> {
+let configUpdateTail: Promise<void> = Promise.resolve();
+
+export function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>, options: ProviderConsentOptions = {}): Promise<void> {
+  const operation = configUpdateTail.then(() => saveEmbeddingConfig(partial, options));
+  configUpdateTail = operation.catch(() => {});
+  return operation;
+}
+
+async function saveEmbeddingConfig(partial: Partial<EmbeddingConfig>, options: ProviderConsentOptions): Promise<void> {
   const nextConfig: EmbeddingConfig = {
     baseUrl: partial.baseUrl === undefined ? currentConfig.baseUrl : sanitizeBaseUrl(partial.baseUrl),
     model: partial.model || currentConfig.model,
@@ -246,24 +255,10 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
     browserRevision: partial.browserRevision || currentConfig.browserRevision,
     updatedAt: new Date().toISOString()
   };
+  if (nextConfig.provider !== 'browser') await authorizeProviderOrigin(nextConfig.baseUrl, options);
   const browserModelChanged =
     nextConfig.browserModel !== currentConfig.browserModel ||
     nextConfig.browserRevision !== currentConfig.browserRevision;
-  if (browserModelChanged) {
-    setBrowserEmbedReady(false);
-    updateBrowserEmbedStatus(
-      {
-        ready: false,
-        state: 'idle',
-        lastError: undefined,
-        code: undefined
-      },
-      {
-        model: nextConfig.browserModel || DEFAULT_BROWSER_MODEL,
-        revision: nextConfig.browserRevision || DEFAULT_BROWSER_REVISION
-      }
-    );
-  }
   if (nextConfig.provider === 'browser') {
     const status = await probeBrowserEmbeddingRuntime({
       model: nextConfig.browserModel || DEFAULT_BROWSER_MODEL,
@@ -273,9 +268,8 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
       throw new Error(status.lastError || 'Browser embedding runtime is unavailable.');
     }
   }
-  currentConfig = nextConfig;
-  return new Promise((resolve, reject) => {
-    chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: currentConfig }, () => {
+  await new Promise<void>((resolve, reject) => {
+    chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: nextConfig }, () => {
       if (chrome.runtime.lastError) {
         reject(chrome.runtime.lastError);
       } else {
@@ -283,6 +277,11 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
       }
     });
   });
+  currentConfig = nextConfig;
+  if (browserModelChanged) {
+    setBrowserEmbedReady(false);
+    updateBrowserEmbedStatus({ ready: false, state: 'idle', lastError: undefined, code: undefined });
+  }
 }
 
 async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<number[][]> {
@@ -293,7 +292,7 @@ async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<
     try {
       signal?.throwIfAborted();
       return await runInference(async () => {
-        const resp = await fetch(`${baseUrl}/api/embed`, {
+        const resp = await fetchProvider(`${baseUrl}/api/embed`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ model, input: inputs }),
@@ -313,7 +312,7 @@ async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<
       });
     } catch (err) {
       signal?.throwIfAborted();
-      if (attempt >= MAX_EMBED_RETRIES || (err instanceof OllamaRequestError && !err.retryable)) throw err;
+      if (err instanceof ProviderAccessError || attempt >= MAX_EMBED_RETRIES || (err instanceof OllamaRequestError && !err.retryable)) throw err;
       console.warn('[beta-background:embeddings] embed attempt failed', { attempt, err });
       await abortable(delay(Math.min(2000 * attempt, 5000)), signal);
     }

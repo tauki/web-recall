@@ -91,7 +91,40 @@ export function normalizeLegacyPage(raw: Record<string, unknown>, pageIndex: num
   return normalizePage(raw, pageIndex, 'legacy');
 }
 
-function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 'import' | 'legacy'): PageRecord {
+export function normalizeBackupPage(raw: Record<string, unknown>): PageRecord {
+  function validateFields(record: Record<string, unknown>): void {
+    for (const field of ['url', 'title', 'text', 'summary']) {
+      if (record[field] !== undefined && typeof record[field] !== 'string') throw new Error(`Invalid backup field: ${field} must be a string.`);
+    }
+    for (const field of ['timestamp', 'createdAt', 'updatedAt', 'lastEmbeddedAt']) {
+      if (record[field] !== undefined && (typeof record[field] !== 'number' || !Number.isFinite(record[field]) || (record[field] as number) < 0)) throw new Error(`Invalid backup field: ${field} must be a finite non-negative number.`);
+    }
+    if (record.manual !== undefined && typeof record.manual !== 'boolean') throw new Error('Invalid backup field: manual must be a boolean.');
+    for (const field of ['chunks', 'items']) {
+      const chunks = record[field];
+      if (chunks === undefined) continue;
+      if (!Array.isArray(chunks)) throw new Error(`Invalid backup field: ${field} must be an array.`);
+      for (const chunk of chunks) {
+        if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('Invalid backup chunk.');
+        if (typeof chunk.text !== 'string') throw new Error('Invalid backup chunk text.');
+        if (chunk.embedding !== undefined && !Array.isArray(chunk.embedding)) throw new Error('Invalid backup chunk embedding.');
+        if (Array.isArray(chunk.embedding) && !chunk.embedding.every((value: unknown) => typeof value === 'number' && Number.isFinite(value))) throw new Error('Invalid backup chunk embedding: contains a non-numeric value.');
+        if (chunk.embeddingKey !== undefined && typeof chunk.embeddingKey !== 'string') throw new Error('Invalid backup chunk embeddingKey.');
+      }
+    }
+  }
+  validateFields(raw);
+  if (raw.versions !== undefined) {
+    if (!Array.isArray(raw.versions)) throw new Error('Invalid backup versions: expected an array.');
+    for (const version of raw.versions) {
+      if (!version || typeof version !== 'object' || Array.isArray(version)) throw new Error('Invalid backup version.');
+      validateFields(version as Record<string, unknown>);
+    }
+  }
+  return normalizePage(raw, 0, 'backup');
+}
+
+function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 'import' | 'legacy' | 'backup'): PageRecord {
   const limits: RecordLimits = source === 'import' ? IMPORT_LIMITS : {};
   const now = Date.now();
   const url = readBoundedString(raw.url, '', `Page ${pageIndex + 1} url`, limits.url);
@@ -106,11 +139,11 @@ function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 
       timestamp: readTimestamp(value.timestamp, now, `Page ${pageIndex + 1} version timestamp`),
       text: readBoundedString(value.text, chunks.map(chunk => chunk.text).join('\n\n'), `Page ${pageIndex + 1} version text`, limits.text),
       chunks,
-      summary: readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, limits.summary)
+      summary: source === 'backup' && value.summary === undefined ? undefined : readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, limits.summary)
     };
   }) : undefined;
-  const latest = versions?.[typeof raw.latestVersionIndex === 'number' ? raw.latestVersionIndex : -1]
-    ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!);
+  const latest = source === 'backup' ? undefined : (versions?.[typeof raw.latestVersionIndex === 'number' ? raw.latestVersionIndex : -1]
+    ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!));
   const chunks = normalizeChunks(raw.chunks ?? raw.items ?? latest?.chunks, pageIndex, limits);
   const text = readBoundedString(raw.text, chunks.map(chunk => chunk.text).join('\n\n') || latest?.text || '', `Page ${pageIndex + 1} text`, limits.text);
   if (source === 'import' && !text && !chunks.some(chunk => chunk.text)) {

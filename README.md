@@ -70,6 +70,15 @@ Setup
    `pnpm build:beta` bundles all MV3 entrypoints into `dist/beta/` via esbuild.
    Re-run the build whenever you change `src/` or HTML entrypoints.
 
+   Regression tests use an isolated Chromium browser pinned by the development
+   dependencies. Install it once before running the suite; Linux also needs the
+   system libraries installed by the setup command:
+
+   ```bash
+   pnpm test:setup
+   pnpm test
+   ```
+
 2. Install and start Ollama
 
    The default runtime uses Ollama for embeddings and local chat/summarisation.
@@ -153,6 +162,10 @@ Setup
    model. The connection test probes the actual chat endpoint, which helps
    surface `OLLAMA_ORIGINS` misconfiguration.
 
+   Configure the final provider endpoint URL directly: redirects, including
+   same-origin redirects, are rejected. Remote-origin consent is checked before
+   each request and embedding retry; revoking consent stops subsequent requests.
+
    If Tools are enabled, Ask can call:
    - `search_memory({ query, k? })`
    - `get_page_summary({ url })`
@@ -219,6 +232,10 @@ Limitations
 
 Export/Import
 -------------
-- Export creates a JSON object with `schemaVersion: 1`, an `exportedAt` timestamp, and a `pages` array containing the stored page records and their chunks.
-- Import accepts legacy page arrays or an object with a `pages` array. A numeric `schemaVersion`, when provided, must be `1`; other versions are rejected.
+- Restore waits for pending capture admissions and cancels existing work for each restored URL, so an older capture cannot overwrite the restored text and embeddings. New captures requested afterward can update the page normally.
+- Restores replace the saved page, including its summary, history and embedding timestamp. Optional fields omitted from a backup are cleared rather than inherited from the destination; the last-modified timestamp records the restore itself.
+- **Export backup** saves one `.jsonl` file using Chrome's native save dialog. Records stream from IndexedDB to disk one page at a time, so the whole library is not assembled in memory. Keep the library unchanged during export for a consistent backup.
+- **Import backup or JSON** accepts the streaming backup and legacy JSON files. Backups are validated completely before any pages are restored; malformed or truncated files are rejected. A storage failure during restore can leave already imported pages in place; the error reports how many finished.
+- Streaming backups use a `{"format":"web-recall","schemaVersion":2}` header, one `{"type":"page","page":{...}}` record per line, and a `{"type":"end","pages":N}` footer. Total file size and page count are not capped. Each UTF-8 record is limited to 16 MiB to bound memory and stay within Chrome's messaging limits. Export rejects oversized records without committing an incomplete file.
+- Legacy JSON imports retain their 10 MiB file and 2,000-page limits and per-field validation. They accept page arrays or an object with a `pages` array; a numeric `schemaVersion`, when provided, must be `1`. Use streaming backups for larger libraries and historical captures beyond legacy field limits.
 - Imported vectors are preserved. Pages with missing embeddings or a different/unknown embedding model need to be re-embedded before semantic search can use them.

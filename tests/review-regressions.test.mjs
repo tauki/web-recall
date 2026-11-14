@@ -188,7 +188,7 @@ test('Settings and Ask choose the same installed default; describing providers n
   const modelSettings = { chatModel: null };
   const mocks = {
     '../models/index': { getModelSettings: async () => modelSettings },
-    '../settings/index': { getSettings: async () => settings },
+    '../settings/index': { getSettings: async () => settings, acknowledgeRemoteProviderOrigin: async () => assert.fail('Local inference must not request remote acknowledgement') },
     './config': { getProviderBaseUrl: async () => 'http://localhost:11434', updateProviderSettings: async () => {} }
   };
   const context = { fetch: async (target, options) => {
@@ -210,7 +210,7 @@ test('provider health reads are cheap and explicit connection tests still probe 
   const requests = [];
   const mod = await loadSource('src/background/providers/ollama.ts', '', {
     '../models/index': { getModelSettings: async () => ({ chatModel: 'chosen' }) },
-    '../settings/index': { getSettings: async () => settings },
+    '../settings/index': { getSettings: async () => settings, acknowledgeRemoteProviderOrigin: async () => assert.fail('Local inference must not request remote acknowledgement') },
     './config': { getProviderBaseUrl: async () => 'http://localhost:11434', updateProviderSettings: async () => {} }
   }, { fetch: async (target, options) => { requests.push({ target, options }); return { ok: true, json: async () => ({ models: [{ name: 'chosen' }], message: { content: 'ok' } }) }; } });
   await Promise.all([mod.describeOllamaProvider(), mod.describeOllamaProvider(), mod.getOllamaStatus()]);

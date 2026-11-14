@@ -1,5 +1,6 @@
 import { getProviderBaseUrl, updateProviderSettings } from './config';
 import { probeChat } from './chat';
+import { fetchProvider, type ProviderConsentOptions } from './access';
 import { listOllamaModels, resolveOllamaChatModel } from './ollamaModels';
 export { listOllamaModels } from './ollamaModels';
 
@@ -36,7 +37,7 @@ async function pingOllama(baseUrl: string): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetch(`${baseUrl}/`, { method: 'GET', signal: controller.signal });
+    const response = await fetchProvider(`${baseUrl}/`, { method: 'GET', signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
   } finally {
     clearTimeout(timeout);
@@ -78,7 +79,7 @@ export async function describeOllamaProvider(): Promise<ProviderDescriptor> {
     lastChecked: new Date().toISOString(),
     lastError: 'Unknown error'
   }));
-  const models = await listOllamaModels();
+  const models = status.online ? await listOllamaModels(baseUrl) : [];
   const selectedModel = await resolveOllamaChatModel(baseUrl, models);
   return {
     id: 'ollama',
@@ -98,9 +99,9 @@ export async function describeOllamaProvider(): Promise<ProviderDescriptor> {
   };
 }
 
-export async function updateOllamaSetting(key: string, value: string): Promise<void> {
+export async function updateOllamaSetting(key: string, value: string, options?: ProviderConsentOptions): Promise<void> {
   if (key === 'baseUrl') {
-    await updateProviderSettings('ollama', { baseUrl: value });
+    await updateProviderSettings('ollama', { baseUrl: value }, options);
     return;
   }
   throw new Error(`Unknown provider setting: ${key}`);

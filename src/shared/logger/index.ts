@@ -1,4 +1,4 @@
-import { saveLog, type LogRecord } from '../db/index';
+import { saveLog } from '../db/index';
 
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
@@ -37,11 +37,11 @@ export async function log(level: LogLevel, message: string, data?: Record<string
   emitConsole(level, message, data);
   try {
     await saveLog({
-      level: level === 'debug' ? 'info' : level,
+      level,
       message,
       data,
       createdAt: Date.now()
-    } as LogRecord);
+    });
   } catch (err) {
     console.warn('[beta-logger] persist failed', err);
   }
