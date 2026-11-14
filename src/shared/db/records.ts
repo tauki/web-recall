@@ -91,7 +91,11 @@ export function normalizeLegacyPage(raw: Record<string, unknown>, pageIndex: num
   return normalizePage(raw, pageIndex, 'legacy');
 }
 
-function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 'import' | 'legacy'): PageRecord {
+export function normalizeBackupPage(raw: Record<string, unknown>): PageRecord {
+  return normalizePage(raw, 0, 'backup');
+}
+
+function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 'import' | 'legacy' | 'backup'): PageRecord {
   const limits: RecordLimits = source === 'import' ? IMPORT_LIMITS : {};
   const now = Date.now();
   const url = readBoundedString(raw.url, '', `Page ${pageIndex + 1} url`, limits.url);
@@ -106,11 +110,11 @@ function normalizePage(raw: Record<string, unknown>, pageIndex: number, source: 
       timestamp: readTimestamp(value.timestamp, now, `Page ${pageIndex + 1} version timestamp`),
       text: readBoundedString(value.text, chunks.map(chunk => chunk.text).join('\n\n'), `Page ${pageIndex + 1} version text`, limits.text),
       chunks,
-      summary: readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, limits.summary)
+      summary: source === 'backup' && value.summary === undefined ? undefined : readBoundedString(value.summary, '', `Page ${pageIndex + 1} version summary`, limits.summary)
     };
   }) : undefined;
-  const latest = versions?.[typeof raw.latestVersionIndex === 'number' ? raw.latestVersionIndex : -1]
-    ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!);
+  const latest = source === 'backup' ? undefined : (versions?.[typeof raw.latestVersionIndex === 'number' ? raw.latestVersionIndex : -1]
+    ?? versions?.reduce((a, b) => b.timestamp >= a.timestamp ? b : a, versions[0]!));
   const chunks = normalizeChunks(raw.chunks ?? raw.items ?? latest?.chunks, pageIndex, limits);
   const text = readBoundedString(raw.text, chunks.map(chunk => chunk.text).join('\n\n') || latest?.text || '', `Page ${pageIndex + 1} text`, limits.text);
   if (source === 'import' && !text && !chunks.some(chunk => chunk.text)) {

@@ -4,6 +4,15 @@ Changelog
 All notable changes to this project are documented in this file.
 This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may include breaking changes.
 
+0.2.1 - Unreleased
+------------------
+- Capture only rendered page text, preserving headings and code while excluding hidden content without modifying the page.
+- Apply the same domain rules and content-script recovery to manual capture from the sidepanel, keyboard and context menu; pause still permits manual capture.
+- Prevent failed older captures from overwriting newer queued content, and preserve debug log levels through storage and filtering.
+- Stream versioned single-file backups and validate them before restore, retaining legacy JSON import support. Large libraries and historical captures beyond legacy import limits are supported; individual backup records are bounded to 16 MiB.
+- Preserve article headers, code blocks, and inline code when capturing page text.
+- Require acknowledgement before saving or contacting remote model providers, including embedding endpoints; keep unacknowledged provider settings readable for review and correction.
+
 0.2.0 - Unreleased
 ------------------
 - Report Ollama HTTP failures and origin configuration guidance instead of misleading incomplete-vector errors; retry only transient failures and preserve saved vectors.

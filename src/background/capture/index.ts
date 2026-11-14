@@ -19,8 +19,8 @@ function normalizePayload(message: Record<string, unknown>): CapturePayload {
     timestamp: typeof message.timestamp === 'number' ? message.timestamp : Date.now(),
     text: typeof message.text === 'string' ? message.text : '',
     chunks: Array.isArray(message.chunks) ? message.chunks.map((c) => String(c)) : [],
-    force: Boolean(message.force),
-    manual: Boolean(message.manual)
+    force: message.force === true,
+    manual: message.manual === true
   };
 }
 
@@ -49,6 +49,13 @@ export function createCaptureQueue(processFn = processCapturePayload) {
   let processedCount = 0;
   let failedCount = 0;
   let retryCount = 0;
+  let enqueueTail: Promise<void> = Promise.resolve();
+
+  function updateQueue(operation: () => Promise<void>): Promise<void> {
+    const pending = enqueueTail.then(operation);
+    enqueueTail = pending.catch(() => {});
+    return pending;
+  }
 
   function nextBackoff(attempt: number): number {
     const computed = BASE_BACKOFF_MS * Math.pow(2, Math.max(0, attempt - 1));
@@ -93,9 +100,11 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             chunkCount: item.payload.chunks.length,
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
-          const replacement = queue.find((entry) => entry.url === item.url);
-          if (replacement) await markQueued(replacement.payload, replacement.attempts, false);
-          else await markDone(item.url);
+          await updateQueue(async () => {
+            const replacement = queue.find((entry) => entry.url === item.url);
+            if (replacement) await markQueued(replacement.payload, replacement.attempts, false);
+            else await markDone(item.url);
+          });
         } catch (err) {
           if (cancelled.has(item)) continue;
           const includeBodies = getCachedSettingsSnapshot().logFullBodies;
@@ -104,22 +113,25 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             error: err instanceof Error ? err.message : String(err),
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
-          const nextAttempt = item.attempts + 1;
-          if (nextAttempt <= MAX_ATTEMPTS) {
-            const retryDelay = nextBackoff(nextAttempt);
-            queue.push({
-              url: item.url,
-              payload: item.payload,
-              delayMs: retryDelay,
-              attempts: nextAttempt
-            });
-            enqueuedUrls.add(item.url);
-            retryCount += 1;
-            await markQueued(item.payload, nextAttempt, false);
-          } else {
-            failedCount += 1;
-            await markFailed(item.payload, nextAttempt);
-          }
+          await updateQueue(async () => {
+            if (queue.some(entry => entry.url === item.url)) return;
+            const nextAttempt = item.attempts + 1;
+            if (nextAttempt <= MAX_ATTEMPTS) {
+              const retryDelay = nextBackoff(nextAttempt);
+              queue.push({
+                url: item.url,
+                payload: item.payload,
+                delayMs: retryDelay,
+                attempts: nextAttempt
+              });
+              enqueuedUrls.add(item.url);
+              retryCount += 1;
+              await markQueued(item.payload, nextAttempt, false);
+            } else {
+              failedCount += 1;
+              await markFailed(item.payload, nextAttempt);
+            }
+          });
         } finally {
           currentUrl = null;
           currentItem = undefined;
@@ -140,10 +152,9 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     }
   })();
   void ready.then(runQueue).catch((err) => console.error('[capture] recovery failed', err));
-  let enqueueTail: Promise<void> = Promise.resolve();
 
   function enqueue(payload: CapturePayload, delayMs = 0): Promise<void> {
-    const operation = enqueueTail.then(async () => {
+    return updateQueue(async () => {
       await ready;
       if (!payload.url) throw new Error('Capture URL is required');
       // ACK only after the durable job exists. A restart can recover it from here.
@@ -160,8 +171,6 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       void runQueue().catch((err) => console.error('[capture] worker failed', err));
       logQueueState('enqueue');
     });
-    enqueueTail = operation.catch(() => {});
-    return operation;
   }
 
   async function requeueProcessing(urls: string[]): Promise<{ retried: number }> {
@@ -193,7 +202,11 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       if (!message || typeof message !== 'object') return false;
       if (message.type === 'SAVE_PAGE') {
         const payload = normalizePayload(message);
-        void enqueue(payload).then(() => sendResponse?.({ status: 'queued' }))
+        void shouldCaptureUrl(payload.url, { ignorePaused: payload.manual }).then(async allow => {
+          if (!allow) throw new Error('Capture blocked by your capture rules.');
+          await enqueue(payload);
+          sendResponse?.({ status: 'queued' });
+        })
           .catch((err) => sendResponse?.({ error: err instanceof Error ? err.message : String(err) }));
         return true;
       }

@@ -157,6 +157,16 @@ export async function updateSettings(partial: Partial<BetaSettings>): Promise<Be
   return serializeSettings(() => updateStoredSettings(partial));
 }
 
+export async function acknowledgeRemoteProviderOrigin(origin: string): Promise<BetaSettings> {
+  return serializeSettings(async () => {
+    const current = await readSettingsFromStorage();
+    if (current.acknowledgedRemoteProviderOrigins.includes(origin)) return current;
+    return updateStoredSettings({
+      acknowledgedRemoteProviderOrigins: [...current.acknowledgedRemoteProviderOrigins, origin]
+    });
+  });
+}
+
 async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<BetaSettings> {
   const current = await readSettingsFromStorage();
   const next: BetaSettings = {

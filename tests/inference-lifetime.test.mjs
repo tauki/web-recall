@@ -46,7 +46,7 @@ test('Ollama embeddings have no automatic deadline and cancellation releases kee
 
 test('chat, JSON reranking and inference probes use caller cancellation without deadlines', async () => {
   const signals=[];
-  const mod=await loadSource('src/background/providers/chat.ts','',{'../settings/index':{getSettings:async()=>({})},'./config':{getProviderBaseUrl:async()=>''}}, {
+  const mod=await loadSource('src/background/providers/chat.ts','',{'../settings/index':{getSettings:async()=>({}),acknowledgeRemoteProviderOrigin:async()=>assert.fail('Local inference must not request remote acknowledgement')},'./config':{getProviderBaseUrl:async()=>''}}, {
     chrome:chromeFixture, AbortSignal:{timeout(){throw Error('Automatic deadline is forbidden');}},
     fetch:async (_url,{signal}) => {signals.push(signal); return Response.json({message:{content:'{"ok":true}'}});}
   });
@@ -60,7 +60,7 @@ test('chat, JSON reranking and inference probes use caller cancellation without 
 
 test('streaming keeps the worker alive through the response body and cleans up on Stop', async () => {
   const f=lifetimeContext(); let requestSignal, body;
-  const mod=await loadSource('src/background/providers/chat.ts','',{'../settings/index':{getSettings:async()=>({})},'./config':{getProviderBaseUrl:async()=>''}}, {
+  const mod=await loadSource('src/background/providers/chat.ts','',{'../settings/index':{getSettings:async()=>({}),acknowledgeRemoteProviderOrigin:async()=>assert.fail('Local inference must not request remote acknowledgement')},'./config':{getProviderBaseUrl:async()=>''}}, {
     ...f.context, AbortSignal:{timeout(){throw Error('Automatic deadline is forbidden');}},
     fetch:async (_url,{signal}) => {
       requestSignal=signal;

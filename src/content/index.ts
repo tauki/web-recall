@@ -19,11 +19,31 @@ function extractPageText(): string {
     root = document.body;
   }
   if (!root) return '';
-  const clone = root.cloneNode(true) as HTMLElement;
-  clone.querySelectorAll('script, style, noscript, code, pre, iframe, svg').forEach((el) => el.remove());
-  clone.querySelectorAll('nav, footer, header, aside').forEach((el) => el.remove());
-  const text = clone.innerText || '';
-  return text.replace(/\s+\n/g, '\n').trim();
+  for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+    const style = getComputedStyle(ancestor);
+    if (style.display === 'none' || style.contentVisibility === 'hidden') return '';
+    if (ancestor instanceof HTMLDetailsElement && !ancestor.open && !ancestor.querySelector('summary')?.contains(root)) return '';
+  }
+  function readVisibleText(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const parent = node.parentElement;
+      if (!parent) return '';
+      const style = getComputedStyle(parent);
+      if (style.visibility !== 'visible') return '';
+      const text = node.textContent || '';
+      return /^(pre|break-spaces)/.test(style.whiteSpace) ? text : text.replace(/\s+/g, ' ');
+    }
+    if (!(node instanceof Element) || node.matches('script, style, noscript, iframe, svg, nav, footer, aside')) return '';
+    const style = getComputedStyle(node);
+    if (style.display === 'none' || style.contentVisibility === 'hidden') return '';
+    if (node.tagName === 'BR') return style.visibility === 'visible' ? '\n' : '';
+    const children = node instanceof HTMLDetailsElement && !node.open
+      ? Array.from(node.children).filter(child => child.tagName === 'SUMMARY').slice(0, 1)
+      : Array.from(node.childNodes);
+    const text = children.map(readVisibleText).join('');
+    return /^(inline|contents)/.test(style.display) ? text : `\n${text}\n`;
+  }
+  return readVisibleText(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function chunkText(text: string, maxWords = CHUNK_MAX_WORDS): string[] {

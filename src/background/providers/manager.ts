@@ -7,13 +7,15 @@ import {
   type ProviderStatus
 } from './ollama';
 
+import type { ProviderConsentOptions } from './access';
+
 export type ProviderActionPayload = { baseOverride?: string };
 export type ProviderActionResult = { status?: ProviderStatus; models?: string[] };
 
 export type ProviderAdapter = {
   id: string;
   describe: () => Promise<ProviderDescriptor>;
-  setSetting: (key: string, value: string) => Promise<void>;
+  setSetting: (key: string, value: string, options?: ProviderConsentOptions) => Promise<void>;
   action: (action: string, payload?: ProviderActionPayload) => Promise<ProviderActionResult>;
   listModels?: () => Promise<string[]>;
 };
@@ -29,10 +31,10 @@ export class ProviderManager {
     return Promise.all(Array.from(this.providers.values()).map((provider) => provider.describe()));
   }
 
-  async setProviderSetting(providerId: string, key: string, value: string): Promise<void> {
+  async setProviderSetting(providerId: string, key: string, value: string, options?: ProviderConsentOptions): Promise<void> {
     const provider = this.providers.get(providerId);
     if (!provider) throw new Error('Unknown provider');
-    await provider.setSetting(key, value);
+    await provider.setSetting(key, value, options);
   }
 
   async runAction(providerId: string, action: string, payload?: ProviderActionPayload): Promise<ProviderActionResult> {

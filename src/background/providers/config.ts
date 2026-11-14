@@ -1,4 +1,5 @@
 import { DEFAULT_EMBEDDING_CONFIG } from '../../shared/config/index';
+import { authorizeProviderOrigin, type ProviderConsentOptions } from './access';
 
 const PROVIDER_SETTINGS_KEY = 'betaProviderSettings';
 const DEFAULT_PROVIDER_ID = 'ollama';
@@ -74,7 +75,10 @@ export async function getProviderSettings(providerId: string): Promise<Record<st
   return { ...(settings[providerId] || {}) };
 }
 
-export async function updateProviderSettings(providerId: string, partial: Record<string, string>): Promise<Record<string, string>> {
+export async function updateProviderSettings(providerId: string, partial: Record<string, string>, options: ProviderConsentOptions = {}): Promise<Record<string, string>> {
+  if (typeof partial.baseUrl === 'string') {
+    await authorizeProviderOrigin(sanitizeBaseUrl(partial.baseUrl.trim()), options);
+  }
   const settings = await readProviderSettings();
   const next = {
     ...settings,

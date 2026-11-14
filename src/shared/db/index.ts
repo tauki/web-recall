@@ -62,7 +62,7 @@ export type EmbeddingRecord = {
 
 export type LogRecord = {
   id?: number;
-  level: 'info' | 'warn' | 'error';
+  level: 'debug' | 'info' | 'warn' | 'error';
   message: string;
   data?: Record<string, unknown>;
   createdAt: number;
@@ -411,6 +411,16 @@ export async function listAllPages(): Promise<PageRecord[]> {
     const tx = db.transaction(PAGES_STORE, 'readonly');
     const request = tx.objectStore(PAGES_STORE).getAll();
     request.onsuccess = () => resolve((request.result as PageRecord[]) || []);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getNextPageRecord(afterUrl?: string): Promise<PageRecord | undefined> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PAGES_STORE, 'readonly');
+    const request = tx.objectStore(PAGES_STORE).openCursor(afterUrl === undefined ? undefined : IDBKeyRange.lowerBound(afterUrl, true));
+    request.onsuccess = () => resolve(request.result?.value as PageRecord | undefined);
     request.onerror = () => reject(request.error);
   });
 }

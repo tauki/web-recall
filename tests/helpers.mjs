@@ -16,3 +16,11 @@ export async function loadSource(relative, extraExports = '', mocks = {}, contex
 export const chromeFixture = { runtime: { sendMessage() {}, getURL: value => value, onMessage: { addListener() {} } }, storage: { local: { set(_value, callback) { callback?.(); return Promise.resolve(); } } } };
 export const plain = value => JSON.parse(JSON.stringify(value));
 export const tick = () => new Promise(resolve => setImmediate(resolve));
+
+export async function waitFor(predicate, description) {
+  const deadline = performance.now() + 5000;
+  while (!predicate()) {
+    if (performance.now() >= deadline) throw Error(`Timed out waiting for ${description}`);
+    await new Promise(resolve => setTimeout(resolve, 5));
+  }
+}

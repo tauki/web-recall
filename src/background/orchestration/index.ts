@@ -1,7 +1,8 @@
 /// <reference types="chrome" />
 
 import { runOperation, cancelOperation } from './operations';
-import { getSettings, shouldCaptureUrl, updateSettings } from '../settings/index';
+import { getSettings, updateSettings } from '../settings/index';
+import { captureTab } from '../capture/manual';
 import {
   getEmbeddingConfig,
   updateEmbeddingConfig,
@@ -14,6 +15,8 @@ import { handleAskQuestion, cancelAskQuestion } from '../ask/index';
 import {
   deleteManagePages,
   exportManagePages,
+  exportBackupPage,
+  importBackupPage,
   getManagePages,
   importManagePages
 } from '../manage/index';
@@ -34,7 +37,7 @@ type RuntimeMessage =
   | { type: 'GET_SETTINGS' }
   | { type: 'SET_SETTINGS'; payload?: Partial<BetaSettings> }
   | { type: 'GET_EMBEDDING_CONFIG' }
-  | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig> }
+  | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig>; acknowledgeRemoteOrigin?: boolean }
   | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string }
   | { type: 'ASK_QUESTION'; question: string; options?: { useSearch?: boolean; maxResults?: number; requestId?: string } }
   | { type: 'GET_MODEL_SETTINGS' }
@@ -42,11 +45,13 @@ type RuntimeMessage =
   | { type: 'LIST_MODELS' }
   | { type: 'GET_PROVIDERS' }
   | { type: 'GET_PROVIDER_CONFIG'; providerId: string }
-  | { type: 'SET_PROVIDER_SETTING'; providerId: string; key: string; value?: string }
+  | { type: 'SET_PROVIDER_SETTING'; providerId: string; key: string; value?: string; acknowledgeRemoteOrigin?: boolean }
   | { type: 'PROVIDER_ACTION'; providerId: string; action: string; baseOverride?: string }
   | { type: 'GET_PAGE_LIST' }
   | { type: 'DELETE_PAGE'; url?: string; urls?: string[] }
   | { type: 'GET_ALL_PAGES' }
+  | { type: 'GET_BACKUP_PAGE'; afterUrl?: string }
+  | { type: 'IMPORT_BACKUP_PAGE'; line: string }
   | { type: 'IMPORT_PAGES'; pages: Array<Record<string, unknown>>; schemaVersion?: number }
   | { type: 'LIST_HIGHLIGHT_DATES'; from?: string; to?: string; offset?: number; limit?: number }
   | { type: 'GET_HIGHLIGHTS'; date?: string }
@@ -82,83 +87,15 @@ function respondWith(
 }
 
 function handleCaptureActiveTab(sendResponse: SendResponse): boolean {
-  chrome.tabs.query(
-    { active: true, lastFocusedWindow: true },
-    (tabs: Array<{ id?: number | null; windowId?: number }>) => {
-      const tab = tabs?.[0];
-      const url = tab && typeof tab === 'object' ? (tab as { url?: string }).url : '';
-      const isSupported =
-        typeof url === 'string' &&
-        (url.startsWith('http://') || url.startsWith('https://'));
-      if (!tab?.id) {
-        sendResponse({ error: 'No active tab' });
-        return;
-      }
-      if (!isSupported) {
-        sendResponse({ error: 'Cannot capture this page (unsupported or restricted URL).' });
-        return;
-      }
-      void shouldCaptureUrl(url, { ignorePaused: true })
-        .then((allow) => {
-          if (!allow) {
-            sendResponse({
-              error: 'Capture blocked by your allowlist or denylist rules for this page.'
-            });
-            return;
-          }
-          const attemptCapture = (retries = 1): void => {
-            chrome.tabs.sendMessage(
-              tab.id!,
-              { type: 'FORCE_CAPTURE', payload: { manual: true } },
-              (response?: { ok?: boolean }) => {
-                const err = chrome.runtime.lastError;
-                if (
-                  err &&
-                  retries > 0 &&
-                  err.message?.includes('Receiving end does not exist')
-                ) {
-                  try {
-                    chrome.scripting
-                      .executeScript({
-                        target: { tabId: tab.id! },
-                        files: ['dist/beta/content.js']
-                      })
-                      .then(() => {
-                        attemptCapture(retries - 1);
-                      })
-                      .catch(() => {
-                        sendResponse({
-                          error: 'Capture failed: content script unavailable for this page.'
-                        });
-                      });
-                  } catch {
-                    sendResponse({
-                      error: 'Capture failed: content script unavailable for this page.'
-                    });
-                  }
-                  return;
-                }
-                if (err) {
-                  sendResponse({
-                    error: 'Capture failed: content script unavailable for this page.'
-                  });
-                } else {
-                  sendResponse({ ok: true, received: response?.ok === true });
-                }
-              }
-            );
-          };
-          attemptCapture();
-        })
-        .catch((err) => {
-          sendResponse({ error: toErrorMessage(err) });
-        });
-    }
-  );
-  return true;
+  return respondWith(chrome.tabs.query({ active: true, lastFocusedWindow: true })
+    .then((tabs: Array<{ id?: number }>) => captureTab(tabs[0]?.id)), sendResponse);
 }
 
 const runtimeHandlers: RuntimeHandlerMap = {
+  GET_BACKUP_PAGE: (message, sendResponse) =>
+    respondWith(exportBackupPage(message.afterUrl), sendResponse),
+  IMPORT_BACKUP_PAGE: (message, sendResponse) =>
+    respondWith(importBackupPage(message.line), sendResponse),
   CANCEL_SEARCH: (message, sendResponse) => {
     sendResponse({ cancelled: cancelOperation('search', message.requestId) });
     return false;
@@ -191,8 +128,9 @@ const runtimeHandlers: RuntimeHandlerMap = {
 
   SET_EMBEDDING_CONFIG: (message, sendResponse) =>
     respondWith(
-      updateEmbeddingConfig(message.payload || {}).then(() => ({
-        config: getEmbeddingConfig()
+      updateEmbeddingConfig(message.payload || {}, { acknowledgeRemoteOrigin: message.acknowledgeRemoteOrigin === true }).then(async () => ({
+        config: getEmbeddingConfig(),
+        settings: await getSettings()
       })),
       sendResponse
     ),
@@ -258,9 +196,11 @@ const runtimeHandlers: RuntimeHandlerMap = {
   SET_PROVIDER_SETTING: (message, sendResponse) =>
     respondWith(
       providerManager
-        .setProviderSetting(message.providerId, message.key, String(message.value || ''))
+        .setProviderSetting(message.providerId, message.key, String(message.value || ''), {
+          acknowledgeRemoteOrigin: message.acknowledgeRemoteOrigin === true
+        })
         .then(() => providerManager.getProviders())
-        .then((providers) => ({ providers })),
+        .then(async (providers) => ({ providers, settings: await getSettings() })),
       sendResponse
     ),
 

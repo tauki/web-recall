@@ -1,6 +1,7 @@
 import { installSharedStyles, createToolNavigation } from '../shared/presentation';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
+import { BACKUP_HEADER, readBackupPages } from '../../shared/backup';
 
 const root = document.querySelector<HTMLElement>('#app-root');
 
@@ -45,6 +46,15 @@ let backfillRequestId: string | null = null;
 const rowProgress = new Map<string, { text: string; error?: boolean }>();
 
 const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
+let transferInProgress = false;
+
+function setTransferBusy(busy: boolean): void {
+  transferInProgress = busy;
+  for (const id of ['manage-export', 'manage-import']) {
+    const control = document.getElementById(id) as HTMLButtonElement | HTMLInputElement | null;
+    if (control) control.disabled = busy;
+  }
+}
 
 function ensureStyles(): void {
   if (document.getElementById('beta-manage-style')) return;
@@ -414,37 +424,58 @@ async function retryQueueEntry(url: string): Promise<void> {
 }
 
 async function handleExport(): Promise<void> {
+  if (transferInProgress) return;
+  setTransferBusy(true);
+  let writer: FileSystemWritableFileStream | undefined;
   try {
-    updateStatus('Preparing export…');
-    const response = await sendRuntimeMessage<{ pages: unknown[] }>({ type: 'GET_ALL_PAGES' });
-    const payload = {
-      schemaVersion: 1,
-      exportedAt: new Date().toISOString(),
-      pages: response.pages || []
-    };
-    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = 'web-recall-export.json';
-    link.click();
-    URL.revokeObjectURL(url);
-    updateStatus('Export ready');
+    const picker = (window as Window & { showSaveFilePicker?: (options: unknown) => Promise<FileSystemFileHandle> }).showSaveFilePicker;
+    if (!picker) throw new Error('This browser does not support streaming backup saves. Use Chrome on desktop.');
+    const file = await picker.call(window, { suggestedName: 'web-recall-backup.jsonl', types: [{ description: 'Web Recall backup', accept: { 'application/x-ndjson': ['.jsonl'] } }] });
+    writer = await file.createWritable();
+    await writer.write(BACKUP_HEADER);
+    let afterUrl: string | undefined;
+    let count = 0;
+    while (true) {
+      const response = await sendRuntimeMessage<{ line?: string; url?: string }>({ type: 'GET_BACKUP_PAGE', afterUrl });
+      if (!response.line) break;
+      if (!response.url || (afterUrl !== undefined && response.url <= afterUrl)) throw new Error('Backup cursor did not advance.');
+      await writer.write(response.line + '\n');
+      afterUrl = response.url;
+      updateStatus(`Exporting… ${++count} pages`);
+    }
+    await writer.write(JSON.stringify({ type: 'end', pages: count }) + '\n');
+    await writer.close();
+    writer = undefined;
+    updateStatus(`Export complete: ${count} pages`);
   } catch (err) {
-    updateStatus(`Export failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    await writer?.abort().catch(() => {});
+    updateStatus(err instanceof Error && err.name === 'AbortError' ? 'Export cancelled' : `Export failed: ${err instanceof Error ? err.message : String(err)}`, true);
+  } finally {
+    setTransferBusy(false);
   }
 }
 
 async function handleImport(file: File): Promise<void> {
-  if (file.size > MAX_IMPORT_FILE_BYTES) {
-    updateStatus(
-      `Import failed: file exceeds the maximum size of ${Math.round(MAX_IMPORT_FILE_BYTES / (1024 * 1024))} MB.`,
-      true
-    );
-    return;
-  }
-  const text = await file.text();
+  if (transferInProgress) return;
+  setTransferBusy(true);
+  let imported = 0;
   try {
+    if (/\.(jsonl|ndjson)$/i.test(file.name)) {
+      let total = 0;
+      updateStatus('Validating backup…');
+      for await (const line of readBackupPages(file.stream())) {
+        if (line) total++;
+      }
+      for await (const line of readBackupPages(file.stream())) {
+        await sendRuntimeMessage({ type: 'IMPORT_BACKUP_PAGE', line });
+        updateStatus(`Importing… ${++imported} of ${total} pages`);
+      }
+      await fetchPages();
+      updateStatus(`Import complete: ${imported} pages`);
+      return;
+    }
+    if (file.size > MAX_IMPORT_FILE_BYTES) throw new Error('Legacy JSON file exceeds 10 MB. Use a streaming .jsonl backup for larger libraries.');
+    const text = await file.text();
     const parsed = JSON.parse(text);
     let pages: unknown[] = [];
     let schemaVersion: number | undefined;
@@ -461,10 +492,12 @@ async function handleImport(file: File): Promise<void> {
     }
     updateStatus('Importing…');
     await sendRuntimeMessage<{ imported: number }>({ type: 'IMPORT_PAGES', pages, schemaVersion });
-    updateStatus('Import complete');
     await fetchPages();
+    updateStatus('Import complete');
   } catch (err) {
-    updateStatus(`Import failed: ${err instanceof Error ? err.message : String(err)}`, true);
+    updateStatus(`Import failed${imported ? ` after ${imported} pages` : ''}: ${err instanceof Error ? err.message : String(err)}`, true);
+  } finally {
+    setTransferBusy(false);
   }
 }
 
@@ -537,8 +570,8 @@ function renderApp(rootEl: HTMLElement): void {
         <div class="manage-actions">
           <button id="manage-refresh" class="primary">Refresh</button>
           <button id="manage-delete" disabled>Delete Selected</button>
-          <button id="manage-export">Export JSON</button>
-          <label id="manage-import-label">Import JSON<input type="file" id="manage-import" accept="application/json" /></label>
+          <button id="manage-export">Export backup</button>
+          <label id="manage-import-label">Import backup or JSON<input type="file" id="manage-import" accept=".json,.jsonl,.ndjson,application/json,application/x-ndjson" /></label>
         </div>
       </div>
       <div class="manage-toolbar">

@@ -1,4 +1,5 @@
 import { runInference } from '../providers/inference';
+import { assertProviderOriginAcknowledged, authorizeProviderOrigin, type ProviderConsentOptions } from '../providers/access';
 import { OllamaRequestError, ollamaResponseError } from '../providers/ollamaErrors';
 import { abortable } from '../../shared/abort';
 import type { CapturePayload } from '../capture/types';
@@ -237,7 +238,7 @@ export function getEmbeddingConfig(): EmbeddingConfig {
   return currentConfig;
 }
 
-export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): Promise<void> {
+export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>, options: ProviderConsentOptions = {}): Promise<void> {
   const nextConfig: EmbeddingConfig = {
     baseUrl: partial.baseUrl === undefined ? currentConfig.baseUrl : sanitizeBaseUrl(partial.baseUrl),
     model: partial.model || currentConfig.model,
@@ -246,6 +247,7 @@ export async function updateEmbeddingConfig(partial: Partial<EmbeddingConfig>): 
     browserRevision: partial.browserRevision || currentConfig.browserRevision,
     updatedAt: new Date().toISOString()
   };
+  if (nextConfig.provider !== 'browser') await authorizeProviderOrigin(nextConfig.baseUrl, options);
   const browserModelChanged =
     nextConfig.browserModel !== currentConfig.browserModel ||
     nextConfig.browserRevision !== currentConfig.browserRevision;
@@ -289,6 +291,7 @@ async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<
   if (!inputs.length) return [];
   // Retries must use the same model space even if Settings changes mid-request.
   const { baseUrl, model } = currentConfig;
+  await assertProviderOriginAcknowledged(baseUrl);
   for (let attempt = 1; ; attempt++) {
     try {
       signal?.throwIfAborted();

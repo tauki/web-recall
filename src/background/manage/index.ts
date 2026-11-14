@@ -1,4 +1,5 @@
 import { normalizeImportedPage } from '../../shared/db/records';
+import { encodeBackupPage, decodeBackupPage } from '../../shared/backup';
 import { cancelCaptureJobs } from '../capture/index';
 import { embeddingSpaceKey } from '../../shared/config/index';
 import { getEmbeddingConfig } from '../embeddings/index';
@@ -49,6 +50,17 @@ export async function deleteManagePages(urls: string[]): Promise<number> {
 
 export async function exportManagePages(): Promise<PageRecord[]> {
   return storageManager.listAllPages();
+}
+
+export async function exportBackupPage(afterUrl?: string): Promise<{ line?: string; url?: string }> {
+  const page = await storageManager.getNextPageRecord(afterUrl);
+  return page ? { line: encodeBackupPage(page), url: page.url } : {};
+}
+
+export async function importBackupPage(line: string): Promise<{ imported: number }> {
+  await storageManager.savePageRecord(decodeBackupPage(line));
+  await invalidateOffscreenIndex();
+  return { imported: 1 };
 }
 
 export async function importManagePages(payload: ImportPayload): Promise<{ imported: number }> {

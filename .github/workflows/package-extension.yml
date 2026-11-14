@@ -26,6 +26,8 @@ jobs:
           node-version-file: '.nvmrc'
           cache: pnpm
       - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Install pinned test browser
+        run: pnpm test:setup
       - run: pnpm typecheck && pnpm lint && pnpm test && pnpm build:beta
 
       - name: Read extension version

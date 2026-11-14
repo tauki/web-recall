@@ -1,16 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { loadSource, tick } from './helpers.mjs';
+import { loadSource, tick, waitFor } from './helpers.mjs';
+import { providerFixture } from './provider-fixture.mjs';
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 
 const { DEFAULT_SETTINGS, DEFAULT_EMBEDDING_CONFIG } = await loadSource('src/shared/config/index.ts');
 const pages = [{ url: 'https://example.test/cats', title: 'Cats', timestamp: Date.now(), manual: false, embeddingStatus: 'Present', chunkCount: 3 }];
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
-async function ui(view, overrides = {}) {
+async function ui(view, overrides = {}, backend) {
   const dom = new JSDOM('<div id="app-root"></div>', { url: 'https://extension.test/' });
   const { window } = dom;
   window.HTMLElement.prototype.scrollIntoView = () => {};
   const listeners = [], requests = [], polls = [];
+  let pendingMessages = 0;
   const responses = {
     GET_SETTINGS: () => ({ settings: { ...DEFAULT_SETTINGS, captureSetupComplete: true } }),
     GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG } }),
@@ -22,19 +25,25 @@ async function ui(view, overrides = {}) {
     GET_PAGE_LIST: () => ({ pages }),
     ...overrides
   };
-  const send = async message => { requests.push(message); return responses[message.type]?.(message) ?? {}; };
+  const send = async message => {
+    requests.push(message);
+    pendingMessages++;
+    try { return await (backend ? backend.send(message) : responses[message.type]?.(message) ?? {}); }
+    finally { pendingMessages--; }
+  };
   await loadSource(`src/ui/${view}/index.ts`, '', {
     '../shared/runtime': { sendRuntimeMessage: send },
     '../../shared/runtime': { sendRuntimeMessage: send },
     '../shared/polling': { startPolling: task => { polls.push(task); void task(); return () => {}; } }
   }, {
-    window, document: window.document, HTMLElement: window.HTMLElement,
+    window, document: window.document, HTMLElement: window.HTMLElement, TextEncoder,
     chrome: { runtime: { getURL: p => 'https://extension.test/' + p, onMessage: { addListener: f => listeners.push(f) } }, tabs: { create() {} } }
   });
   await tick(); await tick();
   const q = selector => window.document.querySelector(selector);
   const change = (selector, value) => { q(selector).value = value; q(selector).dispatchEvent(new window.Event('change', { bubbles: true })); };
   return { window, q, change, requests, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
+    settle: () => waitFor(() => pendingMessages === 0, 'UI requests to finish'),
     submit: selector => q(selector).dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })) };
 }
 
@@ -47,6 +56,50 @@ test('repeated sidepanel banner refreshes read configuration without health or m
   assert.ok(f.requests.some(message => message.type === 'GET_PROVIDER_CONFIG'));
   assert.equal(f.q('#beta-remote-provider-banner').hidden, false);
   assert.match(f.q('#beta-remote-provider-banner').textContent, /provider.example.test/);
+});
+
+test('chat provider cancellation preserves settings and accepting consent makes the saved provider usable', async t => {
+  const origin = 'https://models.example.test';
+  let confirmations = 0;
+  const backend = providerFixture(origin);
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  await waitFor(() => f.q('#beta-provider-base')?.value === origin, 'the saved remote provider to appear in Settings');
+  const initial = JSON.stringify(backend.stored);
+  f.window.confirm = () => { confirmations++; return false; };
+  f.q('#beta-provider-save').click();
+  assert.equal(JSON.stringify(backend.stored), initial);
+  assert.equal(backend.requests.length, 0, 'Cancelling consent must not contact the provider');
+  f.window.confirm = () => { confirmations++; return true; };
+  f.q('#beta-provider-save').click();
+  await waitFor(() => f.q('#beta-settings-status')?.textContent.includes('Provider settings saved'), 'the provider save to finish');
+  assert.equal(backend.stored.betaProviderSettings.ollama.baseUrl, origin);
+  assert.ok(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins.includes(origin));
+  assert.equal(backend.stored.betaSettings.paused, true);
+  assert.ok(backend.requests.length > 0);
+  for (const request of backend.requests) assert.ok(request.acknowledged.includes(new URL(request.url).origin));
+  f.q('#beta-provider-save').click();
+  await f.settle();
+  assert.equal(confirmations, 2);
+});
+
+test('embedding consent cancellation preserves the endpoint and acceptance persists the approved endpoint', async t => {
+  const origin = 'https://embeddings.example.test';
+  const backend = providerFixture('http://localhost:11434');
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  await waitFor(() => f.q('#beta-provider-base')?.value === 'http://localhost:11434', 'initial Settings to load');
+  f.q('#beta-embedding-base').value = origin;
+  const initial = JSON.stringify(backend.stored);
+  f.window.confirm = () => false;
+  f.q('#beta-save-embedding').click();
+  assert.equal(JSON.stringify(backend.stored), initial);
+  f.window.confirm = () => true;
+  f.q('#beta-save-embedding').click();
+  await waitFor(() => f.q('#beta-settings-status')?.textContent.includes('Embedding settings saved'), 'the embedding save to finish');
+  assert.equal(backend.stored.embeddingConfig.baseUrl, origin);
+  assert.ok(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins.includes(origin));
+  assert.equal(backend.stored.betaSettings.paused, true);
 });
 
 test('text retrieval results do not display term scores as semantic similarity', async t => {
@@ -183,12 +236,71 @@ test('answer formatting never interprets raw HTML or unsafe links', async () => 
 });
 
 test('Logs exact Debug filter excludes higher levels and counts visible entries', async t => {
-  const f = await ui('logs', { GET_LOGS: () => ({ logs: ['debug', 'info', 'error'].map(level => ({ level, message: level + ' entry', createdAt: 1 })) }) }); t.after(f.close);
+  const db = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+  t.after(async () => (await db.openDatabase()).close());
+  const logger = await loadSource('src/shared/logger/index.ts', '', { '../db/index': { saveLog: db.saveLog } }, { console: { info() {}, error() {} } });
+  logger.setLogLevel('debug');
+  for (const level of ['debug', 'info', 'error']) await logger.log(level, level + ' entry');
+  logger.setLogLevel('off');
+  await logger.log('error', 'must not be saved');
+  const entries = await db.listLogs();
+  assert.deepEqual(Array.from(entries, entry => entry.level).sort(), ['debug', 'error', 'info']);
+  const f = await ui('logs', { GET_LOGS: () => ({ logs: entries }) }); t.after(f.close);
   f.change('#logs-level', 'debug');
   assert.equal(f.window.document.querySelectorAll('.log-entry').length, 1);
   assert.match(f.q('#logs-list').textContent, /debug entry/);
   assert.equal(f.q('#logs-status').textContent, 'Showing 1 of 3 entries');
   assert.match(f.q('#logs-settings-link').href, /#settings-advanced$/);
+});
+
+test('Memory streams a backup through registered messages and validates it before restoring any pages', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts');
+  t.after(async () => (await db.openDatabase()).close());
+  const captured = [
+    { url: 'https://backup.test/a', title: 'First', text: 'é'.repeat(600_000), timestamp: 10, manual: true, chunks: [{ text: 'First passage', embedding: [1, 0], embeddingKey: 'saved-model' }] },
+    { url: 'https://backup.test/b', title: 'Second', text: 'Second passage', timestamp: 20, manual: false, chunks: [] }
+  ];
+  for (const page of captured) await db.savePageRecord(page);
+  const f = await ui('manage', {}, backend); t.after(f.close);
+  const writes = [];
+  let closed = false, aborted = false;
+  f.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async part => { writes.push(part); }, close: async () => { closed = true; }, abort: async () => { aborted = true; } }) });
+  f.q('#manage-export').click();
+  await waitFor(() => closed, 'the backup file to close');
+  assert.equal(aborted, false);
+  assert.equal(f.q('#manage-status').textContent, 'Export complete: 2 pages');
+  assert.ok(!f.requests.some(request => request.type === 'GET_ALL_PAGES'));
+  assert.equal(f.requests.filter(request => request.type === 'GET_BACKUP_PAGE').length, 3);
+  assert.deepEqual(writes.slice(1, -1).map(part => JSON.parse(part).page.url), captured.map(page => page.url));
+  assert.deepEqual(JSON.parse(writes.at(-1)), { type: 'end', pages: 2 });
+  await db.deletePages(captured.map(page => page.url));
+  const input = f.q('#manage-import');
+  const importFile = async file => {
+    Object.defineProperty(input, 'files', { configurable: true, value: [file] });
+    input.dispatchEvent(new f.window.Event('change'));
+    await waitFor(() => !input.disabled, 'the import to finish');
+  };
+  await importFile(new File(writes.slice(0, -1), 'truncated.jsonl'));
+  assert.match(f.q('#manage-status').textContent, /incomplete/i);
+  assert.equal((await db.listAllPages()).length, 0);
+  assert.ok(!f.requests.some(request => request.type === 'IMPORT_BACKUP_PAGE'));
+  await importFile(new File(writes, 'backup.jsonl'));
+  assert.equal(f.q('#manage-status').textContent, 'Import complete: 2 pages');
+  for (const page of captured) {
+    const restored = await db.getPageRecord(page.url);
+    assert.equal(restored.text, page.text);
+    assert.equal(restored.timestamp, page.timestamp);
+    assert.deepEqual(JSON.parse(JSON.stringify(restored.chunks)), page.chunks);
+  }
+  await importFile(new File([JSON.stringify({ schemaVersion: 1, pages: [{ ...captured[1], url: 'https://legacy.test/article' }] })], 'legacy.json'));
+  assert.equal((await db.getPageRecord('https://legacy.test/article')).text, 'Second passage');
+  f.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async () => { throw Error('Disk full'); }, abort: async () => { aborted = true; } }) });
+  f.q('#manage-export').click();
+  await waitFor(() => !f.q('#manage-export').disabled, 'the failed save to release controls');
+  assert.equal(aborted, true);
+  assert.match(f.q('#manage-status').textContent, /Disk full/);
 });
 
 test('Memory targets one page, reports progress there, and makes replacement opt-in', async t => {
