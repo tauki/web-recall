@@ -240,21 +240,21 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
   });
 }
 
-export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean; discardProcessing?: boolean } = {}): Promise<void> {
-  const existing = await getPageRecord(record.url);
+export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean; discardProcessing?: boolean; replace?: boolean } = {}): Promise<void> {
+  const existing = options.replace ? undefined : await getPageRecord(record.url);
   const now = Date.now();
   const chunks = Array.isArray(record.chunks) ? record.chunks : [];
   const hasEmbeddings = chunks.some((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0);
   const normalized: PageRecord = {
     url: record.url,
-    title: record.title || record.url,
+    title: options.replace ? record.title : record.title || record.url,
     text: record.text || '',
-    timestamp: record.timestamp || now,
+    timestamp: options.replace ? record.timestamp : record.timestamp || now,
     manual: Boolean(record.manual),
     chunks,
     createdAt: existing?.createdAt ?? record.createdAt ?? now,
     updatedAt: now,
-    lastEmbeddedAt: record.lastEmbeddedAt ?? existing?.lastEmbeddedAt ?? (hasEmbeddings ? now : undefined),
+    lastEmbeddedAt: options.replace ? record.lastEmbeddedAt : record.lastEmbeddedAt ?? existing?.lastEmbeddedAt ?? (hasEmbeddings ? now : undefined),
     summary: record.summary ?? existing?.summary,
     versions: record.versions ?? existing?.versions
   };

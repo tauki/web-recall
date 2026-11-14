@@ -6,6 +6,8 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.1 - Unreleased
 ------------------
+- Wait for pending capture admissions before restoring or deleting pages, including delayed retry lookups; keep later captures working normally.
+- Restore complete backup records instead of merging destination summaries, history or embedding timestamps; omitted optional fields are cleared and explicit empty values are preserved.
 - Recheck provider consent before every request and retry, and reject redirects before data can reach another endpoint. Direct endpoints and transient-error retries remain supported.
 - Cancel old capture work atomically with page restoration; reject malformed backup fields before normalization without rejecting legitimate empty captures or legacy migrations.
 - Serialize configuration saves and retain the last persisted settings after write failures. UI regressions now exercise production runtime error handling.

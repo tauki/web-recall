@@ -24,9 +24,9 @@ function normalizePayload(message: Record<string, unknown>): CapturePayload {
   };
 }
 
-const cancelHandlers = new Set<(urls: string[]) => void>();
-export function cancelCaptureJobs(urls: string[]): void {
-  cancelHandlers.forEach((cancel) => cancel(urls));
+const cancelHandlers = new Set<(urls: string[]) => Promise<void>>();
+export async function cancelCaptureJobs(urls: string[]): Promise<void> {
+  await Promise.all(Array.from(cancelHandlers, cancel => cancel(urls)));
 }
 
 export function createCaptureQueue(processFn = processCapturePayload) {
@@ -37,13 +37,20 @@ export function createCaptureQueue(processFn = processCapturePayload) {
   const cancelled = new WeakSet<QueueItem>();
   cancelHandlers.add((urls) => {
     const targets = new Set(urls);
-    if (currentItem && targets.has(currentItem.url)) cancelled.add(currentItem);
-    for (let index = queue.length - 1; index >= 0; index--) {
-      if (targets.has(queue[index]!.url)) {
-        enqueuedUrls.delete(queue[index]!.url);
-        queue.splice(index, 1);
+    const cancelMaterialized = (): void => {
+      if (currentItem && targets.has(currentItem.url)) cancelled.add(currentItem);
+      for (let index = queue.length - 1; index >= 0; index--) {
+        if (targets.has(queue[index]!.url)) {
+          enqueuedUrls.delete(queue[index]!.url);
+          queue.splice(index, 1);
+        }
       }
-    }
+    };
+    cancelMaterialized();
+    return updateQueue(async () => {
+      await ready;
+      cancelMaterialized();
+    });
   });
   let processing = false;
   let processedCount = 0;
@@ -101,6 +108,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
           await updateQueue(async () => {
+            if (cancelled.has(item)) return;
             const replacement = queue.find((entry) => entry.url === item.url);
             if (replacement) await markQueued(replacement.payload, replacement.attempts, false);
             else await markDone(item.url);
@@ -114,6 +122,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
             ...(includeBodies ? { payload: item.payload.text } : {})
           });
           await updateQueue(async () => {
+            if (cancelled.has(item)) return;
             if (queue.some(entry => entry.url === item.url)) return;
             const nextAttempt = item.attempts + 1;
             if (nextAttempt <= MAX_ATTEMPTS) {
@@ -154,42 +163,45 @@ export function createCaptureQueue(processFn = processCapturePayload) {
   void ready.then(runQueue).catch((err) => console.error('[capture] recovery failed', err));
 
   function enqueue(payload: CapturePayload, delayMs = 0): Promise<void> {
-    return updateQueue(async () => {
-      await ready;
-      if (!payload.url) throw new Error('Capture URL is required');
-      // ACK only after the durable job exists. A restart can recover it from here.
-      await markQueued(payload, 0);
-      const existing = queue.find((item) => item.url === payload.url);
-      if (existing) {
-        existing.payload = payload;
-        existing.delayMs = Math.max(existing.delayMs, delayMs);
-        existing.attempts = 0;
-      } else {
-        queue.push({ url: payload.url, payload, delayMs, attempts: 0 });
-        enqueuedUrls.add(payload.url);
-      }
-      void runQueue().catch((err) => console.error('[capture] worker failed', err));
-      logQueueState('enqueue');
-    });
+    return updateQueue(() => persistAndEnqueue(payload, delayMs));
+  }
+
+  async function persistAndEnqueue(payload: CapturePayload, delayMs: number): Promise<void> {
+    await ready;
+    if (!payload.url) throw new Error('Capture URL is required');
+    await markQueued(payload, 0);
+    const existing = queue.find((item) => item.url === payload.url);
+    if (existing) {
+      existing.payload = payload;
+      existing.delayMs = Math.max(existing.delayMs, delayMs);
+      existing.attempts = 0;
+    } else {
+      queue.push({ url: payload.url, payload, delayMs, attempts: 0 });
+      enqueuedUrls.add(payload.url);
+    }
+    void runQueue().catch((err) => console.error('[capture] worker failed', err));
+    logQueueState('enqueue');
   }
 
   async function requeueProcessing(urls: string[]): Promise<{ retried: number }> {
     let retried = 0;
     for (const url of urls) {
       try {
-        const entry = await getProcessingEntryByUrl(url);
-        if (entry?.payload) {
-          await enqueue({
-            url: entry.payload.url,
-            title: entry.payload.title,
-            timestamp: entry.payload.timestamp,
-            chunks: entry.payload.chunks,
-            text: entry.payload.text,
-            force: entry.payload.force,
-            manual: entry.payload.manual
-          });
-          retried += 1;
-        }
+        await updateQueue(async () => {
+          const entry = await getProcessingEntryByUrl(url);
+          if (entry?.payload) {
+            await persistAndEnqueue({
+              url: entry.payload.url,
+              title: entry.payload.title,
+              timestamp: entry.payload.timestamp,
+              chunks: entry.payload.chunks,
+              text: entry.payload.text,
+              force: entry.payload.force,
+              manual: entry.payload.manual
+            }, 0);
+            retried += 1;
+          }
+        });
       } catch (err) {
         console.warn('[beta-background:capture] requeue failed', err);
       }
@@ -202,11 +214,11 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       if (!message || typeof message !== 'object') return false;
       if (message.type === 'SAVE_PAGE') {
         const payload = normalizePayload(message);
-        void shouldCaptureUrl(payload.url, { ignorePaused: payload.manual }).then(async allow => {
+        void updateQueue(async () => {
+          const allow = await shouldCaptureUrl(payload.url, { ignorePaused: payload.manual });
           if (!allow) throw new Error('Capture blocked by your capture rules.');
-          await enqueue(payload);
-          sendResponse?.({ status: 'queued' });
-        })
+          await persistAndEnqueue(payload, 0);
+        }).then(() => sendResponse?.({ status: 'queued' }))
           .catch((err) => sendResponse?.({ error: err instanceof Error ? err.message : String(err) }));
         return true;
       }

@@ -9,6 +9,38 @@ const line = page => JSON.stringify({ type: 'page', page }) + '\n';
 const page = { url: 'https://backup.test/article', title: 'Saved article', text: 'Original passage', timestamp: 10, manual: true, chunks: [{ text: 'Original passage', embedding: [0.25, 0.75], embeddingKey: 'original-model' }], createdAt: 5, updatedAt: 10 };
 const codec = () => loadSource('src/shared/backup.ts', '', {}, { TextEncoder });
 
+async function captureRestoreFixture(t, { beforeQueue = async () => {}, afterLookup = async () => {}, shouldCapture = async () => true, embed = async () => [[1, 0]] } = {}) {
+  const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+  t.after(async () => (await source.openDatabase()).close());
+  const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../storage/manager': { storageManager: source }, '../storage/index': { whenStorageReady: async () => {} },
+    '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: embed },
+    '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+  }, { console: { info() {} } });
+  const processing = await loadSource('src/background/processing/index.ts', '', { '../storage/manager': { storageManager: source } }, { chrome: chromeFixture });
+  let listener;
+  const capture = await loadSource('src/background/capture/index.ts', '', {
+    './processor': processor,
+    '../processing/index': { ...processing,
+      markQueued: async (...args) => { await beforeQueue(...args); return processing.markQueued(...args); },
+      getProcessingEntryByUrl: async url => { const entry = await processing.getProcessingEntryByUrl(url); await afterLookup(url); return entry; }
+    },
+    '../settings/index': { shouldCaptureUrl: shouldCapture, getCachedSettingsSnapshot: () => ({}) }, '../../shared/logger/index': { log: async () => {} }
+  }, { console: { info() {} }, chrome: { runtime: { onMessage: { addListener(value) { listener = value; } } } } });
+  const queue = capture.createCaptureQueue();
+  queue.bindRuntimeListener();
+  await queue.ready;
+  const api = await loadSource('src/background/manage/index.ts', '', {
+    '../storage/manager': { storageManager: source }, '../capture/index': capture,
+    '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+  }, { TextEncoder });
+  const send = message => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(Error(`No response to ${message.type}`)), 5000);
+    listener(message, {}, response => { clearTimeout(timer); resolve(response); });
+  });
+  return { source, queue, api, send };
+}
+
 test('malformed supplied backup fields fail preflight without replacing saved content', async t => {
   const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   t.after(async () => (await source.openDatabase()).close());
@@ -40,29 +72,13 @@ test('malformed supplied backup fields fail preflight without replacing saved co
 
 test('restoring backup or legacy JSON cancels active and queued captures without losing restored data', async t => {
   for (const format of ['backup', 'legacy']) {
-    const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
-    t.after(async () => (await source.openDatabase()).close());
     let release, started;
     const gate = new Promise(resolve => { release = resolve; });
     const ready = new Promise(resolve => { started = resolve; });
-    const processor = await loadSource('src/background/capture/processor.ts', '', {
-      '../storage/manager': { storageManager: source }, '../storage/index': { whenStorageReady: async () => {} },
-      '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: async () => { started(); await gate; return [[1, 0]]; } },
-      '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
-    }, { console: { info() {} } });
-    const processing = await loadSource('src/background/processing/index.ts', '', { '../storage/manager': { storageManager: source } }, { chrome: chromeFixture });
-    const capture = await loadSource('src/background/capture/index.ts', '', {
-      './processor': processor, '../processing/index': processing,
-      '../settings/index': { shouldCaptureUrl: async () => true, getCachedSettingsSnapshot: () => ({}) }, '../../shared/logger/index': { log: async () => {} }
-    }, { console: { info() {} } });
-    const queue = capture.createCaptureQueue();
+    const { source, queue, api } = await captureRestoreFixture(t, { embed: async () => { started(); await gate; return [[1, 0]]; } });
     const live = { url: page.url, title: 'Live', text: 'Live content', chunks: ['Live content'], timestamp: 20 };
     await queue.enqueue(live); await ready;
     await queue.enqueue({ ...live, text: 'Queued content', chunks: ['Queued content'], timestamp: 30 });
-    const api = await loadSource('src/background/manage/index.ts', '', {
-      '../storage/manager': { storageManager: source }, '../capture/index': capture,
-      '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
-    }, { TextEncoder });
     if (format === 'backup') await api.importBackupPage(line(page));
     else await api.importManagePages({ schemaVersion: 1, pages: [page] });
     const pending = await source.getProcessingEntry(page.url);
@@ -72,6 +88,80 @@ test('restoring backup or legacy JSON cancels active and queued captures without
     assert.equal(queue.peekQueue().length, 0);
     assert.equal((await source.getPageRecord(page.url)).text, page.text);
     assert.deepEqual(plain((await source.getPageRecord(page.url)).chunks), page.chunks);
+  }
+});
+
+test('restore and deletion cancel capture requests still waiting behind another enqueue, but accept later captures', async t => {
+  for (const action of ['backup', 'legacy', 'delete']) {
+    let release, started;
+    const gate = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { started = resolve; });
+    const precedingUrl = 'https://backup.test/preceding';
+    const { source, queue, api } = await captureRestoreFixture(t, { beforeQueue: async payload => {
+      if (payload.url === precedingUrl) { started(); await gate; }
+    } });
+    const preceding = { url: precedingUrl, title: 'Unrelated', timestamp: 1, text: 'Unrelated content', chunks: ['Unrelated content'] };
+    const first = queue.enqueue(preceding); await ready;
+    const pending = queue.enqueue({ ...preceding, url: page.url, text: 'Old pending capture', chunks: ['Old pending capture'] });
+    const maintenance = action === 'backup' ? api.importBackupPage(line(page))
+      : action === 'legacy' ? api.importManagePages({ schemaVersion: 1, pages: [page] }) : api.deleteManagePages([page.url]);
+    release();
+    await Promise.all([first, pending, maintenance]);
+    await waitFor(() => !queue.isProcessing() && !queue.peekQueue().length, 'pre-maintenance captures to drain');
+    assert.equal((await source.getPageRecord(page.url))?.text, action === 'delete' ? undefined : page.text, action);
+    assert.equal(await source.getProcessingEntry(page.url), undefined);
+    assert.equal((await source.getPageRecord(precedingUrl)).text, preceding.text);
+    const fresh = { ...preceding, url: page.url, text: 'New capture after maintenance', chunks: ['New capture after maintenance'], timestamp: 50 };
+    await queue.enqueue(fresh);
+    await waitFor(() => !queue.isProcessing() && !queue.peekQueue().length, 'new capture to finish');
+    assert.equal((await source.getPageRecord(page.url)).text, fresh.text);
+    assert.equal((await source.getPageRecord(page.url)).timestamp, 50);
+  }
+});
+
+test('backup restore replaces destination metadata, clearing omitted fields while preserving explicit values', async t => {
+  const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+  t.after(async () => (await source.openDatabase()).close());
+  const api = await loadSource('src/background/manage/index.ts', '', {
+    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs() {} },
+    '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+  }, { TextEncoder });
+  const explicit = { summary: 'Backup summary', versions: [{ timestamp: 2, text: 'Backup history', chunks: [] }], lastEmbeddedAt: 7 };
+  for (const metadata of [{}, { title: '', timestamp: 0, summary: '', versions: [], lastEmbeddedAt: 0 }, explicit]) {
+    await source.savePageRecord({ ...page, text: 'Destination text', createdAt: 999, summary: 'Stale destination summary', versions: [{ timestamp: 1, text: 'Stale history', chunks: [] }], lastEmbeddedAt: 123 });
+    await api.importBackupPage(line({ ...page, ...metadata }));
+    const restored = await source.getPageRecord(page.url);
+    assert.deepEqual(plain({ ...restored, updatedAt: 0 }), { ...page, ...metadata, updatedAt: 0 });
+    assert.deepEqual(plain(JSON.parse((await api.exportBackupPage()).line).page), plain(restored));
+  }
+  await source.savePageRecord({ ...page, text: 'Ordinary capture update' });
+  const captured = await source.getPageRecord(page.url);
+  assert.equal(captured.summary, explicit.summary);
+  assert.equal(captured.lastEmbeddedAt, explicit.lastEmbeddedAt);
+  assert.deepEqual(plain(captured.versions), explicit.versions);
+});
+
+test('restore fences runtime capture and retry requests whose asynchronous admission is still pending', async t => {
+  for (const type of ['SAVE_PAGE', 'RETRY_PROCESSING']) {
+    let release, started;
+    const gate = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { started = resolve; });
+    const pendingCheck = async () => { started(); await gate; return true; };
+    const { source, queue, api, send } = await captureRestoreFixture(t, {
+      shouldCapture: type === 'SAVE_PAGE' ? pendingCheck : async () => true,
+      afterLookup: type === 'RETRY_PROCESSING' ? pendingCheck : async () => {}
+    });
+    const old = { url: page.url, title: 'Old', text: 'Pre-restore content', chunks: ['Pre-restore content'], timestamp: 1, manual: true };
+    if (type === 'RETRY_PROCESSING') await source.updateProcessingEntry({ url: page.url, title: old.title, status: 'failed', attempts: 1, createdAt: 1, updatedAt: 1, lastAttemptAt: 1, payload: old }, true);
+    const pending = send({ ...old, type });
+    await ready;
+    const restored = api.importBackupPage(line(page));
+    release();
+    await Promise.all([pending, restored]);
+    await waitFor(() => !queue.isProcessing() && !queue.peekQueue().length, 'runtime capture admission to finish');
+    assert.equal((await source.getPageRecord(page.url)).text, page.text, type);
+    assert.deepEqual(plain((await source.getPageRecord(page.url)).chunks), page.chunks);
+    assert.equal(await source.getProcessingEntry(page.url), undefined);
   }
 });
 

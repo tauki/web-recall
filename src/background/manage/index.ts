@@ -40,7 +40,7 @@ export async function getManagePages(): Promise<ManagePageSummary[]> {
 
 export async function deleteManagePages(urls: string[]): Promise<number> {
   if (!Array.isArray(urls) || urls.length === 0) return 0;
-  cancelCaptureJobs(urls);
+  await cancelCaptureJobs(urls);
   const deleted = await storageManager.deletePages(urls);
   if (deleted > 0) {
     await invalidateOffscreenIndex();
@@ -64,8 +64,8 @@ export async function importBackupPage(line: string): Promise<{ imported: number
 }
 
 async function restorePage(record: PageRecord): Promise<void> {
-  cancelCaptureJobs([record.url]);
-  await storageManager.savePageRecord(record, { discardProcessing: true });
+  await cancelCaptureJobs([record.url]);
+  await storageManager.savePageRecord(record, { discardProcessing: true, replace: true });
 }
 
 export async function importManagePages(payload: ImportPayload): Promise<{ imported: number }> {
