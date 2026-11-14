@@ -74,7 +74,7 @@ test('chat provider cancellation preserves settings and accepting consent makes 
   f.q('#beta-provider-save').click();
   await waitFor(() => f.q('#beta-settings-status')?.textContent.includes('Provider settings saved'), 'the provider save to finish');
   assert.equal(backend.stored.betaProviderSettings.ollama.baseUrl, origin);
-  assert.ok(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins.includes(origin));
+  assert.deepEqual(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins, [origin]);
   assert.equal(backend.stored.betaSettings.paused, true);
   assert.ok(backend.requests.length > 0);
   for (const request of backend.requests) assert.ok(request.acknowledged.includes(new URL(request.url).origin));
@@ -98,7 +98,7 @@ test('embedding consent cancellation preserves the endpoint and acceptance persi
   f.q('#beta-save-embedding').click();
   await waitFor(() => f.q('#beta-settings-status')?.textContent.includes('Embedding settings saved'), 'the embedding save to finish');
   assert.equal(backend.stored.embeddingConfig.baseUrl, origin);
-  assert.ok(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins.includes(origin));
+  assert.deepEqual(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins, [origin]);
   assert.equal(backend.stored.betaSettings.paused, true);
 });
 

@@ -131,7 +131,7 @@ test('provider save messages persist consent before probes and return updated Se
   assert.equal(fixture.requests.length, 0);
   const accepted = await fixture.send({ ...request, acknowledgeRemoteOrigin: true });
   assert.equal(accepted.error, undefined);
-  assert.ok(accepted.settings.acknowledgedRemoteProviderOrigins.includes('https://models.example.test'));
+  assert.deepEqual(plain(accepted.settings.acknowledgedRemoteProviderOrigins), ['https://models.example.test']);
   const provider = accepted.providers.find(provider => provider.id === 'ollama');
   assert.equal(provider.settings.find(setting => setting.key === 'baseUrl').value, request.value);
   assert.equal(provider.status.online, true);
@@ -149,7 +149,7 @@ test('embedding save messages carry consent and return the saved endpoint and Se
   const accepted = await fixture.send({ ...request, acknowledgeRemoteOrigin: true });
   assert.equal(accepted.error, undefined);
   assert.equal(accepted.config.baseUrl, request.payload.baseUrl);
-  assert.ok(accepted.settings.acknowledgedRemoteProviderOrigins.includes('https://embeddings.example.test'));
+  assert.deepEqual(plain(accepted.settings.acknowledgedRemoteProviderOrigins), ['https://embeddings.example.test']);
   assert.equal(fixture.requests.length, 0);
 });
 
