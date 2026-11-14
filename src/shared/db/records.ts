@@ -92,6 +92,35 @@ export function normalizeLegacyPage(raw: Record<string, unknown>, pageIndex: num
 }
 
 export function normalizeBackupPage(raw: Record<string, unknown>): PageRecord {
+  function validateFields(record: Record<string, unknown>): void {
+    for (const field of ['url', 'title', 'text', 'summary']) {
+      if (record[field] !== undefined && typeof record[field] !== 'string') throw new Error(`Invalid backup field: ${field} must be a string.`);
+    }
+    for (const field of ['timestamp', 'createdAt', 'updatedAt', 'lastEmbeddedAt']) {
+      if (record[field] !== undefined && (typeof record[field] !== 'number' || !Number.isFinite(record[field]) || (record[field] as number) < 0)) throw new Error(`Invalid backup field: ${field} must be a finite non-negative number.`);
+    }
+    if (record.manual !== undefined && typeof record.manual !== 'boolean') throw new Error('Invalid backup field: manual must be a boolean.');
+    for (const field of ['chunks', 'items']) {
+      const chunks = record[field];
+      if (chunks === undefined) continue;
+      if (!Array.isArray(chunks)) throw new Error(`Invalid backup field: ${field} must be an array.`);
+      for (const chunk of chunks) {
+        if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) throw new Error('Invalid backup chunk.');
+        if (typeof chunk.text !== 'string') throw new Error('Invalid backup chunk text.');
+        if (chunk.embedding !== undefined && !Array.isArray(chunk.embedding)) throw new Error('Invalid backup chunk embedding.');
+        if (Array.isArray(chunk.embedding) && !chunk.embedding.every((value: unknown) => typeof value === 'number' && Number.isFinite(value))) throw new Error('Invalid backup chunk embedding: contains a non-numeric value.');
+        if (chunk.embeddingKey !== undefined && typeof chunk.embeddingKey !== 'string') throw new Error('Invalid backup chunk embeddingKey.');
+      }
+    }
+  }
+  validateFields(raw);
+  if (raw.versions !== undefined) {
+    if (!Array.isArray(raw.versions)) throw new Error('Invalid backup versions: expected an array.');
+    for (const version of raw.versions) {
+      if (!version || typeof version !== 'object' || Array.isArray(version)) throw new Error('Invalid backup version.');
+      validateFields(version as Record<string, unknown>);
+    }
+  }
   return normalizePage(raw, 0, 'backup');
 }
 

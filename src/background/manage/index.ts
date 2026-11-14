@@ -58,9 +58,14 @@ export async function exportBackupPage(afterUrl?: string): Promise<{ line?: stri
 }
 
 export async function importBackupPage(line: string): Promise<{ imported: number }> {
-  await storageManager.savePageRecord(decodeBackupPage(line));
+  await restorePage(decodeBackupPage(line));
   await invalidateOffscreenIndex();
   return { imported: 1 };
+}
+
+async function restorePage(record: PageRecord): Promise<void> {
+  cancelCaptureJobs([record.url]);
+  await storageManager.savePageRecord(record, { discardProcessing: true });
 }
 
 export async function importManagePages(payload: ImportPayload): Promise<{ imported: number }> {
@@ -82,7 +87,7 @@ export async function importManagePages(payload: ImportPayload): Promise<{ impor
   });
   let imported = 0;
   for (const record of records) {
-    await storageManager.savePageRecord(record);
+    await restorePage(record);
     imported += 1;
   }
   if (imported > 0) {

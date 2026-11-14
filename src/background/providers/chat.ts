@@ -4,7 +4,7 @@ import { DEFAULT_SETTINGS } from '../../shared/config/index';
 import { resolveOllamaChatModel } from './ollamaModels';
 import { getSettings } from '../settings/index';
 import { getProviderBaseUrl } from './config';
-import { assertProviderOriginAcknowledged } from './access';
+import { assertProviderOriginAcknowledged, fetchProvider } from './access';
 
 export type ChatConfig = {
   signal?: AbortSignal;
@@ -79,9 +79,8 @@ export async function ensureChatReady(config: ChatConfig): Promise<void> {
 export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
   return runInference(async () => {
     try {
-      await assertProviderOriginAcknowledged(config.baseUrl);
       config.signal?.throwIfAborted();
-      const resp = await fetch(`${config.baseUrl}/api/chat`, {
+      const resp = await fetchProvider(`${config.baseUrl}/api/chat`, {
         method: 'POST',
         signal: config.signal,
         headers: { 'Content-Type': 'application/json' },
@@ -120,10 +119,9 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
 }
 
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
-  await assertProviderOriginAcknowledged(config.baseUrl);
   config.signal?.throwIfAborted();
   return runInference(async () => {
-    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+    const resp = await fetchProvider(`${config.baseUrl}/api/chat`, {
       method: 'POST',
       signal: config.signal,
       headers: { 'Content-Type': 'application/json' },
@@ -162,12 +160,11 @@ export async function streamChat(
   body: Record<string, unknown>,
   onChunk: (chunk: string) => void
 ): Promise<string> {
-  await assertProviderOriginAcknowledged(config.baseUrl);
   config.signal?.throwIfAborted();
   return runInference(async () => {
     const textDecoder = new TextDecoder();
     let assembled = '';
-    const resp = await fetch(`${config.baseUrl}/api/chat`, {
+    const resp = await fetchProvider(`${config.baseUrl}/api/chat`, {
       method: 'POST',
       signal: config.signal,
       headers: { 'Content-Type': 'application/json' },

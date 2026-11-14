@@ -1,14 +1,13 @@
 import { getModelSettings } from '../models/index';
 import { getProviderBaseUrl } from './config';
-import { assertProviderOriginAcknowledged } from './access';
+import { fetchProvider } from './access';
 
 export async function listOllamaModels(baseUrl?: string): Promise<string[]> {
   const target = baseUrl || (await getProviderBaseUrl('ollama'));
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    await assertProviderOriginAcknowledged(target);
-    const response = await fetch(`${target}/api/tags`, { signal: controller.signal });
+    const response = await fetchProvider(`${target}/api/tags`, { signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const json = await response.json();
     if (!Array.isArray(json?.models)) return [];

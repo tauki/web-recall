@@ -162,6 +162,10 @@ Setup
    model. The connection test probes the actual chat endpoint, which helps
    surface `OLLAMA_ORIGINS` misconfiguration.
 
+   Configure the final provider endpoint URL directly: redirects, including
+   same-origin redirects, are rejected. Remote-origin consent is checked before
+   each request and embedding retry; revoking consent stops subsequent requests.
+
    If Tools are enabled, Ask can call:
    - `search_memory({ query, k? })`
    - `get_page_summary({ url })`
@@ -228,6 +232,7 @@ Limitations
 
 Export/Import
 -------------
+- Restore cancels existing capture work for each restored URL, so an older queued or active capture cannot overwrite the restored text and embeddings. New captures requested afterward can update the page normally.
 - **Export backup** saves one `.jsonl` file using Chrome's native save dialog. Records stream from IndexedDB to disk one page at a time, so the whole library is not assembled in memory. Keep the library unchanged during export for a consistent backup.
 - **Import backup or JSON** accepts the streaming backup and legacy JSON files. Backups are validated completely before any pages are restored; malformed or truncated files are rejected. A storage failure during restore can leave already imported pages in place; the error reports how many finished.
 - Streaming backups use a `{"format":"web-recall","schemaVersion":2}` header, one `{"type":"page","page":{...}}` record per line, and a `{"type":"end","pages":N}` footer. Total file size and page count are not capped. Each UTF-8 record is limited to 16 MiB to bound memory and stay within Chrome's messaging limits. Export rejects oversized records without committing an incomplete file.

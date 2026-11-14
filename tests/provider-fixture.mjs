@@ -8,13 +8,22 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
     betaProviderSettings: { ollama: { baseUrl } }
   };
   const requests = [], listeners = [];
+  const failingWrites = new Set();
   const chrome = {
     runtime: { sendMessage() {}, getURL: path => path, onMessage: { addListener: listener => listeners.push(listener) } },
     storage: {
       onChanged: { addListener() {} },
       local: {
         get(keys, callback) { callback(Object.fromEntries(keys.map(key => [key, stored[key]]))); },
-        set(values, callback) { Object.assign(stored, plain(values)); callback?.(); }
+        set(values, callback) {
+          const key = Object.keys(values).find(key => failingWrites.has(key));
+          if (key) {
+            failingWrites.delete(key);
+            chrome.runtime.lastError = new Error('Storage write failed');
+            callback?.();
+            delete chrome.runtime.lastError;
+          } else { Object.assign(stored, plain(values)); callback?.(); }
+        }
       }
     }
   };
@@ -39,7 +48,7 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
       assert.fail(`Unexpected provider request: ${url}`);
     }
   };
-  const load = source => loadSource(source, '', mocks, { TextEncoder, ...context });
+  const load = (source, overrides = {}) => loadSource(source, '', mocks, { TextEncoder, ...context, ...overrides });
   const send = message => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(Error(`No response to ${message.type}`)), 5000);
     const respond = value => { clearTimeout(timer); resolve(value); };
@@ -52,5 +61,5 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
       throw Error(`No listener handles ${message.type}`);
     } catch (error) { clearTimeout(timer); reject(error); }
   });
-  return { stored, requests, load, send, connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
+  return { stored, requests, load, send, failNextWrite: key => failingWrites.add(key), connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
 }

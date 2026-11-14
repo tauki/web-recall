@@ -240,7 +240,7 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
   });
 }
 
-export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean } = {}): Promise<void> {
+export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean; discardProcessing?: boolean } = {}): Promise<void> {
   const existing = await getPageRecord(record.url);
   const now = Date.now();
   const chunks = Array.isArray(record.chunks) ? record.chunks : [];
@@ -273,6 +273,7 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
         normalized.lastEmbeddedAt = record.lastEmbeddedAt ?? current?.lastEmbeddedAt;
       }
       tx.objectStore(PAGES_STORE).put(normalized);
+      if (options.discardProcessing) tx.objectStore(PROCESSING_STORE).delete(normalized.url);
       tx.objectStore(HIGHLIGHTS_STORE).clear();
       const store = tx.objectStore(EMBEDDINGS_STORE);
       const cursor = store.index('pageUrl').openCursor(IDBKeyRange.only(normalized.url));

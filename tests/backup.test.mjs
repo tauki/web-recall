@@ -1,13 +1,79 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, plain } from './helpers.mjs';
+import { loadSource, plain, waitFor, chromeFixture } from './helpers.mjs';
 
 const header = '{"format":"web-recall","schemaVersion":2}\n';
 const trailer = count => `{"type":"end","pages":${count}}\n`;
 const line = page => JSON.stringify({ type: 'page', page }) + '\n';
 const page = { url: 'https://backup.test/article', title: 'Saved article', text: 'Original passage', timestamp: 10, manual: true, chunks: [{ text: 'Original passage', embedding: [0.25, 0.75], embeddingKey: 'original-model' }], createdAt: 5, updatedAt: 10 };
 const codec = () => loadSource('src/shared/backup.ts', '', {}, { TextEncoder });
+
+test('malformed supplied backup fields fail preflight without replacing saved content', async t => {
+  const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+  t.after(async () => (await source.openDatabase()).close());
+  await source.savePageRecord(page);
+  const api = await loadSource('src/background/manage/index.ts', '', {
+    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs() {} },
+    '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+  }, { TextEncoder });
+  const backup = await codec();
+  for (const invalid of [
+    { text: 42 }, { chunks: {} }, { versions: 'invalid' }, { title: null }, { manual: 'false' }, { timestamp: '10' },
+    { chunks: [{ text: 42, embedding: [] }] }, { chunks: [{ text: 'X', embedding: 'invalid' }] },
+    { chunks: [{ text: 'X', embedding: [], embeddingKey: 42 }] },
+    { versions: [{ text: 42, chunks: [] }] }, { versions: [{ text: 'X', chunks: 'invalid' }] },
+    { versions: [{ text: 'X', chunks: [{ text: 'X', embedding: {} }] }] }
+  ]) {
+    const encoded = line({ ...page, ...invalid });
+    await assert.rejects(async () => { for await (const _record of backup.readBackupPages(new Blob([header, encoded, trailer(1)]).stream())) {} }, /backup|field|invalid/i);
+    await assert.rejects(api.importBackupPage(encoded), /backup|field|invalid/i);
+    const saved = await source.getPageRecord(page.url);
+    assert.equal(saved.text, page.text);
+    assert.deepEqual(plain(saved.chunks), page.chunks);
+  }
+  const empty = { ...page, text: '', chunks: [], versions: [{ timestamp: 1, text: '', chunks: [] }] };
+  await api.importBackupPage(line(empty));
+  assert.equal((await source.getPageRecord(page.url)).text, '');
+  assert.deepEqual(plain((await source.getPageRecord(page.url)).chunks), []);
+});
+
+test('restoring backup or legacy JSON cancels active and queued captures without losing restored data', async t => {
+  for (const format of ['backup', 'legacy']) {
+    const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
+    t.after(async () => (await source.openDatabase()).close());
+    let release, started;
+    const gate = new Promise(resolve => { release = resolve; });
+    const ready = new Promise(resolve => { started = resolve; });
+    const processor = await loadSource('src/background/capture/processor.ts', '', {
+      '../storage/manager': { storageManager: source }, '../storage/index': { whenStorageReady: async () => {} },
+      '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: async () => { started(); await gate; return [[1, 0]]; } },
+      '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+    }, { console: { info() {} } });
+    const processing = await loadSource('src/background/processing/index.ts', '', { '../storage/manager': { storageManager: source } }, { chrome: chromeFixture });
+    const capture = await loadSource('src/background/capture/index.ts', '', {
+      './processor': processor, '../processing/index': processing,
+      '../settings/index': { shouldCaptureUrl: async () => true, getCachedSettingsSnapshot: () => ({}) }, '../../shared/logger/index': { log: async () => {} }
+    }, { console: { info() {} } });
+    const queue = capture.createCaptureQueue();
+    const live = { url: page.url, title: 'Live', text: 'Live content', chunks: ['Live content'], timestamp: 20 };
+    await queue.enqueue(live); await ready;
+    await queue.enqueue({ ...live, text: 'Queued content', chunks: ['Queued content'], timestamp: 30 });
+    const api = await loadSource('src/background/manage/index.ts', '', {
+      '../storage/manager': { storageManager: source }, '../capture/index': capture,
+      '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
+    }, { TextEncoder });
+    if (format === 'backup') await api.importBackupPage(line(page));
+    else await api.importManagePages({ schemaVersion: 1, pages: [page] });
+    const pending = await source.getProcessingEntry(page.url);
+    release();
+    await waitFor(() => !queue.isProcessing(), 'cancelled capture to finish');
+    assert.equal(pending, undefined, `${format}: old jobs must not survive restore`);
+    assert.equal(queue.peekQueue().length, 0);
+    assert.equal((await source.getPageRecord(page.url)).text, page.text);
+    assert.deepEqual(plain((await source.getPageRecord(page.url)).chunks), page.chunks);
+  }
+});
 
 test('streamed backups round-trip a library beyond legacy file, page and record limits', async t => {
   const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });

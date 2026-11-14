@@ -6,6 +6,9 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.1 - Unreleased
 ------------------
+- Recheck provider consent before every request and retry, and reject redirects before data can reach another endpoint. Direct endpoints and transient-error retries remain supported.
+- Cancel old capture work atomically with page restoration; reject malformed backup fields before normalization without rejecting legitimate empty captures or legacy migrations.
+- Serialize configuration saves and retain the last persisted settings after write failures. UI regressions now exercise production runtime error handling.
 - Capture only rendered page text, preserving headings and code while excluding hidden content without modifying the page.
 - Apply the same domain rules and content-script recovery to manual capture from the sidepanel, keyboard and context menu; pause still permits manual capture.
 - Prevent failed older captures from overwriting newer queued content, and preserve debug log levels through storage and filtering.

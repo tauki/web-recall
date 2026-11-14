@@ -1,6 +1,6 @@
 import { getProviderBaseUrl, updateProviderSettings } from './config';
 import { probeChat } from './chat';
-import { assertProviderOriginAcknowledged, type ProviderConsentOptions } from './access';
+import { fetchProvider, type ProviderConsentOptions } from './access';
 import { listOllamaModels, resolveOllamaChatModel } from './ollamaModels';
 export { listOllamaModels } from './ollamaModels';
 
@@ -37,7 +37,7 @@ async function pingOllama(baseUrl: string): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetch(`${baseUrl}/`, { method: 'GET', signal: controller.signal });
+    const response = await fetchProvider(`${baseUrl}/`, { method: 'GET', signal: controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
   } finally {
     clearTimeout(timeout);
@@ -47,7 +47,6 @@ async function pingOllama(baseUrl: string): Promise<void> {
 export async function getOllamaStatus(baseUrl?: string, testInference = false): Promise<ProviderStatus> {
   const target = baseUrl || (await getProviderBaseUrl('ollama'));
   try {
-    await assertProviderOriginAcknowledged(target);
     await pingOllama(target);
     if (!testInference) return { online: true, lastChecked: new Date().toISOString() };
     const probeModel = await resolveOllamaChatModel(target);

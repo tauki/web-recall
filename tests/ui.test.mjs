@@ -25,19 +25,30 @@ async function ui(view, overrides = {}, backend) {
     GET_PAGE_LIST: () => ({ pages }),
     ...overrides
   };
-  const send = async message => {
-    requests.push(message);
-    pendingMessages++;
-    try { return await (backend ? backend.send(message) : responses[message.type]?.(message) ?? {}); }
-    finally { pendingMessages--; }
+  const chrome = {
+    runtime: {
+      getURL: path => 'https://extension.test/' + path,
+      onMessage: { addListener: listener => listeners.push(listener) },
+      sendMessage(message, callback) {
+        requests.push(message);
+        pendingMessages++;
+        const failed = error => {
+          chrome.runtime.lastError = { message: error.message };
+          try { callback(); } finally { delete chrome.runtime.lastError; }
+        };
+        let result;
+        try { result = backend ? backend.send(message) : responses[message.type]?.(message) ?? {}; }
+        catch (error) { failed(error); pendingMessages--; return; }
+        Promise.resolve(result).then(callback, failed).finally(() => { pendingMessages--; });
+      }
+    },
+    tabs: { create() {} }
   };
   await loadSource(`src/ui/${view}/index.ts`, '', {
-    '../shared/runtime': { sendRuntimeMessage: send },
-    '../../shared/runtime': { sendRuntimeMessage: send },
     '../shared/polling': { startPolling: task => { polls.push(task); void task(); return () => {}; } }
   }, {
     window, document: window.document, HTMLElement: window.HTMLElement, TextEncoder,
-    chrome: { runtime: { getURL: p => 'https://extension.test/' + p, onMessage: { addListener: f => listeners.push(f) } }, tabs: { create() {} } }
+    chrome
   });
   await tick(); await tick();
   const q = selector => window.document.querySelector(selector);
@@ -100,6 +111,29 @@ test('embedding consent cancellation preserves the endpoint and acceptance persi
   assert.equal(backend.stored.embeddingConfig.baseUrl, origin);
   assert.deepEqual(backend.stored.betaSettings.acknowledgedRemoteProviderOrigins, [origin]);
   assert.equal(backend.stored.betaSettings.paused, true);
+});
+
+test('backend save and restore errors reach UI failure states rather than success states', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  await backend.connect();
+  const settings = await ui('sidepanel', {}, backend); t.after(settings.close);
+  await waitFor(() => settings.q('#beta-provider-base')?.value === 'http://localhost:11434', 'Settings to load');
+  backend.failNextWrite('betaProviderSettings');
+  settings.q('#beta-provider-save').click();
+  await settings.settle();
+  assert.match(settings.q('#beta-settings-status').textContent, /Storage write failed/);
+  assert.doesNotMatch(settings.q('#beta-settings-status').textContent, /settings saved/i);
+  const db = await backend.load('src/shared/db/index.ts');
+  t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ ...pages[0], text: 'Saved text', chunks: [{ text: 'Saved text', embedding: [1, 0] }] });
+  const memory = await ui('manage', {}, backend); t.after(memory.close);
+  const input = memory.q('#manage-import');
+  const invalid = new File([JSON.stringify({ schemaVersion: 1, pages: [{ url: pages[0].url, title: 'No supported content' }] })], 'invalid.json');
+  Object.defineProperty(input, 'files', { value: [invalid] });
+  input.dispatchEvent(new memory.window.Event('change'));
+  await waitFor(() => !input.disabled, 'failed import to finish');
+  assert.match(memory.q('#manage-status').textContent, /Import failed:.*content/i);
+  assert.equal((await db.getPageRecord(pages[0].url)).text, 'Saved text');
 });
 
 test('text retrieval results do not display term scores as semantic similarity', async t => {

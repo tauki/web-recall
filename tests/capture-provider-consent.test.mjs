@@ -2,6 +2,110 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { plain } from './helpers.mjs';
 import { providerFixture } from './provider-fixture.mjs';
+import { createServer } from 'node:http';
+
+test('revoking embedding consent during backoff stops before a second POST', async () => {
+  const origin = 'https://embeddings.example.test';
+  const fixture = providerFixture(origin, [origin]);
+  fixture.stored.embeddingConfig = { provider: 'ollama', baseUrl: origin, model: 'embed-model' };
+  let attempts = 0, backoffs = 0;
+  const embeddings = await fixture.load('src/background/embeddings/index.ts', {
+    fetch: async () => { attempts++; return Response.json({ error: 'busy' }, { status: 503 }); },
+    setTimeout(callback) {
+      backoffs++;
+      fixture.stored.betaSettings.acknowledgedRemoteProviderOrigins = [];
+      queueMicrotask(callback);
+    }, console: { warn() {} }
+  });
+  embeddings.configureEmbeddings();
+  await assert.rejects(embeddings.computeEmbeddingsForChunks(['Private captured text']), /acknowledg/i);
+  assert.equal(attempts, 1);
+  assert.equal(backoffs, 1);
+});
+
+test('concurrent partial configuration saves retain independent changes and recover after storage failure', async () => {
+  const fixture = providerFixture('http://localhost:11434');
+  const embeddings = await fixture.load('src/background/embeddings/index.ts');
+  await Promise.all([
+    embeddings.updateEmbeddingConfig({ model: 'new-model' }),
+    embeddings.updateEmbeddingConfig({ baseUrl: 'http://127.0.0.1:11434' })
+  ]);
+  assert.equal(fixture.stored.embeddingConfig.model, 'new-model');
+  assert.equal(fixture.stored.embeddingConfig.baseUrl, 'http://127.0.0.1:11434');
+  fixture.failNextWrite('embeddingConfig');
+  await assert.rejects(embeddings.updateEmbeddingConfig({ model: 'failed-model' }), /Storage write failed/);
+  await embeddings.updateEmbeddingConfig({ baseUrl: 'http://localhost:1234' });
+  assert.equal(embeddings.getEmbeddingConfig().model, 'new-model');
+  assert.equal(fixture.stored.embeddingConfig.model, 'new-model');
+  const config = await fixture.load('src/background/providers/config.ts');
+  await Promise.all([
+    config.updateProviderSettings('ollama', { baseUrl: 'http://localhost:1234' }),
+    config.updateProviderSettings('vllm', { baseUrl: 'http://localhost:8000' })
+  ]);
+  assert.equal(fixture.stored.betaProviderSettings.ollama.baseUrl, 'http://localhost:1234');
+  assert.equal(fixture.stored.betaProviderSettings.vllm.baseUrl, 'http://localhost:8000');
+  fixture.failNextWrite('betaProviderSettings');
+  await assert.rejects(config.updateProviderSettings('ollama', { baseUrl: 'http://localhost:9999' }), /Storage write failed/);
+  assert.equal(await config.getProviderBaseUrl('ollama'), 'http://localhost:1234');
+});
+
+test('provider HTTP operations reject redirects without forwarding bodies and direct endpoints still work', async t => {
+  let redirectStatus = 307;
+  let redirectLocation = '/leak';
+  const leaked = [], posted = [];
+  const destination = createServer(async (request, response) => {
+    let body = '';
+    for await (const part of request) body += part;
+    leaked.push({ method: request.method, body });
+    response.end('{}');
+  });
+  await new Promise((resolve, reject) => { destination.once('error', reject); destination.listen(0, '127.0.0.1', resolve); });
+  t.after(() => { destination.closeAllConnections(); return new Promise(resolve => destination.close(resolve)); });
+  const otherOrigin = `http://127.0.0.1:${destination.address().port}`;
+  const server = createServer(async (request, response) => {
+    let body = '';
+    for await (const part of request) body += part;
+    if (request.url === '/leak') { leaked.push(body); response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ message: { content: 'Leaked reply' }, embeddings: [[1, 0]] })); return; }
+    if (body) posted.push(JSON.parse(body));
+    if (redirectStatus) { response.writeHead(redirectStatus, { Location: redirectLocation }); response.end(); return; }
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify(request.url === '/api/embed' ? { embeddings: [[1, 0]] } : request.url === '/api/tags' ? { models: [{ name: 'direct-model' }] } : { message: { content: 'Direct reply' } }));
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
+  const baseUrl = `http://127.0.0.1:${server.address().port}`;
+  const fixture = providerFixture(baseUrl);
+  const chat = await fixture.load('src/background/providers/chat.ts', { fetch });
+  const models = await fixture.load('src/background/providers/ollamaModels.ts', { fetch, console: { warn() {} } });
+  const provider = await fixture.load('src/background/providers/ollama.ts', { fetch });
+  const embeddings = await fixture.load('src/background/embeddings/index.ts', { fetch });
+  await embeddings.updateEmbeddingConfig({ baseUrl });
+  const config = { providerId: 'ollama', baseUrl, model: 'test-model' };
+  const body = { model: 'test-model', messages: [{ role: 'user', content: 'Private fixture passage' }] };
+  for (const [status, location] of [[307, '/leak'], [308, `${otherOrigin}/leak`]]) {
+    redirectStatus = status;
+    redirectLocation = location;
+    await assert.rejects(chat.callChat(config, body), /redirect/i);
+    await assert.rejects(chat.streamChat(config, body, () => assert.fail('Redirects must not stream')), /redirect/i);
+    assert.equal((await chat.probeChat(config)).ok, false);
+    assert.equal((await provider.getOllamaStatus(baseUrl)).online, false);
+    assert.deepEqual(plain(await models.listOllamaModels(baseUrl)), []);
+    await assert.rejects(embeddings.computeEmbeddingsForChunks(['Private fixture passage']), /redirect/i);
+  }
+  assert.deepEqual(leaked, []);
+  assert.equal(posted.length, 8, 'Each POST operation must stop at its first redirect, without embedding retries');
+  redirectStatus = 0;
+  assert.equal((await chat.callChat(config, body)).message.content, 'Direct reply');
+  const chunks = [];
+  assert.equal(await chat.streamChat(config, body, text => chunks.push(text)), 'Direct reply');
+  assert.deepEqual(chunks, ['Direct reply']);
+  assert.equal((await chat.probeChat(config)).ok, true);
+  assert.equal((await provider.getOllamaStatus(baseUrl)).online, true);
+  assert.deepEqual(plain(await models.listOllamaModels(baseUrl)), ['direct-model']);
+  assert.deepEqual(plain(await embeddings.computeEmbeddingsForChunks(['Private fixture passage'])), [[1, 0]]);
+  const browserChat = await fixture.load('src/background/providers/chat.ts', { fetch: async () => ({ type: 'opaqueredirect', status: 0, body: null }) });
+  await assert.rejects(browserChat.callChat(config, body), /Provider redirects are not allowed/);
+});
 
 test('saved unacknowledged remote providers remain readable with no network requests', async () => {
   const fixture = providerFixture();
