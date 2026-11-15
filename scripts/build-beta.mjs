@@ -73,6 +73,10 @@ async function main() {
     const name = `icon-${size}.png`;
     await fs.copyFile(path.join(REPO_ROOT, 'src/assets/icons', name), path.join(iconDir, name));
   }
+  await fs.copyFile(path.join(REPO_ROOT, 'src/assets/icons/mark.png'), path.join(iconDir, 'mark.png'));
+  for (const folder of ['fonts', 'ui']) {
+    await fs.cp(path.join(REPO_ROOT, 'src/assets', folder), path.join(OUT_DIR, folder), { recursive: true });
+  }
   await copyTransformersWasm();
   console.info(`Beta workspace bundled to ${OUT_DIR}`);
 }

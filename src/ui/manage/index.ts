@@ -1,4 +1,4 @@
-import { installSharedStyles, createToolNavigation } from '../shared/presentation';
+import { installSharedStyles, createToolNavigation, createBackLink, iconMarkup, createPageEntry, navigateTo, appUrl } from '../shared/presentation';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 import { BACKUP_HEADER, readBackupPages } from '../../shared/backup';
@@ -56,122 +56,7 @@ function setTransferBusy(busy: boolean): void {
   }
 }
 
-function ensureStyles(): void {
-  if (document.getElementById('beta-manage-style')) return;
-  const style = document.createElement('style');
-  style.id = 'beta-manage-style';
-  style.textContent = `
-    :root {
-      --bg: #f5f5f7;
-      --surface: #ffffff;
-      --surface-muted: #f1f5f9;
-      --border: #d1d5db;
-      --text: #0f172a;
-      --muted: #4b5563;
-      --accent: #4f46e5;
-      --accent-contrast: #ffffff;
-      --link: #2563eb;
-    }
-    :root[data-theme="dark"] {
-      --bg: #0a0f1a;
-      --surface: #0f172a;
-      --surface-muted: #0b1220;
-      --border: #1e293b;
-      --text: #e2e8f0;
-      --muted: #cbd5e1;
-      --accent: #8b5cf6;
-      --accent-contrast: #0b1020;
-      --link: #a5b4fc;
-    }
-    body {
-      background: var(--bg);
-      color: var(--text);
-    }
-    .manage-shell {
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-    .manage-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-    .manage-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .manage-actions button,
-    .manage-actions label {
-      padding: 6px 12px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      cursor: pointer;
-      font-weight: 600;
-      color: var(--text);
-    }
-    .manage-actions button.primary {
-      background: var(--accent);
-      color: var(--accent-contrast);
-      border-color: var(--accent);
-    }
-    .manage-actions input[type='file'] {
-      display: none;
-    }
-    .manage-toolbar {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      align-items: center;
-    }
-    .manage-toolbar input[type='search'] {
-      flex: 1;
-      min-width: 220px;
-      padding: 6px 10px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      color: var(--text);
-    }
-    th, td {
-      text-align: left;
-      padding: 8px;
-      border-bottom: 1px solid var(--border);
-    }
-    th button {
-      border: none;
-      background: transparent;
-      font-weight: 600;
-      cursor: pointer;
-      color: var(--text);
-    }
-    tr:hover {
-      background: var(--surface-muted);
-    }
-    a {
-      color: var(--link);
-    }
-    .status-line {
-      min-height: 1.2em;
-      color: var(--muted);
-      font-size: 0.9rem;
-    }
-    .danger {
-      color: #b91c1c;
-    }
-  `;
-  document.head.appendChild(style);
-}
+function ensureStyles(): void { installSharedStyles(); }
 
 async function initTheme(): Promise<void> {
   try {
@@ -185,7 +70,7 @@ async function initTheme(): Promise<void> {
 
 function formatDate(timestamp: number): string {
   try {
-    return new Date(timestamp).toLocaleString();
+    return new Date(timestamp).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
   } catch {
     return '';
   }
@@ -243,128 +128,47 @@ function sortAndRender(): void {
 }
 
 function renderRows(rows: ManagePage[]): void {
-  const tbody = document.querySelector<HTMLTableSectionElement>('#manage-rows');
-  const deleteBtn = document.querySelector<HTMLButtonElement>('#manage-delete');
-  if (!tbody) return;
-  tbody.innerHTML = '';
+  const list = document.querySelector<HTMLElement>('#manage-rows');
+  if (!list) return;
+  const open = new Set(Array.from(list.querySelectorAll<HTMLDetailsElement>('details[open]')).map(item => item.dataset.url));
+  list.replaceChildren();
   for (const page of rows) {
-    const tr = document.createElement('tr');
-    const tdCheckbox = document.createElement('td');
-    const checkbox = document.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.setAttribute('aria-label', `Select ${page.title || page.url}`);
-    checkbox.dataset.url = page.url;
-    checkbox.checked = state.selected.has(page.url);
-    checkbox.addEventListener('change', (event) => {
-      const target = event.target as HTMLInputElement;
-      const url = target.dataset.url;
-      if (!url) return;
-      if (target.checked) state.selected.add(url);
-      else state.selected.delete(url);
-      updateDeleteButton();
-    });
-    tdCheckbox.appendChild(checkbox);
-    const tdTitle = document.createElement('td');
-    const link = document.createElement('a');
-    link.href = page.url;
-    link.target = '_blank';
-    link.rel = 'noreferrer';
-    link.textContent = page.title;
-    tdTitle.appendChild(link);
-    const domain = document.createElement('div'); domain.className = 'wr-muted';
-    try { domain.textContent = new URL(page.url).hostname; } catch { domain.textContent = page.url; }
-    tdTitle.append(domain);
-    const urlDetails = document.createElement('details');
-    const urlSummary = document.createElement('summary'); urlSummary.textContent = 'Full URL';
-    const urlText = document.createElement('div'); urlText.textContent = page.url;
-    urlDetails.append(urlSummary, urlText); tdTitle.append(urlDetails);
-    const tdDate = document.createElement('td');
-    tdDate.dataset.label = 'Captured';
-    tdDate.textContent = formatDate(page.timestamp);
-    const tdEmbeds = document.createElement('td');
+    const { article, details, body } = createPageEntry(page);
+    details.name = 'memory-page'; details.open = open.has(page.url);
+    if (page.manual) { const manual = document.createElement('span'); manual.className = 'manual-label'; manual.textContent = 'Manual'; details.querySelector('.source-meta')!.append(manual); }
+    const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.className = 'memory-selection';
+    checkbox.setAttribute('aria-label', `Select ${page.title || page.url}`); checkbox.dataset.url = page.url; checkbox.checked = state.selected.has(page.url);
+    checkbox.addEventListener('change', () => { if (checkbox.checked) state.selected.add(page.url); else state.selected.delete(page.url); updateDeleteButton(); });
+    article.prepend(checkbox);
+    const facts = document.createElement('dl'); facts.className = 'memory-facts';
     const rawStatus = page.embeddingStatus || (page.hasEmbeddings ? 'Present' : 'Missing');
     const embedStatus = rawStatus.startsWith('Different or unknown') ? 'Needs re-embed' : rawStatus;
-    const embedDetails = [];
-    if (typeof page.chunkCount === 'number') embedDetails.push(`${page.chunkCount} chunks`);
-    if (typeof page.lastEmbeddedAt === 'number') embedDetails.push(`at ${formatDate(page.lastEmbeddedAt)}`);
-    tdEmbeds.dataset.label = 'Embeddings';
-    const badge = document.createElement('span'); badge.className = 'wr-embedding-status'; badge.textContent = embedStatus;
-    const details = document.createElement('details'); const summary = document.createElement('summary'); summary.textContent = 'Details';
-    const detailsText = document.createElement('p'); detailsText.textContent = [rawStatus, ...embedDetails].join(' · ');
-    details.append(summary, detailsText); tdEmbeds.append(badge, details);
-    const progress = rowProgress.get(page.url);
-    if (progress) {
-      const line = document.createElement('span'); line.className = 'wr-row-progress'; line.textContent = progress.text;
-      if (progress.error) line.dataset.variant = 'error'; tdEmbeds.append(line);
+    for (const [name, value] of [['Captured', formatDate(page.timestamp)], ['Capture', page.manual ? 'Manual' : 'Automatic'], ['Embeddings', `${embedStatus} · ${page.chunkCount || 0} ${page.chunkCount === 1 ? 'chunk' : 'chunks'}`], ['Last embedded', page.lastEmbeddedAt ? formatDate(page.lastEmbeddedAt) : 'Not embedded'], ['URL', page.url]]) {
+      const row = document.createElement('div'); const dt = document.createElement('dt'); dt.textContent = name || ''; const dd = document.createElement('dd'); dd.textContent = value || ''; row.append(dt, dd); facts.append(row);
     }
-    const tdActions = document.createElement('td');
-    const delBtn = document.createElement('button');
-    delBtn.textContent = 'Delete';
-    delBtn.setAttribute('aria-label', `Delete ${page.title || page.url}`);
-    delBtn.addEventListener('click', () => deletePages([page.url]));
-    const reembedBtn = document.createElement('button');
-    reembedBtn.textContent = 'Re-embed';
-    reembedBtn.disabled = Boolean(backfillRequestId);
-    reembedBtn.setAttribute('aria-label', `Re-embed ${page.title || page.url}`);
-    reembedBtn.style.marginLeft = '6px';
-    reembedBtn.addEventListener('click', () => {
-      void runBackfill(1, true, [page.url]);
-    });
-    tdActions.appendChild(delBtn);
-    tdActions.appendChild(reembedBtn);
-    tr.appendChild(tdCheckbox);
-    tr.appendChild(tdTitle);
-    tr.appendChild(tdDate);
-    tr.appendChild(tdEmbeds);
-    tr.appendChild(tdActions);
-    tbody.appendChild(tr);
+    body.append(facts);
+    const progress = rowProgress.get(page.url);
+    if (progress) { const line = document.createElement('span'); line.className = 'wr-row-progress'; line.textContent = progress.text; if (progress.error) line.dataset.variant = 'error'; body.append(line); }
+    const actions = document.createElement('div'); actions.className = 'content-entry-actions';
+    const preview = document.createElement('a'); preview.href = appUrl('sidepanel') + '#page=' + encodeURIComponent(page.url); preview.className = 'primary-button'; preview.textContent = 'Preview & ask';
+    preview.addEventListener('click', event => { if (navigateTo('sidepanel', page.url)) event.preventDefault(); });
+    const original = document.createElement('a'); original.href = page.url; original.target = '_blank'; original.rel = 'noreferrer'; original.className = 'text-button'; original.textContent = 'Open page';
+    const reembed = document.createElement('button'); reembed.className = 'text-button'; reembed.textContent = 'Re-embed'; reembed.setAttribute('aria-label', `Re-embed ${page.title || page.url}`); reembed.disabled = Boolean(backfillRequestId); reembed.addEventListener('click', () => { void runBackfill(1, true, [page.url]); });
+    const del = document.createElement('button'); del.className = 'text-button danger-text'; del.textContent = 'Delete'; del.disabled = Boolean(backfillRequestId); del.setAttribute('aria-label', `Delete ${page.title || page.url}`); del.addEventListener('click', () => { void deletePages([page.url]); });
+    actions.append(preview, original, reembed, del); body.append(actions); list.append(article);
   }
-  if (deleteBtn) {
-    deleteBtn.disabled = state.selected.size === 0;
-  }
-
-  const queueView = document.querySelector<HTMLDivElement>('#manage-queue');
-  if (queueView) {
-    if (!state.queue.length) {
-      queueView.innerHTML = '<p>No pending captures.</p>';
-    } else {
-      queueView.textContent = '';
-      const table = document.createElement('table');
-      table.style.width = '100%';
-      table.style.borderCollapse = 'collapse';
-      const thead = document.createElement('thead');
-      const headRow = document.createElement('tr');
-      ['Status', 'Title', 'Attempts', 'Updated', 'Actions'].forEach((label) => {
-        const th = document.createElement('th');
-        th.setAttribute('align', 'left');
-        th.textContent = label;
-        headRow.appendChild(th);
-      });
-      thead.appendChild(headRow);
-      const body = document.createElement('tbody');
-      state.queue.slice(0, 10).forEach((entry) => {
-        const tr = document.createElement('tr');
-        const statusCell = document.createElement('td');
-        statusCell.textContent = entry.status;
-        const titleCell = document.createElement('td');
-        titleCell.textContent = entry.title || entry.url;
-        const attemptsCell = document.createElement('td');
-        attemptsCell.textContent = String(entry.attempts);
-        const updatedCell = document.createElement('td');
-        updatedCell.textContent = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
-        const actionsCell = document.createElement('td');
-        const retryBtn = document.createElement('button');
-        retryBtn.type = 'button';
-        retryBtn.textContent = 'Retry';
-        retryBtn.addEventListener('click', () => {
-          void retryQueueEntry(entry.url);
-        });
-        actionsCell.appendChild(retryBtn);
-        tr.append(statusCell, titleCell, attemptsCell, updatedCell, actionsCell);
-        body.appendChild(tr);
-      });
-      table.append(thead, body);
-      queueView.appendChild(table);
+  if (!rows.length) { const p = document.createElement('p'); p.className = 'empty-tool-state'; p.textContent = state.pages.length ? 'No pages match. Try another search or clear your filters.' : 'No saved pages yet. Capture a page or import a backup from Tools.'; list.append(p); }
+  const count = document.querySelector('#manage-count'); if (count) count.textContent = `${rows.length} ${rows.length === 1 ? 'page' : 'pages'}`;
+  updateDeleteButton();
+  const queue = document.querySelector('#manage-queue');
+  if (queue) {
+    queue.replaceChildren();
+    if (!state.queue.length) queue.textContent = 'No pending captures.';
+    for (const entry of state.queue) {
+      const row = document.createElement('div'); row.className = 'queue-entry';
+      const copy = document.createElement('div'); const title = document.createElement('strong'); title.textContent = entry.title || entry.url;
+      const meta = document.createElement('small'); meta.textContent = `${entry.status} · ${entry.attempts} attempts${entry.updatedAt ? ` · ${formatDate(entry.updatedAt)}` : ''}`; copy.append(title, meta);
+      const retry = document.createElement('button'); retry.textContent = 'Retry'; retry.className = 'secondary-button'; retry.disabled = entry.status === 'queued'; retry.addEventListener('click', () => { void retryQueueEntry(entry.url); }); row.append(copy, retry); queue.append(row);
     }
   }
 }
@@ -372,7 +176,9 @@ function renderRows(rows: ManagePage[]): void {
 function updateDeleteButton(): void {
   const deleteBtn = document.querySelector<HTMLButtonElement>('#manage-delete');
   if (deleteBtn) {
-    deleteBtn.disabled = state.selected.size === 0;
+    deleteBtn.disabled = state.selected.size === 0 || Boolean(backfillRequestId);
+    const all = document.querySelector<HTMLInputElement>('#manage-select-all');
+    if (all) { const count = state.filtered.filter(page => state.selected.has(page.url)).length; all.checked = state.filtered.length > 0 && count === state.filtered.length; all.indeterminate = count > 0 && count < state.filtered.length; }
   }
 }
 
@@ -383,7 +189,7 @@ async function fetchPages(): Promise<void> {
     state.pages = response.pages || [];
     state.selected = new Set([...state.selected].filter(url => state.pages.some(page => page.url === url)));
     applyFilters();
-    updateStatus(`Loaded ${state.pages.length} page(s)`);
+    updateStatus('');
   } catch (err) {
     updateStatus(`Failed to load pages: ${err instanceof Error ? err.message : String(err)}`, true);
   }
@@ -406,6 +212,7 @@ async function deletePages(urls: string[]): Promise<void> {
     await sendRuntimeMessage<{ deleted: number }>({ type: 'DELETE_PAGE', urls });
     urls.forEach((url) => state.selected.delete(url));
     await fetchPages();
+    window.dispatchEvent(new window.CustomEvent('wr-memory-changed'));
   } catch (err) {
     updateStatus(`Delete failed: ${err instanceof Error ? err.message : String(err)}`, true);
   }
@@ -498,6 +305,7 @@ async function handleImport(file: File): Promise<void> {
     updateStatus(`Import failed${imported ? ` after ${imported} pages` : ''}: ${err instanceof Error ? err.message : String(err)}`, true);
   } finally {
     setTransferBusy(false);
+    window.dispatchEvent(new window.CustomEvent('wr-memory-changed'));
   }
 }
 
@@ -561,59 +369,48 @@ function syncBackfillControls(): void {
 function renderApp(rootEl: HTMLElement): void {
   ensureStyles();
   rootEl.innerHTML = `
-    <div class="manage-shell">
-      <div class="manage-header">
-        <div>
-          <h1>Memory Manager</h1>
-          <p class="status-line" role="status" id="manage-status"></p>
-        </div>
-        <div class="manage-actions">
-          <button id="manage-refresh" class="primary">Refresh</button>
-          <button id="manage-delete" disabled>Delete Selected</button>
-          <button id="manage-export">Export backup</button>
-          <label id="manage-import-label">Import backup or JSON<input type="file" id="manage-import" accept=".json,.jsonl,.ndjson,application/json,application/x-ndjson" /></label>
-        </div>
+    <div class="manage-shell wr-page">
+      <h1>Memory Manager</h1>
+      <div class="search-form">${iconMarkup('magnifying-glass')}<input type="search" id="manage-search" placeholder="Find a saved page" aria-label="Search memory by title or domain" /></div>
+      <div class="view-toolbar"><span id="manage-count" role="status">Loading…</span><div class="manage-actions"><button type="button" id="manage-delete" class="text-button danger-text" hidden disabled>Delete selected</button><button type="button" id="manage-select" class="text-button">Select</button></div></div>
+      <div class="view-controls">
+        <details class="view-control" name="manage-controls"><summary><span id="manage-sort-label">Recent first</span>${iconMarkup('caret-down')}</summary><div class="view-control-body">
+          <label class="compact-setting">Sort pages<select id="manage-sort" aria-label="Sort memory"><option value="date-desc">Recent first</option><option value="date-asc">Oldest first</option><option value="title-asc">Title A–Z</option><option value="title-desc">Title Z–A</option><option value="url-asc">URL A–Z</option><option value="url-desc">URL Z–A</option></select></label>
+          <label class="check-setting"><span>Manual captures only</span><input type="checkbox" id="manage-filter-manual" /></label>
+        </div></details>
+        <details class="view-control" name="manage-controls"><summary>Tools${iconMarkup('caret-down')}</summary><div class="view-control-body">
+          <div class="maintenance-heading"><span>Memory tools</span><button id="manage-refresh" class="text-button">Refresh</button></div>
+          <details class="tool-disclosure"><summary>Backup & restore${iconMarkup('caret-down')}</summary><div class="tool-disclosure-body button-row"><button id="manage-export" class="secondary-button">Export backup</button><label id="manage-import-label" class="secondary-button">Import backup or JSON<input type="file" id="manage-import" accept=".json,.jsonl,.ndjson,application/json,application/x-ndjson" /></label></div></details>
+          <details class="tool-disclosure"><summary>Capture queue${iconMarkup('caret-down')}</summary><div id="manage-queue" class="wr-help">No pending captures.</div></details>
+          <details class="tool-disclosure"><summary>Embeddings${iconMarkup('caret-down')}</summary><div class="embedding-tools">
+            <label class="compact-setting"><span>Max pages</span><input id="manage-backfill-limit" type="number" min="1" max="500" value="50" /></label>
+            <label class="check-setting"><span>Replace existing embeddings</span><input id="manage-backfill-force" type="checkbox" /></label>
+            <p class="field-note">Applies to the whole library, up to the page limit. Fill missing preserves existing vectors. Re-embed replaces vectors only after a successful result.</p>
+            <button type="button" id="manage-backfill-run" class="primary-button">Fill missing</button><button type="button" id="manage-backfill-stop" class="text-button" hidden>Stop</button>
+            <p id="manage-backfill-status" class="status-line" role="status"></p>
+          </div></details>
+        </div></details>
       </div>
-      <div class="manage-toolbar">
-        <input type="search" id="manage-search" placeholder="Search title or domain" aria-label="Search memory by title or domain" />
-        <label><input type="checkbox" id="manage-filter-manual" /> Manual captures only</label>
-      </div>
-      <section class="manage-queue" aria-live="polite">
-        <h2>Capture queue</h2>
-        <div id="manage-queue"><p>No pending captures.</p></div>
-      </section>
-      <section class="manage-queue" aria-live="polite">
-        <h2>Embeddings</h2>
-        <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:8px;">
-          <label for="manage-backfill-limit">Max pages</label>
-          <input id="manage-backfill-limit" type="number" min="1" max="500" value="50" style="width:100px;" />
-          <label style="display:flex; gap:4px; align-items:center;">
-            <input id="manage-backfill-force" type="checkbox" /> Replace existing embeddings
-          </label>
-          <button type="button" id="manage-backfill-run">Backfill missing</button>
-        </div>
-        <p class="wr-help">Applies to your library, up to the page limit. By default, only missing chunks are filled. Use Re-embed on a row to replace that page’s vectors.</p>
-        <button type="button" id="manage-backfill-stop" hidden>Stop</button>
-        <p id="manage-backfill-status" class="status-line" role="status"></p>
-      </section>
-      <table>
-        <thead>
-          <tr>
-            <th><input type="checkbox" id="manage-select-all" aria-label="Select all visible pages" /></th>
-            <th><button type="button" data-sort="title">Title</button></th>
-            <th><button type="button" data-sort="date">Captured</button></th>
-            <th>Embeddings</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="manage-rows"></tbody>
-      </table>
+      <p class="status-line" role="status" id="manage-status"></p>
+      <label id="manage-select-row" hidden><input type="checkbox" id="manage-select-all" aria-label="Select all visible pages" /> Select all visible</label>
+      <div id="manage-rows" class="content-list"></div>
     </div>
   `;
-
-  rootEl.prepend(createToolNavigation('manage'));
-  installSharedStyles();
-  rootEl.dataset.view = 'manage';
+  rootEl.querySelector('.wr-page')!.prepend(createBackLink());
+  if (!document.querySelector('#beta-view-search')) rootEl.prepend(createToolNavigation('manage'));
+  installSharedStyles(); rootEl.dataset.view = 'manage';
+  document.getElementById('manage-select')?.addEventListener('click', () => {
+    const rows = document.getElementById('manage-rows')!; const selecting = rows.classList.toggle('is-selecting');
+    document.getElementById('manage-select-row')!.hidden = !selecting;
+    document.getElementById('manage-delete')!.hidden = !selecting;
+    document.getElementById('manage-select')!.textContent = selecting ? 'Done' : 'Select';
+    if (!selecting) state.selected.clear(); sortAndRender();
+  });
+  document.getElementById('manage-sort')?.addEventListener('change', event => {
+    const select = event.target as HTMLSelectElement; const [key, order] = select.value.split('-'); state.sortKey = key as ManageState['sortKey']; state.sortAsc = order === 'asc';
+    document.getElementById('manage-sort-label')!.textContent = select.selectedOptions[0]!.textContent;
+    sortAndRender();
+  });
   syncBackfillControls();
   rootEl.querySelector('#manage-backfill-stop')?.addEventListener('click', () => {
     if (!backfillRequestId) return;
@@ -646,19 +443,6 @@ function renderApp(rootEl: HTMLElement): void {
     }
     sortAndRender();
   });
-  document.querySelectorAll<HTMLButtonElement>('th button[data-sort]')?.forEach((button) => {
-    button.addEventListener('click', () => {
-      const key = button.dataset.sort as 'title' | 'url' | 'date';
-      if (state.sortKey === key) {
-        state.sortAsc = !state.sortAsc;
-      } else {
-        state.sortKey = key;
-        state.sortAsc = key !== 'date';
-      }
-      sortAndRender();
-    });
-  });
-
   document.getElementById('manage-backfill-run')?.addEventListener('click', () => {
     const limitInput = document.getElementById('manage-backfill-limit') as HTMLInputElement | null;
     const forceToggle = document.getElementById('manage-backfill-force') as HTMLInputElement | null;
@@ -670,12 +454,15 @@ function renderApp(rootEl: HTMLElement): void {
   });
 }
 
-if (root) {
-  void initTheme().then(() => {
-    renderApp(root);
+export function mountManage(target: HTMLElement): void {
+  target.addEventListener('wr-refresh', () => {
     void fetchPages();
     void fetchQueue();
   });
+  renderApp(target);
+  void initTheme();
+  void fetchPages();
+  void fetchQueue();
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
     if (message?.type === 'BACKFILL_PROGRESS' && message.requestId === backfillRequestId) {
       const text = message.status === 'running' ? 'Embedding…' : message.status === 'complete' ? 'Updated' : `Failed: ${String(message.error || 'Try again')}`;
@@ -694,6 +481,6 @@ if (root) {
     }
   });
   console.info('[beta-ui:manage] memory manager loaded');
-} else {
-  console.error('[beta-ui:manage] #app-root not found');
 }
+
+if (root?.dataset.view === 'manage') mountManage(root);

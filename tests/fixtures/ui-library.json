@@ -1,0 +1,32 @@
+[
+  {
+    "url": "https://web.dev/learn/performance#web-recall-ui-0",
+    "title": "Measure page speed",
+    "text": "Use field data to understand what makes a page feel slow for real visitors."
+  },
+  {
+    "url": "https://developer.mozilla.org/en-US/docs/Web/Performance/Lazy_loading#web-recall-ui-1",
+    "title": "Lazy loading",
+    "text": "Defer images below the fold so the first view loads sooner."
+  },
+  {
+    "url": "https://web.dev/learn/performance/understanding-the-critical-path#web-recall-ui-2",
+    "title": "A faster first render",
+    "text": "Find requests that block useful content from appearing."
+  },
+  {
+    "url": "https://developer.chrome.com/docs/devtools/network#web-recall-ui-3",
+    "title": "Read a network waterfall",
+    "text": "Trace a slow request and see which resources are waiting."
+  },
+  {
+    "url": "https://web.dev/learn/performance#web-recall-ui-4",
+    "title": "Caching static assets",
+    "text": "Reuse unchanged files instead of downloading them again."
+  },
+  {
+    "url": "https://web.dev/learn/performance/optimize-web-fonts#web-recall-ui-5",
+    "title": "Loading web fonts",
+    "text": "Keep text visible while a custom font downloads."
+  }
+]

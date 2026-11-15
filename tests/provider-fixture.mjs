@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { loadSource, plain } from './helpers.mjs';
 
-export function providerFixture(baseUrl = 'https://models.example.test', acknowledged = []) {
+export function providerFixture(baseUrl = 'https://models.example.test', acknowledged = [], offscreenOverrides = {}) {
   const stored = {
     betaSettings: { paused: true, captureSetupComplete: true, acknowledgedRemoteProviderOrigins: acknowledged },
     betaProviderSettings: { ollama: { baseUrl } }
@@ -30,7 +30,7 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
   const mocks = {
     '../../shared/logger/index': { setLogLevel() {}, log: async () => {} },
     '../models/index': { getModelSettings: async () => ({ chatModel: 'chosen-model' }), updateModelSettings: async () => assert.fail('Consent must not change model selection') },
-    '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}), invalidateOffscreenIndex: async () => {} }
+    '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}), invalidateOffscreenIndex: async () => {}, ...offscreenOverrides }
   };
   const context = {
     chrome, indexedDB: new IDBFactory(), IDBKeyRange,

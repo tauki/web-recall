@@ -95,3 +95,9 @@ export async function importManagePages(payload: ImportPayload): Promise<{ impor
   }
   return { imported };
 }
+
+/** Read only a short saved passage for the inline preview; vectors stay in storage. */
+export async function getPagePreview(url: string): Promise<{ url: string; title: string; snippet: string; timestamp: number } | null> {
+  const page = await storageManager.getPageRecord(url);
+  return page ? { url: page.url, title: page.title || page.url, snippet: (page.text || page.chunks?.map(chunk => chunk.text).join('\n') || page.summary || '').slice(0, 1200), timestamp: page.timestamp } : null;
+}

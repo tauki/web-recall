@@ -1,6 +1,6 @@
 {
   "name": "web-recall",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Web Recall 0.2.x workspace tooling",
   "private": true,
   "type": "module",

@@ -2,6 +2,7 @@ import { runInference } from '../providers/inference';
 import { fetchProvider, ProviderAccessError, authorizeProviderOrigin, type ProviderConsentOptions } from '../providers/access';
 import { OllamaRequestError, ollamaResponseError } from '../providers/ollamaErrors';
 import { abortable } from '../../shared/abort';
+import type { BrowserModelDownload, BrowserModelTransfer } from '../../shared/browserModels';
 import type { CapturePayload } from '../capture/types';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import {
@@ -38,6 +39,9 @@ let currentConfig: EmbeddingConfig = {
   browserRevision: DEFAULT_BROWSER_REVISION
 };
 let browserEmbedReady = false;
+const modelVersions = new Map<string, number>();
+let browserDownload: { status: BrowserModelTransfer; cancelled: boolean; sent: boolean } | null = null;
+let lastBrowserDownload: BrowserModelTransfer | null = null;
 let browserEmbedStatus: BrowserEmbedStatus = {
   ready: false,
   runtimeAvailable: false,
@@ -183,13 +187,69 @@ export async function probeBrowserEmbeddingRuntime(options?: { model?: string; r
   }
 }
 
-export async function prefetchBrowserEmbeddings(): Promise<void> {
-  const status = await probeBrowserEmbeddingRuntime();
-  if (!status.runtimeAvailable) {
-    throw new Error(status.lastError || 'Browser embedding runtime is unavailable.');
+export async function prefetchBrowserEmbeddings(options: { requestId?: string; model?: string; revision?: string } = {}): Promise<void> {
+  if (browserDownload) throw new Error('Another browser model download is running. Cancel it before starting another.');
+  const model = options.model || currentConfig.browserModel || DEFAULT_BROWSER_MODEL;
+  const revision = options.revision || currentConfig.browserRevision || DEFAULT_BROWSER_REVISION;
+  const job = { status: { requestId: options.requestId || crypto.randomUUID(), model, revision, startedAt: Date.now(), state: 'queued', loadedBytes: 0 } as BrowserModelTransfer, cancelled: false, sent: false };
+  browserDownload = job; lastBrowserDownload = job.status;
+  const key = JSON.stringify([model, revision]), version = modelVersions.get(key) || 0;
+  const selected = (): boolean => model === currentConfig.browserModel && revision === currentConfig.browserRevision && version === (modelVersions.get(key) || 0);
+  await runInference(async () => {
+    try {
+      await ensureOffscreenDocument();
+      if (job.cancelled) throw new Error('Download cancelled');
+      job.sent = true;
+      const result = await sendOffscreenMessage<{ cancelled?: boolean }>({ type: 'OFFSCREEN_DOWNLOAD_BROWSER_MODEL', requestId: job.status.requestId, model, revision });
+      if (result.cancelled) { job.cancelled = true; throw new Error('Download cancelled'); }
+      job.status = { ...job.status, state: 'ready' };
+      if (selected()) { setBrowserEmbedReady(true); updateBrowserEmbedStatus({ ready: true, state: 'ready', runtimeAvailable: true, lastError: undefined, code: undefined }); }
+    } catch (error) {
+      job.status = { ...job.status, state: job.cancelled ? 'cancelled' : 'error', error: job.cancelled ? undefined : error instanceof Error ? error.message : String(error) };
+      if (selected()) { setBrowserEmbedReady(false); updateBrowserEmbedStatus({ ready: false, state: 'idle' }); }
+      throw error;
+    } finally { lastBrowserDownload = job.status; if (browserDownload === job) browserDownload = null; }
+  });
+}
+
+export async function cancelBrowserModelDownload(requestId: string): Promise<{ cancelled: boolean }> {
+  const job = browserDownload?.status.requestId === requestId ? browserDownload : null;
+  if (job) job.cancelled = true;
+  if (job && !job.sent) return { cancelled: true };
+  await ensureOffscreenDocument();
+  return sendOffscreenMessage({ type: 'OFFSCREEN_CANCEL_BROWSER_MODEL_DOWNLOAD', requestId });
+}
+
+export async function getBrowserModelDownload(): Promise<BrowserModelTransfer | null> {
+  if (browserDownload && !browserDownload.sent) return browserDownload.status;
+  try {
+    await ensureOffscreenDocument();
+    const response = await sendOffscreenMessage<{ download: BrowserModelTransfer | null }>({ type: 'OFFSCREEN_GET_BROWSER_MODEL_DOWNLOAD' });
+    return response.download && (!lastBrowserDownload || response.download.requestId === lastBrowserDownload.requestId) ? response.download : lastBrowserDownload;
+  } catch { return lastBrowserDownload; }
+}
+
+export async function listBrowserModels(): Promise<BrowserModelDownload[]> {
+  await ensureOffscreenDocument();
+  const response = await sendOffscreenMessage<{ models: BrowserModelDownload[] }>({ type: 'OFFSCREEN_LIST_BROWSER_MODELS' });
+  return response.models || [];
+}
+
+export async function deleteBrowserModel(model: string, revision: string): Promise<{ deletedFiles: number }> {
+  if (!model || !revision) throw new Error('Choose a downloaded model and revision to remove.');
+  const key = JSON.stringify([model, revision]);
+  const invalidate = (): void => { modelVersions.set(key, (modelVersions.get(key) || 0) + 1); };
+  invalidate();
+  try {
+    await ensureOffscreenDocument();
+    return await sendOffscreenMessage<{ deletedFiles: number }>({ type: 'OFFSCREEN_REMOVE_BROWSER_MODEL', model, revision });
+  } finally {
+    invalidate();
+    if (model === currentConfig.browserModel && revision === currentConfig.browserRevision) {
+      setBrowserEmbedReady(false);
+      updateBrowserEmbedStatus({ ready: false, state: 'idle', lastError: undefined, code: undefined });
+    }
   }
-  if (browserEmbedReady) return;
-  await computeBrowserEmbeddings(['prefetch'], DOC_PREFIX);
 }
 
 export function configureEmbeddings(): void {
@@ -319,16 +379,17 @@ async function callOllamaEmbed(inputs: string[], signal?: AbortSignal): Promise<
   }
 }
 
-async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<number[][]> {
+async function computeBrowserEmbeddings(chunks: string[], prefix = '', allowDownload = false): Promise<number[][]> {
   const model = currentConfig.browserModel || DEFAULT_BROWSER_MODEL;
   const revision = currentConfig.browserRevision || DEFAULT_BROWSER_REVISION;
-  const isCurrentModel = (): boolean => model === currentConfig.browserModel && revision === currentConfig.browserRevision;
+  const key = JSON.stringify([model, revision]), version = modelVersions.get(key) || 0;
+  const isCurrentModel = (): boolean => model === currentConfig.browserModel && revision === currentConfig.browserRevision && version === (modelVersions.get(key) || 0);
   const runtimeStatus = await probeBrowserEmbeddingRuntime();
   if (!isCurrentModel()) throw new Error('Embedding settings changed; retry with the selected model.');
   if (!runtimeStatus.runtimeAvailable) {
     throw new Error(runtimeStatus.lastError || 'Browser embedding runtime is unavailable.');
   }
-  if (!browserEmbedReady) {
+  if (!browserEmbedReady && allowDownload) {
     updateBrowserEmbedStatus({ state: 'downloading' });
   }
   try {
@@ -337,7 +398,8 @@ async function computeBrowserEmbeddings(chunks: string[], prefix = ''): Promise<
       inputs: chunks,
       prefix,
       model,
-      revision
+      revision,
+      allowDownload
     });
     if (!isCurrentModel()) throw new Error('Embedding settings changed; retry with the selected model.');
     if (!Array.isArray(response.embeddings) || response.embeddings.length !== chunks.length ||

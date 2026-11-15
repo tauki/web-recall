@@ -1,3 +1,5 @@
+<img src="src/assets/icons/icon-128.png" width="40" height="40" alt="Web Recall mark" />
+
 Web Recall
 ==========
 
@@ -11,22 +13,51 @@ locally running models.
 Screenshots
 -----------
 
-These screenshots use a fictional sample library.
+These screenshots show the production UI with an isolated sample library and
+unavailable model endpoints. They do not show an installed extension's private data.
 
-**Search your saved pages alongside the page you're browsing.**
+**Search saved pages alongside the page you're reading.**
 
-![Web Recall in Chrome's side panel, showing two sample search results beside a generic webpage](.github/assets/screenshots/sidepanel-search.png)
+![Web Recall open in Chrome's native sidepanel beside an MDN article, with search results and an expanded saved-page preview](.github/assets/screenshots/browser-sidepanel-0.2.2.jpg)
+
+Captured from the running extension in Chrome's native sidepanel, using the
+sample library with automatic capture paused and no model running.
+
+**Search and preview saved pages without repeating Chrome's side-panel title.**
+
+![Web Recall Search with Menu beside the search field and an inline saved-page preview](.github/assets/screenshots/sidepanel-search-0.2.2.jpg)
+
+Ask remains available inside a preview, with exact page selection and expandable
+citations. These screenshots were captured without running Ask or a model.
 
 <details>
-<summary>More screenshots: Memory Manager and browser model settings</summary>
+<summary>Settings, Memory Manager, Highlights and Logs</summary>
+
+**Settings reveal capture, model, appearance and advanced controls on demand.**
+
+![Settings with capture controls expanded and Menu beside Back to search](.github/assets/screenshots/settings-0.2.2.jpg)
 
 **Review saved pages and their embedding status in Memory Manager.**
 
-![Memory Manager showing sample saved pages, embedding status, and re-embed controls](.github/assets/screenshots/memory-manager.png)
+![Memory Manager with an expanded saved page and its maintenance actions](.github/assets/screenshots/memory-manager-0.2.2.jpg)
 
-**Choose and download an embedding model to run in your browser.**
+**Expand a day to see its highlighted pages, or a log entry to inspect metadata.**
 
-![Browser embedding settings with EmbeddingGemma 2 selected and explicit model download controls](.github/assets/screenshots/browser-models.png)
+![Daily Highlights grouped by capture date](.github/assets/screenshots/highlights-0.2.2.jpg)
+
+![Structured Logs with text filtering and expanded metadata](.github/assets/screenshots/logs-0.2.2.jpg)
+
+**Inspect and remove browser model downloads in Settings.**
+
+This view uses small, synthetic cache files for visual verification; the displayed
+sizes are fixture sizes, not the actual embedding model sizes.
+
+![Downloaded browser model rows with cached sizes, selected state and removal action](.github/assets/screenshots/browser-model-downloads-0.2.2.jpg)
+
+Browser model downloads also show per-file progress, with Cancel and Retry controls.
+Completed files are reused on retry; model preparation has its own state.
+
+![Browser model download progress with cancellation in the compact Settings view](.github/assets/screenshots/browser-download-progress-0.2.2.jpg)
 
 </details>
 
@@ -39,9 +70,11 @@ Directory contents
   offscreen coordination.
 - `src/content/`: top-level content script that extracts page text, chunks it,
   and sends capture payloads to the background queue.
-- `src/ui/sidepanel/`: Search, Ask, and Settings surfaces.
-- `src/ui/manage/`, `src/ui/highlights/`, `src/ui/logs/`: full-page tools for
-  memory management, daily highlights, and structured logs.
+- `src/ui/sidepanel/`: the panel shell, inline Search and Ask, and Settings.
+- `src/ui/manage/`, `src/ui/highlights/`, `src/ui/logs/`: shared tools mounted
+  inside the panel and available as standalone pages.
+- `src/ui/shared/`: shared design, navigation, answer rendering and runtime helpers.
+- `src/assets/fonts/`, `src/assets/ui/`: bundled Inter and Phosphor assets and licenses.
 - `src/shared/`: shared config, IndexedDB helpers, logging, vector math, tools,
   and wasm/offscreen support.
 
@@ -121,7 +154,8 @@ Setup
 
 4. Configure capture + embeddings in the side panel
 
-   * Open the Chrome side panel, switch to the Web Recall tab, and visit **Settings**.
+   * Open Web Recall in Chrome's side panel, then choose **Menu → Settings**.
+   * Open **Capture** for capture rules and **Models** for embedding and chat providers.
    * Toggle **Pause automatic capture**, add allowlist/denylist domains (one per line), and click **Save capture rules**.
    * Enter the Ollama base URL/model in **Embedding provider** and click **Save embedding settings**.
    * Optional: switch the embedding provider to **In-browser (experimental)** and
@@ -137,7 +171,21 @@ Setup
      vectors from the selected model. Older pages remain searchable by text; explicit
      re-embedding enables semantic matches with the new model.
      If the browser runtime is not available, the extension will report an error.
-   * Run a smoke query from the **Search** tab to ensure captured pages appear and the runtime path works.
+     Download progress appears under **Embedding provider** in Models, with the
+     current file's bytes and percentage when its size is known. **Preparing model**
+     follows file transfer; 100% of a file does not mean the model is ready yet.
+     **Cancel download** stops active requests. **Retry download** reuses completed
+     cached files; an unfinished file is fetched again. Reopening Models restores
+     the current transfer while the extension's offscreen document remains open.
+   * Open **Models → Downloaded models** to inspect browser-cached models and
+     revisions, file counts and estimated sizes. Expand a row to **Use model** or
+     **Remove download**. Removal confirms inline and affects only that revision;
+     saved pages and their vectors are kept. The selected model is marked even
+     when its row is collapsed. Incomplete downloads without a model graph are
+     labeled **Partial download**; sizes are unavailable when cache headers omit them.
+     Search and capture use cached files only. Use **Save & download model** to
+     download missing or removed files explicitly.
+   * Return to search and run a smoke query to ensure captured pages appear and the runtime path works.
 
 5. Browse as usual
 
@@ -145,19 +193,40 @@ Setup
    text from pages you visit, embeds it locally, and stores the vectors in your
    browser.
 
-   Use **Search** to retrieve relevant captured pages.
-   Use **Ask** to query your captured memory and get a grounded cited answer.
+   Search retrieves captured pages. Expand a result and choose **Ask about this**
+   to ask within that page. **Ask these pages** uses the displayed results; its
+   **Using N pages** disclosure lets you inspect and change the exact selection.
+   Tools remain within those selected saved URLs. Open a numbered citation to
+   inspect the captured evidence, then **Open page** to visit the original URL.
+   Follow-up questions retain the conversation for that page selection until
+   you clear it or close the panel. **Menu → Ask your memory** searches the library.
 
 6. Manage & inspect captures
 
-   - **Memory Manager**: open `chrome://extensions`, click **Details** on Web Recall, then **Extension options**. Search, sort, delete, import, export, and re-embed stored pages. See [Export/Import](#exportimport) for the JSON format.
-   - **Highlights dashboard**: navigate to `chrome-extension://<EXTENSION_ID>/dist/beta/ui/highlights/index.html` to review daily summaries.
-   - **Logs viewer**: visit `chrome-extension://<EXTENSION_ID>/dist/beta/ui/logs/index.html` to inspect structured background logs.
+   - **Menu → Memory Manager**: search and expand saved pages, preview and ask,
+     re-embed, or delete. **Select** enables bulk selection. **Tools** contains
+     backup import/export, capture queue and embedding maintenance.
+     See [Export/Import](#exportimport) for the backup format.
+   - **Menu → Highlights**: browse days and expand their highlighted page links.
+     Open **All dates** for a date range and page size.
+   - **Menu → Logs**: search entries, choose an exact level, and expand metadata.
+     **Tools** contains auto-refresh, manual refresh, clear and logging settings.
+   - **Menu → Capture current tab** manually captures the current page.
+     **Capture queue** exposes retry controls; **Refresh pages** refreshes recents
+     or reruns the current query.
+
+   The queue appears below Search while captures are active or failed. When idle,
+   it stays hidden unless opened from Menu; closing the empty queue hides it again.
+   An empty library offers a direct capture action and a capture settings link.
+
+   Chrome's **Extension options** still opens Memory Manager. Standalone
+   Highlights and Logs remain at `dist/beta/ui/highlights/index.html` and
+   `dist/beta/ui/logs/index.html` under the extension origin.
 
 7. Use chat, tools, and model selection (optional)
 
-   Choose embedding settings in the **Embedding provider** card and chat models
-   in the **Chat provider** card. Use **Save provider**, **Test connection**,
+   Under **Settings → Models**, open **Embedding provider** or **Chat provider**.
+   Use **Save provider**, **Test connection**,
    and **Refresh models** to configure the Ollama base URL and active chat
    model. The connection test probes the actual chat endpoint, which helps
    surface `OLLAMA_ORIGINS` misconfiguration.
@@ -175,13 +244,18 @@ Setup
    - `fetch_more({ url, aroundChunkIndex, radius })`
    - `fetch_more({ url, start, end })`
 
-   `Max tool steps = 0` means no user-imposed limit. `Tool timeout (ms)` applies
-   to tool calls only; it does not abort slow `/api/chat` inference.
+   **Settings → Advanced** contains retrieval, answer, tool and logging controls.
+   `Max tool steps = 0` means no user-imposed limit. Model inference has no
+   automatic timeout; use **Stop** to cancel. Auto's initial source count is a
+   retrieval starting point, not a hard cap on citations.
 
 8. Shortcuts and context menu
 
    - Keyboard: `Ctrl+Shift+Y` (Windows/Linux) or `Command+Shift+Y` (macOS) opens
      the side panel.
+   - Within the panel, `Ctrl+K` / `Command+K` returns to search. Arrow keys move
+     between results; Escape closes the source chooser, Ask or an open preview,
+     or returns from a utility page. Enter sends a question; Shift+Enter adds a line.
    - Right-click: open the panel, capture the current page now, search the
      current selection, toggle pause, or open Highlights.
 
@@ -204,10 +278,27 @@ The original `webMemoryDB` database is retained as a local upgrade backup. Memor
 Manager deletions affect the active 0.2.0 library, not this retained backup. Legacy
 schema-version-1 JSON backups can also be imported without dropping their passages.
 
+Development preview
+-------------------
+
+After building, `node tests/ui-preview.mjs` serves the production bundles at
+`http://127.0.0.1:4180/` with isolated IndexedDB fixtures and a test model. It
+does not access installed-extension data or a live provider. This supports visual
+QA; extension permissions, capture and live model behavior still require an
+unpacked-extension check in Chrome.
+
+Use `node tests/ui-preview.mjs --offline --empty --port 4181` to review an empty
+library with unavailable model endpoints. Import sample backup data through
+Memory Manager to exercise text search and utility pages without a model.
+
+Add `--model-cache` on a separate port to seed synthetic model files in that
+localhost origin and exercise inventory/removal through the browser Cache API.
+These are non-runnable fixtures; they do not access the installed extension's cache.
+
 Release
 -------
 
-- Current version: `0.2.0`.
+- Workspace version: `0.2.2` (unreleased).
 - See [CHANGELOG.md](./CHANGELOG.md) for details.
 
 Security and privacy
