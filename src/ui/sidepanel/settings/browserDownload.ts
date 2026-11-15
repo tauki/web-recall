@@ -29,10 +29,12 @@ export function bindBrowserDownload(root: HTMLElement, callbacks: {
   const models = root.querySelector<HTMLDetailsElement>('#settings-models')!;
   let download: BrowserModelTransfer | null = null;
   let run: { requestId: string; sent: boolean; cancelled: boolean } | null = null;
+  let renderedVersion = 0;
 
   function render(next: BrowserModelTransfer): void {
     if (run && next.requestId !== run.requestId) return;
     if (download && next.requestId !== download.requestId && next.startedAt < download.startedAt) return;
+    renderedVersion++;
     const restoreFocus = section.contains(document.activeElement);
     download = next;
     const active = activeStates.has(next.state);
@@ -51,9 +53,10 @@ export function bindBrowserDownload(root: HTMLElement, callbacks: {
   }
 
   async function refresh(): Promise<void> {
+    const version = renderedVersion;
     try {
       const response = await sendRuntimeMessage<{ download: BrowserModelTransfer | null }>({ type: 'GET_BROWSER_MODEL_DOWNLOAD' });
-      if (response.download) render(response.download);
+      if (response.download && renderedVersion === version) render(response.download);
     } catch { /* The download action reports connection failures when requested. */ }
   }
 

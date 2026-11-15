@@ -263,6 +263,18 @@ test('opening Models restores active transfers, unknown sizes and failures remai
   assert.match(f.q('#beta-browser-transfer-status').textContent, /Connection lost/);
 });
 
+test('a delayed model status refresh cannot replace a newer completion update', async t => {
+  const snapshot = deferred();
+  const f = await ui('sidepanel', { GET_BROWSER_MODEL_DOWNLOAD: () => snapshot.promise }); t.after(f.close);
+  f.q('#settings-models').open = true;
+  await waitFor(() => f.requests.some(message => message.type === 'GET_BROWSER_MODEL_DOWNLOAD'), 'status read');
+  const download = { requestId: 'finished', model: 'owner/model', revision: 'pin', startedAt: Date.now(), state: 'downloading', loadedBytes: 10 };
+  f.emit({ type: 'BROWSER_MODEL_DOWNLOAD_UPDATE', download: { ...download, state: 'ready' } });
+  snapshot.resolve({ download }); await f.settle();
+  assert.equal(f.q('#beta-browser-transfer').hidden, true);
+  assert.equal(f.q('#beta-download-browser-model').disabled, false);
+});
+
 test('Ask prevents duplicate submissions, stops, and ignores all stale replies', async t => {
   const pending = [deferred(), deferred()]; let call = 0;
   const f = await ui('sidepanel', { ASK_QUESTION: () => pending[call++].promise, CANCEL_ASK: () => ({ cancelled: true }) }); t.after(f.close);

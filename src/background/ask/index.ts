@@ -146,21 +146,19 @@ async function gatherSearchHits(
   signal?: AbortSignal,
   scopeUrls?: string[]
 ): Promise<SearchHit[]> {
-  if (scopeUrls) {
-    const records = await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)));
-    const saved = records.filter((page): page is NonNullable<typeof page> => Boolean(page));
-    return saved.map(page => ({ url: page.url, title: page.title || page.url, snippet: page.chunks?.[0]?.text || page.text?.slice(0, 1200) || page.summary || '', timestamp: page.timestamp, score: 1 }));
-  }
-  if (!useSearch) {
-    const recents = await storageManager.listRecentPages(maxResults);
-    return recents.map((page) => ({
+  async function introductoryHits(): Promise<SearchHit[]> {
+    const records = scopeUrls
+      ? await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)))
+      : await storageManager.listRecentPages(maxResults);
+    return records.filter((page): page is NonNullable<typeof page> => Boolean(page)).map((page) => ({
       url: page.url,
       title: page.title || page.url,
-      snippet: page.chunks?.[0]?.text || page.text?.slice(0, 200) || '',
+      snippet: page.chunks?.[0]?.text || page.text?.slice(0, scopeUrls ? 1200 : 200) || page.summary || '',
       timestamp: page.timestamp,
       score: 1
     }));
   }
+  if (!useSearch) return introductoryHits();
   const aggregated = new Map<string, SearchHit>();
   for (const sub of subQueries) {
     signal?.throwIfAborted();
@@ -169,9 +167,10 @@ async function gatherSearchHits(
     try {
       const hits = await searchStoredPages(sub, Math.max(maxResults * 2, 5), {
         rewrite: false,
-        rerank: false, signal
+        rerank: false, signal, scopeUrls
       });
       hits.forEach((hit) => {
+        if (scopeUrls && !scopeUrls.includes(hit.url)) return;
         const key = `${hit.url}::${hit.snippet}`;
         const existing = aggregated.get(key);
         if (!existing || existing.score < hit.score) {
@@ -184,6 +183,7 @@ async function gatherSearchHits(
     }
   }
   if (!aggregated.size) {
+    if (scopeUrls) return introductoryHits();
     const fallback = await searchStoredPages(normalized, Math.max(5, maxResults), {
       rewrite: false,
       rerank: false, signal
