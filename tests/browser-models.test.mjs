@@ -104,3 +104,74 @@ test('devices without WebGPU can still use the original model', async () => {
   await assert.rejects(mod.getEmbeddingCapabilities(NEW_MODEL), /requires WebGPU/);
   assert.equal((await mod.getEmbeddingCapabilities(OLD_MODEL)).runtimeAvailable, true);
 });
+
+test('removing a loaded model waits for inference, disposes it, then removes only its download', async () => {
+  const events = []; let finish;
+  const pending = new Promise(resolve => { finish = resolve; });
+  const mod = await loadSource('src/offscreen/index.ts', 'computeBrowserEmbeddings, removeBrowserModel', {
+    '../shared/db/index': { openDatabase: async () => {}, PAGES_STORE: 'pages' },
+    './modelCache': { listBrowserModelDownloads: async () => [], removeBrowserModelFiles: async (model, revision) => { events.push(`delete:${model}@${revision}`); return 3; } },
+    '@huggingface/transformers': {
+      env: { backends: { onnx: { wasm: {} } } }, AutoConfig: {},
+      AutoTokenizer: { from_pretrained: async () => () => ({}) },
+      AutoModel: { from_pretrained: async () => { const model = async () => { events.push('infer'); await pending; return { sentence_embedding: [[1, 2]] }; }; model.dispose = async () => { events.push('dispose'); }; return model; } }
+    }
+  }, { chrome: chromeFixture });
+  const inference = mod.computeBrowserEmbeddings(['text'], '', OLD_MODEL, OLD_REVISION);
+  await tick(); const remove = mod.removeBrowserModel(OLD_MODEL, OLD_REVISION); await tick();
+  assert.deepEqual(events, ['infer']); finish(); await inference;
+  assert.equal(await remove, 3);
+  assert.deepEqual(events, ['infer', 'dispose', `delete:${OLD_MODEL}@${OLD_REVISION}`]);
+});
+
+test('only explicit downloads permit remote model files, including after removal', async () => {
+  let cached = false, downloads = 0;
+  const runtimeEnv = { backends: { onnx: { wasm: {} } } };
+  const mod = await loadSource('src/offscreen/index.ts', 'computeBrowserEmbeddings, removeBrowserModel', {
+    '../shared/db/index': { openDatabase: async () => {}, PAGES_STORE: 'pages' },
+    './modelCache': { listBrowserModelDownloads: async () => [], removeBrowserModelFiles: async () => { cached = false; return 2; } },
+    '@huggingface/transformers': {
+      env: runtimeEnv, AutoConfig: {},
+      AutoTokenizer: { from_pretrained: async (_model, options) => { if (options.local_files_only) assert.equal(runtimeEnv.allowLocalModels, true, 'Transformers requires allowLocalModels for cached-file-only loads'); else { cached = true; downloads++; } if (!cached) throw Error('local_files_only=true: no cached file'); return () => ({}); } },
+      AutoModel: { from_pretrained: async () => { const model = async () => ({ sentence_embedding: [[1, 2]] }); model.dispose = async () => {}; return model; } }
+    }
+  }, { chrome: chromeFixture });
+  await assert.rejects(mod.computeBrowserEmbeddings(['text'], '', OLD_MODEL, OLD_REVISION), /not downloaded/);
+  assert.equal(downloads, 0);
+  await mod.computeBrowserEmbeddings(['text'], '', OLD_MODEL, OLD_REVISION, true); assert.equal(downloads, 1);
+  await mod.removeBrowserModel(OLD_MODEL, OLD_REVISION);
+  await assert.rejects(mod.computeBrowserEmbeddings(['text'], '', OLD_MODEL, OLD_REVISION), /not downloaded/);
+  assert.equal(downloads, 1);
+});
+
+test('removal invalidates old ready responses without changing model selection or stored pages', async () => {
+  let finish; const requests = [];
+  const pending = new Promise(resolve => { finish = resolve; });
+  const mod = await loadSource('src/background/embeddings/index.ts', '', {
+    '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async message => {
+      requests.push(message);
+      return message.type === 'OFFSCREEN_EMBED' ? pending : message.type === 'OFFSCREEN_REMOVE_BROWSER_MODEL' ? { deletedFiles: 3 } : { runtimeAvailable: true };
+    } }
+  }, { chrome: chromeFixture });
+  await mod.updateEmbeddingConfig({ provider: 'browser' });
+  const inference = mod.computeEmbeddingsForQueries(['query']); await tick();
+  await mod.deleteBrowserModel(OLD_MODEL, OLD_REVISION); finish({ embeddings: [[1, 2]] });
+  await assert.rejects(inference, /settings changed/);
+  assert.equal(mod.getBrowserEmbedStatus().ready, false);
+  assert.equal(mod.getEmbeddingConfig().browserModel, OLD_MODEL);
+  assert.equal(requests.find(message => message.type === 'OFFSCREEN_EMBED').allowDownload, false);
+  assert.ok(!requests.some(message => ['DELETE_PAGE', 'BACKFILL_EMBEDDINGS', 'OFFSCREEN_INVALIDATE_INDEX'].includes(message.type)));
+});
+
+test('explicit download permits model files and keeps the worker active until it finishes', async () => {
+  let held = false, downloaded = false;
+  const mod = await loadSource('src/background/embeddings/index.ts', '', {
+    '../providers/inference': { runInference: async action => { held = true; try { return await action(); } finally { held = false; } } },
+    '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async message => {
+      if (message.type === 'OFFSCREEN_DOWNLOAD_BROWSER_MODEL') { assert.equal(held, true); assert.ok(message.requestId); downloaded = true; return {}; }
+      return { runtimeAvailable: true };
+    } }
+  }, { chrome: chromeFixture });
+  await mod.prefetchBrowserEmbeddings();
+  assert.equal(downloaded, true); assert.equal(held, false); assert.equal(mod.getBrowserEmbedStatus().ready, true);
+});

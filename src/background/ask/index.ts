@@ -22,6 +22,8 @@ export type AskResponse = {
 };
 
 export type AskOptions = {
+  scopeUrls?: string[];
+  history?: Array<{ question: string; answer: string }>;
   useSearch?: boolean;
   maxResults?: number;
   requestId?: string;
@@ -141,8 +143,14 @@ async function gatherSearchHits(
   maxResults: number,
   useSearch: boolean,
   requestId?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  scopeUrls?: string[]
 ): Promise<SearchHit[]> {
+  if (scopeUrls) {
+    const records = await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)));
+    const saved = records.filter((page): page is NonNullable<typeof page> => Boolean(page));
+    return saved.map(page => ({ url: page.url, title: page.title || page.url, snippet: page.chunks?.[0]?.text || page.text?.slice(0, 1200) || page.summary || '', timestamp: page.timestamp, score: 1 }));
+  }
   if (!useSearch) {
     const recents = await storageManager.listRecentPages(maxResults);
     return recents.map((page) => ({
@@ -354,9 +362,9 @@ function resolveToolStepBudget(maxToolSteps: number): number {
   return Math.max(1, Math.min(Math.round(maxToolSteps), MAX_INTERNAL_TOOL_STEPS));
 }
 
-async function createToolsRuntime(sources: AskSource[], contextLimit: number, signal?: AbortSignal): Promise<ToolsRuntime | null> {
+async function createToolsRuntime(sources: AskSource[], contextLimit: number, signal?: AbortSignal, scopeUrls?: string[]): Promise<ToolsRuntime | null> {
   try {
-    const pages = await storageManager.listAllPages();
+    const pages = scopeUrls ? (await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)))).filter((page): page is NonNullable<typeof page> => Boolean(page)) : await storageManager.listAllPages();
     const pageText = new Map<string, string>();
     for (const page of pages) {
       if (page.text) {
@@ -371,8 +379,8 @@ async function createToolsRuntime(sources: AskSource[], contextLimit: number, si
       allowedUrls: new Set(pages.map((page) => page.url)),
       pageText,
       pages,
-      searchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
-      quickSearchMemory: (query, k) => searchStoredPages(query, k, { rewrite: false, rerank: false, signal }),
+      searchMemory: async (query, k) => (await searchStoredPages(query, k, { rewrite: false, rerank: false, signal, scopeUrls })).filter(hit => !scopeUrls || scopeUrls.includes(hit.url)),
+      quickSearchMemory: async (query, k) => (await searchStoredPages(query, k, { rewrite: false, rerank: false, signal, scopeUrls })).filter(hit => !scopeUrls || scopeUrls.includes(hit.url)),
       recordEvidence: (url, text) => {
         let source = sources.find((entry) => entry.url === url);
         if (!source) {
@@ -629,9 +637,15 @@ function hasValidCitations(answerText: string, sources: AskSource[]): boolean {
 async function runAskQuestion(question: string, options?: AskOptions): Promise<AskResponse> {
   const signal = options?.signal;
   signal?.throwIfAborted();
-  const normalized = question?.trim();
-  if (!normalized) {
+  const currentQuestion = question?.trim();
+  const history = Array.isArray(options?.history) ? options.history.slice(-3).filter(turn => typeof turn?.question === 'string' && typeof turn?.answer === 'string') : [];
+  const normalized = history.length ? `Previous conversation (for interpreting the follow-up, not source evidence):\n${history.map(turn => `Question: ${turn.question.slice(0, 2000)}\nAnswer: ${turn.answer.slice(0, 4000)}`).join('\n\n')}\n\nCurrent question: ${currentQuestion}` : currentQuestion;
+  if (!currentQuestion) {
     throw new Error('Please enter a question');
+  }
+  const scopeUrls = options?.scopeUrls;
+  if (scopeUrls !== undefined && (!Array.isArray(scopeUrls) || !scopeUrls.length || scopeUrls.some(url => typeof url !== 'string' || !/^https?:\/\//i.test(url)))) {
+    throw new Error('Choose at least one saved page to ask.');
   }
   const settings = await getSettings();
   const defaultSources = settings.askMaxSources ?? 0;
@@ -652,9 +666,9 @@ async function runAskQuestion(question: string, options?: AskOptions): Promise<A
   signal?.throwIfAborted();
 
   sendProgress('Analyzing question…', requestId);
-  const subQueries = queryRewriteEnabled ? await decomposeQuestion(normalized, config) : [normalized];
+  const subQueries = !scopeUrls && queryRewriteEnabled ? await decomposeQuestion(normalized, config) : [normalized];
 
-  const initialHits = await gatherSearchHits(subQueries, normalized, maxResults, options?.useSearch !== false, requestId, signal);
+  const initialHits = await gatherSearchHits(subQueries, normalized, maxResults, options?.useSearch !== false, requestId, signal, scopeUrls ? [...new Set(scopeUrls)] : undefined);
   signal?.throwIfAborted();
   const dedupedHits = dedupeAskHitsByUrl(initialHits);
   const hits = await rerankAskHits(normalized, dedupedHits, askRerankEnabled, config);
@@ -671,7 +685,7 @@ async function runAskQuestion(question: string, options?: AskOptions): Promise<A
     | { notes: string; metrics: ToolMetric[]; usedUrls: string[] }
     | null = null;
   if (useToolAugmentation) {
-    const runtime = await createToolsRuntime(sources, contextLimit, signal);
+    const runtime = await createToolsRuntime(sources, contextLimit, signal, scopeUrls);
     sendProgress('Running tool-augmented extraction…', requestId);
     extraction = await runExtractionWithTools({
       config,

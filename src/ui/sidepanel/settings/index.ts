@@ -1,4 +1,4 @@
-import { installSharedStyles } from '../../shared/presentation';
+import { installSharedStyles, createBackLink, icon, navigateTo } from '../../shared/presentation';
 import {
   DEFAULT_EMBEDDING_CONFIG as DEFAULT_EMBEDDING,
   BROWSER_EMBEDDING_MODELS,
@@ -9,6 +9,8 @@ import {
 import { getProviderOriginInfo } from '../../../shared/providerOrigin';
 import { sendRuntimeMessage as runtimeMessage } from '../../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../../shared/theme';
+import type { BrowserModelDownload } from '../../../shared/browserModels';
+import { bindBrowserDownload, createBrowserDownloadControls } from './browserDownload';
 
 type BrowserEmbedStatus = {
   ready: boolean;
@@ -32,121 +34,14 @@ function parseDomainInput(value: string): string[] {
     .filter(Boolean);
 }
 
-function ensureStyles(): void {
-  if (document.getElementById('beta-settings-style')) return;
-  const style = document.createElement('style');
-  style.id = 'beta-settings-style';
-  style.textContent = `
-    :root {
-      --bg: #f5f5f7;
-      --surface: #ffffff;
-      --surface-muted: #f1f5f9;
-      --border: #d1d5db;
-      --text: #0f172a;
-      --muted: #4b5563;
-      --accent: #4f46e5;
-      --accent-contrast: #ffffff;
-    }
-    :root[data-theme="dark"] {
-      --bg: #0a0f1a;
-      --surface: #0f172a;
-      --surface-muted: #0b1220;
-      --border: #1e293b;
-      --text: #e2e8f0;
-      --muted: #cbd5e1;
-      --accent: #8b5cf6;
-      --accent-contrast: #0b1020;
-    }
-    body {
-      background: var(--bg);
-      color: var(--text);
-    }
-    .beta-settings-root {
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      padding: 12px;
-      color: var(--text);
-      background: var(--bg);
-      min-height: 100%;
-      box-sizing: border-box;
-    }
-    .beta-card {
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 12px;
-      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
-    }
-    .beta-settings-title {
-      font-size: 1.25rem;
-      margin: 0;
-    }
-    .beta-card h2 {
-      font-size: 1rem;
-      margin: 0 0 8px 0;
-    }
-    .beta-toggle {
-      display: flex;
-      gap: 8px;
-      align-items: center;
-      font-weight: 600;
-    }
-    .beta-field {
-      display: flex;
-      flex-direction: column;
-      margin-bottom: 8px;
-    }
-    .beta-field label {
-      font-weight: 600;
-      margin-bottom: 4px;
-    }
-    .beta-field input,
-    .beta-field textarea {
-      border: 1px solid var(--border);
-      padding: 6px 8px;
-      border-radius: 6px;
-      font: inherit;
-      background: var(--surface);
-      color: var(--text);
-    }
-    .beta-card button {
-      align-self: flex-start;
-      padding: 6px 12px;
-      border-radius: 6px;
-      border: none;
-      background: var(--accent);
-      color: var(--accent-contrast);
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .beta-card button:focus {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
-    }
-    .beta-help {
-      font-size: 0.875rem;
-      color: var(--muted);
-    }
-    .beta-status {
-      font-size: 0.9rem;
-      margin: 0;
-      min-height: 1.2em;
-    }
-    .beta-status[data-variant="error"] {
-      color: #b42318;
-    }
-  `;
-  document.head.appendChild(style);
-}
+function ensureStyles(): void { installSharedStyles(); }
 
 export function renderSettingsPanel(target: HTMLElement): void {
   bindSystemThemeListener();
   ensureStyles();
   target.innerHTML = `
     <div class="beta-settings-root">
-      <h1 class="beta-settings-title">Web Recall Settings</h1>
+      <h1 class="beta-settings-title">Settings</h1>
 
       <section class="beta-card" aria-labelledby="capture-heading">
         <h2 id="capture-heading">Capture controls</h2>
@@ -154,7 +49,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <input type="checkbox" id="beta-pause-toggle" />
           <span>Pause automatic capture</span>
         </label>
-        <p class="beta-help">Automatic capture is paused until you resume. Capture current tab still works and respects your domain rules.</p>
+        <p id="beta-capture-policy-note" class="beta-help"></p>
       </section>
 
       <section class="beta-card" id="beta-capture-setup-card" aria-labelledby="capture-setup-heading" hidden>
@@ -236,9 +131,18 @@ export function renderSettingsPanel(target: HTMLElement): void {
         </div>
         </details>
         <button id="beta-download-browser-model" type="button">Save &amp; download model</button>
+        <button id="beta-manage-browser-models" type="button">Manage downloads</button>
         <p id="beta-embedding-browser-status" class="beta-help">Download EmbeddingGemma once from Hugging Face; it is cached on this device. The download is large and may take several minutes. Captured text is processed locally.</p>
         </div>
         <button id="beta-save-embedding" type="button">Save embedding settings</button>
+      </section>
+
+      <section class="beta-card" aria-labelledby="downloaded-models-heading">
+        <h2 id="downloaded-models-heading">Downloaded models</h2>
+        <p class="beta-help">Browser model files cached by Web Recall. Removing a download keeps your saved pages and embeddings. Download it again before using that model.</p>
+        <button id="beta-refresh-browser-models" type="button">Refresh downloads</button>
+        <p id="beta-browser-models-status" class="beta-help" role="status"></p>
+        <div id="beta-browser-models-list"></div>
       </section>
 
       <section class="beta-card" aria-labelledby="provider-heading">
@@ -332,32 +236,52 @@ export function renderSettingsPanel(target: HTMLElement): void {
   `;
 
   const shell = target.querySelector<HTMLElement>('.beta-settings-root')!;
-  const navigation = document.createElement('nav'); navigation.className = 'wr-settings-sections';
-  navigation.setAttribute('aria-label', 'Settings sections');
-  const title = shell.querySelector('h1')!; title.after(navigation);
+  shell.prepend(createBackLink());
+  target.classList.add('wr-page');
   const status = target.querySelector<HTMLElement>('#beta-settings-status')!;
-  status.classList.add('wr-settings-status'); navigation.after(status);
+  function wrap(card: HTMLElement, label: string, id?: string): HTMLDetailsElement {
+    const details = document.createElement('details'); details.className = 'setting-detail';
+    if (id) details.id = id;
+    const summary = document.createElement('summary'); summary.append(document.createTextNode(label), icon('caret-down'));
+    const body = document.createElement('div'); body.className = 'setting-detail-body'; body.append(card);
+    details.append(summary, body); return details;
+  }
+  const askCard = target.querySelector<HTMLElement>('#ask-heading')!.closest('section')!;
+  const split = (label: string, ids: string[], help: string): HTMLElement => {
+    const card = document.createElement('section'); card.className = 'beta-card';
+    for (const id of ids) { const field = target.querySelector('#' + id)?.closest('.beta-field, .beta-toggle'); if (field) card.append(field); }
+    if (help) { const p = document.createElement('p'); p.className = 'beta-help'; p.textContent = help; card.append(p); }
+    return wrap(card, label, label === 'Logging' ? 'settings-logging' : undefined);
+  };
+  const retrieval = split('Retrieval & answers', ['beta-context-window', 'settings-ask-sources', 'beta-answer-mode', 'beta-query-rewrite', 'beta-search-rerank', 'beta-ask-rerank'], 'Auto is an initial retrieval count, not a hard citation limit.');
+  const tools = split('Ask tools', ['beta-enable-tools', 'beta-max-tool-steps'], '0 means no user limit. Model inference has no automatic timeout; use Stop to cancel.');
+  const logging = split('Logging', ['beta-log-level', 'beta-log-full'], 'Choose which capture events and payloads are stored in Logs.');
   const groups = [
     ['capture', 'Capture', ['capture-heading', 'domain-heading', 'capture-setup-heading']],
-    ['models', 'Models', ['provider-heading', 'embed-heading']],
+    ['models', 'Models', ['embed-heading', 'provider-heading', 'downloaded-models-heading']],
     ['appearance', 'Appearance', ['theme-heading']],
-    ['advanced', 'Advanced', ['ask-heading', 'calibration-heading', 'tools-heading']]
+    ['advanced', 'Advanced', ['calibration-heading', 'tools-heading']]
   ] as const;
   for (const [id, label, headings] of groups) {
-    const details = document.createElement('details'); details.id = `settings-${id}`;
-    details.open = id === 'capture' || id === 'models';
-    const summary = document.createElement('summary'); summary.textContent = label; details.append(summary);
+    const details = document.createElement('details'); details.id = `settings-${id}`; details.className = 'settings-group'; details.name = 'settings-groups';
+    const summary = document.createElement('summary');
+    const labelWrap = document.createElement('span'); labelWrap.append(document.createTextNode(label));
+    const description = document.createElement('small'); description.className = 'wr-setting-summary'; description.id = `settings-${id}-summary`; labelWrap.append(description);
+    summary.append(labelWrap, icon('caret-down')); details.append(summary);
     const content = document.createElement('div'); content.className = 'wr-settings-group'; details.append(content);
+    if (id === 'advanced') content.append(retrieval, tools, logging);
     for (const heading of headings) {
-      const card = target.querySelector(`#${heading}`)?.closest('section');
-      if (card) content.append(card);
+      const card = target.querySelector<HTMLElement>(`#${heading}`)?.closest<HTMLElement>('section');
+      if (!card) continue;
+      if (heading === 'capture-heading' || id === 'appearance') content.append(card);
+      else { const nested = wrap(card, heading === 'domain-heading' ? 'Domain rules' : card.querySelector('h2')!.textContent!, heading === 'downloaded-models-heading' ? 'settings-downloads' : undefined); if (card.hidden) nested.hidden = true; content.append(nested); }
+      if (heading === 'embed-heading') content.append(createBrowserDownloadControls());
     }
     shell.append(details);
-    const link = document.createElement('a'); link.href = `#settings-${id}`; link.textContent = label;
-    link.addEventListener('click', (event) => { event.preventDefault(); details.open = true; details.scrollIntoView({ block: 'start' }); summary.focus(); });
-    summary.tabIndex = 0;
-    navigation.append(link);
   }
+  askCard.remove();
+  shell.append(status);
+  target.querySelectorAll<HTMLButtonElement>('button').forEach(button => button.classList.add(['beta-save-rules', 'beta-save-embedding', 'beta-provider-save'].includes(button.id) ? 'primary-button' : 'secondary-button'));
   installSharedStyles();
   attachBehavior(target);
 }
@@ -405,8 +329,104 @@ function attachBehavior(root: HTMLElement): void {
   const calibSimInput = root.querySelector<HTMLInputElement>('#beta-calib-sim');
   const calibLLMInput = root.querySelector<HTMLInputElement>('#beta-calib-llm');
   const statusLine = root.querySelector<HTMLParagraphElement>('#beta-settings-status');
+  const downloads = root.querySelector<HTMLDetailsElement>('#settings-downloads')!;
+  const downloadsList = root.querySelector<HTMLElement>('#beta-browser-models-list')!;
+  const downloadsStatus = root.querySelector<HTMLElement>('#beta-browser-models-status')!;
+  const refreshDownloadsButton = root.querySelector<HTMLButtonElement>('#beta-refresh-browser-models')!;
+  let downloadsBusy = false, downloadsGeneration = 0;
 
   let currentSettings: BetaSettings = { ...DEFAULT_SETTINGS };
+
+  function setDownloadsStatus(text: string, error = false): void {
+    downloadsStatus.textContent = text;
+    downloadsStatus.dataset.variant = error ? 'error' : 'info';
+  }
+
+  function setDownloadsBusy(busy: boolean): void {
+    downloadsBusy = busy;
+    refreshDownloadsButton.disabled = busy;
+    downloadsList.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = busy; });
+  }
+
+  async function refreshDownloads(): Promise<boolean> {
+    const generation = ++downloadsGeneration;
+    setDownloadsStatus('Reading downloaded files…');
+    try {
+      const [response, saved] = await Promise.all([
+        runtimeMessage<{ models: BrowserModelDownload[] }>({ type: 'LIST_BROWSER_MODELS' }),
+        runtimeMessage<{ config: EmbeddingConfig }>({ type: 'GET_EMBEDDING_CONFIG' })
+      ]);
+      if (generation !== downloadsGeneration) return false;
+      const open = new Set([...downloadsList.querySelectorAll<HTMLDetailsElement>('details[open]')].map(row => row.dataset.key));
+      downloadsList.replaceChildren();
+      for (const model of response.models || []) {
+        const selected = saved.config?.provider === 'browser' && model.model === saved.config.browserModel && model.revision === saved.config.browserRevision;
+        const preset = BROWSER_EMBEDDING_MODELS.find(entry => entry.id === model.model && entry.revision === model.revision);
+        const row = document.createElement('details'); row.className = 'wr-model-download'; row.dataset.key = JSON.stringify([model.model, model.revision]); row.open = open.has(row.dataset.key);
+        const summary = document.createElement('summary');
+        const title = document.createElement('span'); title.textContent = preset?.label || model.model;
+        const meta = document.createElement('small'); meta.className = 'wr-help';
+        const size = model.sizeBytes === null ? 'Size unavailable' : `~${(model.sizeBytes / 1024 / 1024).toLocaleString(undefined, { maximumFractionDigits: 1 })} MB`;
+        meta.textContent = [selected ? 'Selected' : '', model.hasWeights ? '' : 'Partial download', size, `${model.fileCount} ${model.fileCount === 1 ? 'file' : 'files'}`].filter(Boolean).join(' · ');
+        const label = document.createElement('span'); label.append(title, meta); summary.append(label, icon('caret-down'));
+        const body = document.createElement('div'); body.className = 'wr-model-download-body';
+        const identity = document.createElement('p'); identity.className = 'wr-help'; identity.textContent = `${model.model}\nRevision ${model.revision}`; body.append(identity);
+        const actions = document.createElement('div'); actions.className = 'button-row';
+        if (!selected && model.hasWeights) {
+          const use = document.createElement('button'); use.className = 'secondary-button'; use.textContent = 'Use model'; use.setAttribute('aria-label', `Use ${preset?.label || model.model}`);
+          use.addEventListener('click', () => { void manageDownload(async () => {
+            const response = await runtimeMessage<{ config: EmbeddingConfig; settings?: BetaSettings }>({ type: 'SET_EMBEDDING_CONFIG', payload: { provider: 'browser', browserModel: model.model, browserRevision: model.revision } });
+            if (response.settings) applySettings(response.settings);
+            applyEmbedding(response.config);
+          }, 'Selecting model…', 'Model selected. Existing pages keep their embeddings.'); }); actions.append(use);
+        }
+        const remove = document.createElement('button'); remove.className = 'text-button danger-text'; remove.textContent = 'Remove download'; remove.setAttribute('aria-label', `Remove ${preset?.label || model.model}`);
+        const cancel = document.createElement('button'); cancel.className = 'text-button'; cancel.textContent = 'Cancel'; cancel.hidden = true;
+        const confirm = document.createElement('p'); confirm.className = 'wr-help'; confirm.textContent = 'Remove these cached files?'; confirm.hidden = true; body.append(confirm);
+        let confirming = false;
+        cancel.addEventListener('click', () => {
+          confirming = false; cancel.hidden = confirm.hidden = true;
+          remove.textContent = 'Remove download'; remove.setAttribute('aria-label', `Remove ${preset?.label || model.model}`); remove.focus();
+        });
+        remove.addEventListener('click', () => {
+          if (downloadsBusy) return;
+          if (!confirming) {
+            confirming = true; cancel.hidden = confirm.hidden = false;
+            remove.textContent = 'Confirm removal'; remove.setAttribute('aria-label', `Confirm removal of ${preset?.label || model.model}`); remove.focus(); return;
+          }
+          void manageDownload(() => runtimeMessage({ type: 'DELETE_BROWSER_MODEL', model: model.model, revision: model.revision }), 'Removing download. Waiting for current model work to finish…', 'Download removed. Saved pages and embeddings are kept.');
+        });
+        actions.append(remove, cancel); body.append(actions); row.append(summary, body); downloadsList.append(row);
+      }
+      if (!downloadsList.children.length) { const empty = document.createElement('p'); empty.className = 'wr-help'; empty.textContent = 'No browser models downloaded. Choose a model in Embedding provider to download it.'; downloadsList.append(empty); }
+      setDownloadsStatus(''); setDownloadsBusy(downloadsBusy);
+      return true;
+    } catch (error) { if (generation === downloadsGeneration) setDownloadsStatus(`Unable to read downloads: ${error instanceof Error ? error.message : String(error)}`, true); return false; }
+  }
+
+  async function manageDownload(action: () => Promise<unknown>, pending: string, success: string): Promise<void> {
+    if (downloadsBusy) return;
+    const focusedKey = (document.activeElement as HTMLElement | null)?.closest<HTMLDetailsElement>('.wr-model-download')?.dataset.key;
+    let focusTarget: HTMLElement | null = null;
+    setDownloadsBusy(true); downloadsGeneration++; setStatus(''); setDownloadsStatus(pending);
+    try {
+      await action();
+      if (await refreshDownloads()) {
+        setDownloadsStatus(success);
+        const row = [...downloadsList.querySelectorAll<HTMLDetailsElement>('.wr-model-download')].find(row => row.dataset.key === focusedKey);
+        focusTarget = row?.querySelector<HTMLElement>('summary') || refreshDownloadsButton;
+      }
+    }
+    catch (error) { setDownloadsStatus(`Unable to update download: ${error instanceof Error ? error.message : String(error)}`, true); }
+    finally { setDownloadsBusy(false); focusTarget?.focus({ preventScroll: true }); }
+  }
+
+  downloads.addEventListener('toggle', () => { if (downloads.open && !downloadsBusy) void refreshDownloads(); });
+  refreshDownloadsButton.addEventListener('click', () => { if (!downloadsBusy) void refreshDownloads(); });
+  root.querySelector('#beta-manage-browser-models')?.addEventListener('click', () => {
+    root.querySelector<HTMLDetailsElement>('#settings-models')!.open = true; downloads.open = true;
+    downloads.querySelector<HTMLElement>('summary')!.focus(); downloads.scrollIntoView({ block: 'nearest' });
+  });
 
   function setStatus(text: string, isError = false): void {
     if (!statusLine) return;
@@ -526,10 +546,22 @@ function attachBehavior(root: HTMLElement): void {
     }
   }
 
+  function syncSummaries(): void {
+    const descriptions: Record<string, string> = {
+      capture: `${currentSettings.paused ? 'Paused' : 'Automatic'} · ${currentSettings.allowlist.length ? `${currentSettings.allowlist.length} allowed domains` : 'All sites'}`,
+      models: `${embeddingProviderSelect?.value === 'browser' ? 'In-browser' : 'Ollama'} embeddings · ${providerSelect?.selectedOptions[0]?.textContent || 'Ollama'} chat`,
+      appearance: themeSelect?.selectedOptions[0]?.textContent || 'Light', advanced: 'Retrieval, answers & tools'
+    };
+    for (const [id, text] of Object.entries(descriptions)) { const line = root.querySelector('#settings-' + id + '-summary'); if (line) line.textContent = text; }
+  }
+
   function applySettings(settings: BetaSettings): void {
     currentSettings = settings;
+    const captureNote = root.querySelector('#beta-capture-policy-note');
+    if (captureNote) captureNote.textContent = settings.paused ? 'Automatic capture is paused. Manual capture still follows your domain rules.' : 'Automatic capture is on and follows your domain rules.';
     if (captureSetupCard) {
       captureSetupCard.hidden = settings.captureSetupComplete;
+      const wrapper = captureSetupCard.closest('details'); if (wrapper) wrapper.hidden = settings.captureSetupComplete;
     }
     if (pauseToggle) {
       pauseToggle.checked = !!settings.paused;
@@ -565,6 +597,7 @@ function attachBehavior(root: HTMLElement): void {
     if (maxToolStepsInput) maxToolStepsInput.value = String(settings.maxToolSteps ?? DEFAULT_SETTINGS.maxToolSteps);
     if (logFullBodiesToggle) logFullBodiesToggle.checked = !!settings.logFullBodies;
     applyTheme(settings.theme || 'light');
+    syncSummaries();
     const allowlistCount = settings.allowlist.length;
     if (saveAllowlistAndResumeBtn) {
       saveAllowlistAndResumeBtn.disabled = allowlistCount === 0;
@@ -575,6 +608,7 @@ function attachBehavior(root: HTMLElement): void {
   }
 
   function applyEmbedding(config: EmbeddingConfig): void {
+    void Promise.resolve().then(syncSummaries);
     if (baseInput) baseInput.value = config.baseUrl || '';
     if (modelInput) modelInput.value = config.model || '';
     if (browserModelInput) browserModelInput.value = config.browserModel || DEFAULT_EMBEDDING.browserModel || '';
@@ -679,7 +713,7 @@ function attachBehavior(root: HTMLElement): void {
       ]);
       applySettings(settingsResp.settings || DEFAULT_SETTINGS);
       applyEmbedding(embeddingResp.config || DEFAULT_EMBEDDING);
-      setStatus('Settings loaded');
+      setStatus('');
     } catch (err) {
       setStatus(`Failed to load settings: ${err instanceof Error ? err.message : String(err)}`, true);
     }
@@ -805,6 +839,7 @@ function attachBehavior(root: HTMLElement): void {
       });
       if (response.settings) applySettings(response.settings);
       applyEmbedding(response.config || { baseUrl, model });
+      if (downloads.open) await refreshDownloads();
       if (provider === 'browser') {
         await refreshBrowserEmbedStatus();
       }
@@ -827,20 +862,19 @@ function attachBehavior(root: HTMLElement): void {
     applyEmbedding(config);
   });
 
-  downloadBrowserBtn?.addEventListener('click', async () => {
-    downloadBrowserBtn.disabled = true;
-    updateBrowserStatus('Saving settings and preparing the model…');
-    try {
-      await runtimeMessage({ type: 'SET_EMBEDDING_CONFIG', payload: {
-        provider: 'browser', browserModel: browserModelInput?.value.trim(), browserRevision: browserRevisionInput?.value.trim()
-      } });
-      await runtimeMessage<{ ok?: boolean }>({ type: 'DOWNLOAD_BROWSER_EMBED' });
+  const browserDownload = bindBrowserDownload(root, {
+    async saveSelection(model, revision) {
+      const response = await runtimeMessage<{ config: EmbeddingConfig; settings?: BetaSettings }>({ type: 'SET_EMBEDDING_CONFIG', payload: { provider: 'browser', browserModel: model, browserRevision: revision } });
+      if (response.settings) applySettings(response.settings);
+      applyEmbedding(response.config || { ...DEFAULT_EMBEDDING, provider: 'browser', browserModel: model, browserRevision: revision });
+    },
+    async finished(download) {
       await refreshBrowserEmbedStatus();
-      setStatus('Browser model ready');
-    } catch (err) {
-      updateBrowserStatus(`Download failed: ${err instanceof Error ? err.message : String(err)}. Try Save & download again.`, true);
-    } finally { downloadBrowserBtn.disabled = false; }
+      if (downloads.open) await refreshDownloads();
+      if (download.state === 'ready') setStatus('Browser model ready');
+    }
   });
+  downloadBrowserBtn?.addEventListener('click', () => { void browserDownload.start(browserModelInput?.value.trim() || '', browserRevisionInput?.value.trim() || ''); });
 
   providerSaveBtn?.addEventListener('click', async () => {
     if (!providerBaseInput) return;
@@ -929,7 +963,8 @@ function attachBehavior(root: HTMLElement): void {
 
   function openExtensionPage(path: string): void {
     const url = chrome.runtime.getURL(path);
-    chrome.tabs.create({ url });
+    const view = path.includes('/manage/') ? 'manage' : path.includes('/logs/') ? 'logs' : 'highlights';
+    if (!navigateTo(view)) chrome.tabs.create({ url });
   }
 
   openManageBtn?.addEventListener('click', () => openExtensionPage('dist/beta/ui/manage/index.html'));
@@ -961,7 +996,7 @@ function attachBehavior(root: HTMLElement): void {
         payload: { askMaxSources: value }
       });
       applySettings(response.settings || { ...currentSettings, askMaxSources: value });
-      setStatus('Max sources updated');
+      setStatus('Initial sources updated');
     } catch (err) {
       setStatus(`Unable to update Ask sources: ${err instanceof Error ? err.message : String(err)}`, true);
       askSourcesInput.value = String(currentSettings.askMaxSources);

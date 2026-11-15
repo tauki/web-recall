@@ -9,9 +9,10 @@ const { DEFAULT_SETTINGS, DEFAULT_EMBEDDING_CONFIG } = await loadSource('src/sha
 const pages = [{ url: 'https://example.test/cats', title: 'Cats', timestamp: Date.now(), manual: false, embeddingStatus: 'Present', chunkCount: 3 }];
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
 async function ui(view, overrides = {}, backend) {
-  const dom = new JSDOM('<div id="app-root"></div>', { url: 'https://extension.test/' });
+  const dom = new JSDOM(`<div id="app-root" data-view="${view}"></div>`, { url: 'https://extension.test/' });
   const { window } = dom;
   window.HTMLElement.prototype.scrollIntoView = () => {};
+  window.scrollTo = () => {};
   const listeners = [], requests = [], polls = [];
   let pendingMessages = 0;
   const responses = {
@@ -145,18 +146,15 @@ test('text retrieval results do not display term scores as semantic similarity',
   assert.doesNotMatch(f.q('#beta-search-results').textContent, /sim .*%/);
 });
 
-test('sidepanel IDs, tab relationships and keyboard focus stay unique across Settings and Ask', async t => {
+test('sidepanel menu preserves unique IDs and keyboard focus across Settings and Ask', async t => {
   const f = await ui('sidepanel'); t.after(f.close);
   const ids = [...f.window.document.querySelectorAll('[id]')].map(el => el.id);
   assert.equal(ids.length, new Set(ids).size);
-  for (const tab of f.window.document.querySelectorAll('[role=tab]')) {
-    const panel = f.q('#' + tab.getAttribute('aria-controls'));
-    assert.equal(panel.getAttribute('aria-labelledby'), tab.id);
-  }
-  f.q('#tab-search').dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'End', bubbles: true }));
-  assert.equal(f.window.document.activeElement.id, 'tab-settings');
+  f.q('a[data-view="settings"]').click();
   assert.equal(f.q('#beta-view-settings').hidden, false);
-  assert.equal(f.q('#tab-search').tabIndex, -1);
+  f.window.dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'k', ctrlKey: true }));
+  assert.equal(f.window.document.activeElement.id, 'beta-search-input');
+  assert.equal(f.q('#beta-view-search').hidden, false);
   assert.equal(f.q('#settings-ask-sources').labels.length, 1);
   f.change('#beta-embedding-provider', 'browser');
   assert.equal(f.q('#embedding-ollama-fields').hidden, true);
@@ -201,9 +199,74 @@ test('custom browser revisions remain selectable and stale model status is ignor
   assert.ok(!f.requests.some(m => m.type === 'BACKFILL_EMBEDDINGS'));
 });
 
+test('model downloads show per-file progress, cancel, and retry with a fresh identity', async t => {
+  const attempts = [deferred(), deferred()]; let call = 0;
+  const f = await ui('sidepanel', {
+    DOWNLOAD_BROWSER_EMBED: () => attempts[call++].promise,
+    CANCEL_BROWSER_MODEL_DOWNLOAD: () => ({ cancelled: true })
+  }); t.after(f.close);
+  f.change('#beta-embedding-provider', 'browser');
+  f.q('#beta-download-browser-model').click(); await tick();
+  const first = f.requests.find(message => message.type === 'DOWNLOAD_BROWSER_EMBED');
+  const status = { ...first, startedAt: Date.now(), state: 'downloading', file: 'onnx/model.onnx', loadedBytes: 250, totalBytes: 1000 };
+  f.emit({ type: 'BROWSER_MODEL_DOWNLOAD_UPDATE', download: status });
+  assert.equal(f.q('#beta-browser-transfer-progress').value, 25);
+  assert.match(f.q('#beta-browser-transfer-file').textContent, /25% of this file/);
+  assert.equal(f.q('#beta-download-browser-model').disabled, true);
+  f.q('#beta-browser-transfer-cancel').click(); await tick();
+  assert.equal(f.requests.find(message => message.type === 'CANCEL_BROWSER_MODEL_DOWNLOAD').requestId, first.requestId);
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Stopping/);
+  attempts[0].reject(Error('Download cancelled')); await tick();
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Completed files are kept/);
+  assert.equal(f.q('#beta-browser-transfer-retry').hidden, false);
+  f.change('#beta-browser-model-select', 'onnx-community/embeddinggemma-2-ONNX');
+  const saves = f.requests.filter(message => message.type === 'SET_EMBEDDING_CONFIG').length;
+  f.q('#beta-browser-transfer-retry').click(); await tick();
+  const second = f.requests.filter(message => message.type === 'DOWNLOAD_BROWSER_EMBED').at(-1);
+  assert.notEqual(first.requestId, second.requestId);
+  assert.equal(second.model, first.model, 'retry uses the original model');
+  assert.equal(second.revision, first.revision);
+  assert.equal(f.requests.filter(message => message.type === 'SET_EMBEDDING_CONFIG').length, saves);
+  f.emit({ type: 'BROWSER_MODEL_DOWNLOAD_UPDATE', download: { ...status, state: 'error', error: 'stale' } });
+  assert.doesNotMatch(f.q('#beta-browser-transfer-status').textContent, /stale/);
+  f.emit({ type: 'BROWSER_MODEL_DOWNLOAD_UPDATE', download: { ...status, requestId: second.requestId, state: 'preparing' } });
+  assert.equal(f.q('#beta-browser-transfer-progress').hasAttribute('value'), false);
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Preparing/);
+  attempts[1].resolve({ ok: true }); await f.settle();
+  assert.equal(f.q('#beta-browser-transfer').hidden, true);
+  assert.equal(f.q('#beta-download-browser-model').disabled, false);
+});
+
+test('cancelling while settings save prevents a download from starting later', async t => {
+  const saving = deferred();
+  const f = await ui('sidepanel', { SET_EMBEDDING_CONFIG: () => saving.promise }); t.after(f.close);
+  f.q('#beta-download-browser-model').click();
+  f.q('#beta-browser-transfer-cancel').click();
+  saving.resolve({ config: DEFAULT_EMBEDDING_CONFIG }); await f.settle();
+  assert.ok(!f.requests.some(message => message.type === 'DOWNLOAD_BROWSER_EMBED'));
+  assert.ok(!f.requests.some(message => message.type === 'CANCEL_BROWSER_MODEL_DOWNLOAD'));
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Download cancelled/);
+});
+
+test('opening Models restores active transfers, unknown sizes and failures remain retryable', async t => {
+  const download = { requestId: 'restored', model: 'owner/model', revision: 'pin', startedAt: Date.now(), state: 'downloading', file: 'weights.onnx', loadedBytes: 1048576 };
+  const f = await ui('sidepanel', { GET_BROWSER_MODEL_DOWNLOAD: () => ({ download }), DOWNLOAD_BROWSER_EMBED: () => ({ error: 'Connection lost' }) }); t.after(f.close);
+  f.q('#settings-models').open = true;
+  await waitFor(() => !f.q('#beta-browser-transfer').hidden, 'restored transfer');
+  assert.equal(f.q('#beta-browser-transfer-progress').hasAttribute('value'), false);
+  assert.match(f.q('#beta-browser-transfer-file').textContent, /1 MB/);
+  f.emit({ type: 'BROWSER_MODEL_DOWNLOAD_UPDATE', download: { ...download, state: 'error', error: 'Connection lost' } });
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Connection lost/);
+  assert.equal(f.q('#beta-browser-transfer-progress').hidden, true);
+  f.q('#beta-browser-transfer-retry').click(); await f.settle();
+  assert.equal(f.q('#beta-browser-transfer-retry').hidden, false);
+  assert.match(f.q('#beta-browser-transfer-status').textContent, /Connection lost/);
+});
+
 test('Ask prevents duplicate submissions, stops, and ignores all stale replies', async t => {
   const pending = [deferred(), deferred()]; let call = 0;
   const f = await ui('sidepanel', { ASK_QUESTION: () => pending[call++].promise, CANCEL_ASK: () => ({ cancelled: true }) }); t.after(f.close);
+  f.q('#beta-ask-memory').click();
   f.q('#beta-ask-input').value = 'First question'; f.submit('#beta-ask-form'); f.submit('#beta-ask-form');
   assert.equal(call, 1); assert.equal(f.q('#beta-ask-submit').disabled, true);
   const first = f.requests.find(m => m.type === 'ASK_QUESTION').options.requestId;
@@ -218,20 +281,26 @@ test('Ask prevents duplicate submissions, stops, and ignores all stale replies',
   pending[0].resolve({ answer: 'Old final answer', sources: [] }); await tick();
   assert.equal(f.q('#beta-ask-answer').hidden, true);
   assert.doesNotMatch(f.q('#beta-ask-log').textContent, /Stale/);
+  const second = f.requests.filter(m => m.type === 'ASK_QUESTION').at(-1).options.requestId;
+  f.emit({ type: 'ASK_PROGRESS', requestId: second, message: 'Read the saved passage' });
   pending[1].resolve({ answer: '**New answer** [1]', sources: [{ ...pages[0], index: 1, domain: 'example.test' }] }); await tick();
   assert.equal(f.q('#beta-ask-answer strong').textContent, 'New answer');
+  assert.equal(f.q('#beta-ask-activity').hidden, false);
+  assert.match(f.q('#beta-ask-log').textContent, /Read the saved passage/);
   f.q('#beta-ask-answer a').click();
   assert.equal(f.window.document.activeElement.id, 'ask-source-1');
-  assert.equal(f.q('#beta-ask-submit').disabled, false);
+  assert.equal(f.q('#beta-ask-submit').disabled, true);
   f.q('#beta-ask-clear').click();
   assert.equal(f.q('#beta-ask-input').value, '');
   assert.equal(f.q('#beta-ask-answer').hidden, true);
   assert.equal(f.q('#beta-ask-sources').children.length, 0);
+  assert.equal(f.q('#beta-ask-activity').hidden, true);
 });
 
 test('Clear stays clear if cancellation fails later', async t => {
   const cancel = deferred(), answer = deferred();
   const f = await ui('sidepanel', { ASK_QUESTION: () => answer.promise, CANCEL_ASK: () => cancel.promise }); t.after(f.close);
+  f.q('#beta-ask-memory').click();
   f.q('#beta-ask-input').value = 'Question'; f.submit('#beta-ask-form'); f.q('#beta-ask-clear').click();
   cancel.reject(Error('connection lost')); answer.resolve({ answer: 'Old answer' }); await tick();
   assert.equal(f.q('#beta-ask-status').textContent, '');
@@ -284,7 +353,7 @@ test('Logs exact Debug filter excludes higher levels and counts visible entries'
   assert.equal(f.window.document.querySelectorAll('.log-entry').length, 1);
   assert.match(f.q('#logs-list').textContent, /debug entry/);
   assert.equal(f.q('#logs-status').textContent, 'Showing 1 of 3 entries');
-  assert.match(f.q('#logs-settings-link').href, /#settings-advanced$/);
+  assert.match(f.q('#logs-settings-link').href, /#settings-logging$/);
 });
 
 test('Memory streams a backup through registered messages and validates it before restoring any pages', async t => {
@@ -372,7 +441,7 @@ test('Search Stop cancels the request and discards late results; Clear also canc
   assert.equal(f.q('#beta-search-stop').hidden,true);
   f.submit('#beta-search-form'); f.q('#beta-search-clear').click(); await tick();
   assert.equal(f.requests.filter(m=>m.type==='CANCEL_SEARCH').length,2);
-  assert.equal(f.q('#beta-search-status').textContent,'');
+  assert.equal(f.q('#beta-search-status').textContent,'1 page');
 });
 
 test('Memory Stop targets the running backfill and restores controls when cancelled', async t => {
@@ -387,4 +456,282 @@ test('Memory Stop targets the running backfill and restores controls when cancel
   assert.equal(f.q('#manage-backfill-stop').hidden,true);
   assert.equal(f.q('#manage-backfill-run').disabled,false);
   assert.match(f.q('#manage-backfill-status').textContent,/Stopped.*existing vectors/);
+});
+
+test('inline preview and source chooser send exact saved-page scopes and preserve the draft', async t => {
+  const more = { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs' };
+  const f = await ui('sidepanel', {
+    GET_PAGE_LIST: () => ({ pages: [pages[0], more] }),
+    GET_PAGE_PREVIEW: message => ({ page: { ...pages[0], url: message.url, snippet: 'Saved passage from the actual capture.' } }),
+    SEARCH_QUERY: () => ({ results: [pages[0], more].map(page => ({ ...page, snippet: 'Matched saved passage', score: .8 })) }),
+    ASK_QUESTION: message => ({ answer: 'Supported fact [1]', sources: [{ ...pages[0], url: message.options.scopeUrls[0], snippet: 'Supporting sentence', index: 1, domain: 'example.test' }] })
+  }); t.after(f.close);
+  f.q('#beta-search-input').value = 'pets'; f.submit('#beta-search-form'); await tick();
+  const page = f.q('#beta-search-results details'); page.open = true;
+  f.q('#beta-search-results .ask-this-page').click();
+  assert.equal(f.q('#beta-ask-submit').disabled, true);
+  f.q('#beta-ask-input').value = 'What matters?'; f.submit('#beta-ask-form'); await tick();
+  assert.deepEqual([...f.requests.find(message => message.type === 'ASK_QUESTION').options.scopeUrls], [pages[0].url]);
+  f.q('#beta-ask-answer a').click();
+  assert.equal(f.q('#ask-source-1 details').open, true);
+  f.q('#beta-ask-close').click();
+  f.q('#beta-ask-results').click();
+  assert.equal(f.q('#beta-ask-results').hidden, true);
+  f.q('#beta-ask-input').value = 'Compare the selected pages';
+  const checkbox = f.q('#beta-source-options input'); checkbox.checked = false; checkbox.dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.q('#beta-ask-input').value, 'Compare the selected pages');
+  assert.equal(f.q('#beta-source-label').textContent, 'Using 1 page');
+  f.submit('#beta-ask-form'); await tick();
+  assert.deepEqual([...f.requests.filter(message => message.type === 'ASK_QUESTION').at(-1).options.scopeUrls], [more.url]);
+  f.q('a[data-view="settings"]').click();
+  f.q('#beta-view-settings .utility-back').click();
+  assert.equal(f.q('#beta-search-input').value, 'pets');
+  assert.match(f.q('#beta-ask-answer').textContent, /Supported fact/);
+});
+
+test('changing the selected pages cancels Ask before accepting a late stream or answer', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { GET_PAGE_LIST: () => ({ pages: [pages[0], { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs' }] }), ASK_QUESTION: () => pending.promise }); t.after(f.close);
+  f.q('#beta-ask-results').click(); f.q('#beta-ask-input').value = 'Compare'; f.submit('#beta-ask-form');
+  const request = f.requests.find(message => message.type === 'ASK_QUESTION');
+  const checkbox = f.q('#beta-source-options input'); checkbox.checked = false; checkbox.dispatchEvent(new f.window.Event('change'));
+  assert.equal(f.requests.find(message => message.type === 'CANCEL_ASK').requestId, request.options.requestId);
+  f.emit({ type: 'ASK_ANSWER_UPDATE', requestId: request.options.requestId, chunk: 'Stale scope' });
+  pending.resolve({ answer: 'Stale final', sources: [] }); await tick();
+  assert.equal(f.q('#beta-ask-answer').hidden, true);
+  assert.equal(f.q('#beta-ask-input').value, 'Compare');
+});
+
+test('menu mounts each real tool once and Memory reads the same backend library', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ ...pages[0], text: 'Real stored capture text.', chunks: [{ text: 'Real stored capture text.', embedding: [] }] });
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  f.q('a[data-view="manage"]').click(); await f.settle(); await tick();
+  assert.match(f.q('#manage-rows').textContent, /Cats/);
+  assert.equal(f.q('#manage-count').textContent, '1 page');
+  f.q('#beta-view-manage .primary-button[href]').click(); await f.settle(); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /Real stored capture text/);
+  f.q('a[data-view="logs"]').click(); await tick();
+  f.q('#logs-settings-link').click();
+  assert.equal(f.q('#settings-advanced').open, true);
+  assert.equal(f.q('#settings-logging').open, true);
+  await db.savePageRecord({ ...pages[0], url: 'https://example.test/dogs', title: 'Dogs', text: 'A new capture.', chunks: [{ text: 'A new capture.', embedding: [] }] });
+  f.q('a[data-view="manage"]').click(); await tick();
+  await f.settle(); await tick();
+  assert.match(f.q('#manage-rows').textContent, /Dogs/);
+  assert.equal(f.q('#manage-count').textContent, '2 pages');
+  assert.equal(f.window.document.querySelectorAll('#manage-rows').length, 1);
+  assert.equal(f.window.document.querySelectorAll('#beta-ask-form').length <= 1, true);
+});
+
+test('Refresh pages reruns the active query against the current library', async t => {
+  let results = [{ ...pages[0], snippet: 'Saved text', score: .8 }];
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => ({ results }) }); t.after(f.close);
+  f.q('#beta-search-input').value = 'pets'; f.submit('#beta-search-form'); await tick();
+  assert.equal(f.q('#beta-search-status').textContent, '1 page');
+  results = [...results, { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs', snippet: 'New saved text', score: .7 }];
+  f.q('#beta-refresh-recents').click(); await tick();
+  assert.equal(f.q('#beta-search-input').value, 'pets');
+  assert.equal(f.q('#beta-search-status').textContent, '2 pages');
+  assert.match(f.q('#beta-search-results').textContent, /Dogs/);
+});
+
+test('follow-up questions keep history and older citations have unique targets', async t => {
+  const f = await ui('sidepanel', { ASK_QUESTION: () => ({ answer: 'A fact [1]', sources: [{ ...pages[0], snippet: 'Evidence', index: 1, domain: 'example.test' }] }) }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'First question'; f.submit('#beta-ask-form'); await tick();
+  f.q('#beta-ask-input').value = 'Explain that'; f.submit('#beta-ask-form'); await tick();
+  const request = f.requests.filter(message => message.type === 'ASK_QUESTION').at(-1);
+  assert.equal(request.options.history[0].question, 'First question');
+  const citation = f.q('#beta-ask-history .beta-ask-answer a'); citation.click();
+  assert.equal(f.q('#ask-history-0-source-1 details').open, true);
+  const ids = [...f.window.document.querySelectorAll('[id]')].map(element => element.id);
+  assert.equal(ids.length, new Set(ids).size);
+});
+
+test('panel uses one contextual menu without a duplicate title across every real page', async t => {
+  const f = await ui('sidepanel', { GET_LOGS: () => ({ logs: [] }), LIST_HIGHLIGHT_DATES: () => ({ dates: [], total: 0 }) }); t.after(f.close);
+  assert.equal(f.q('.browser-header'), null);
+  assert.ok(f.q('.search-row > .menu-anchor'));
+  for (const view of ['settings', 'manage', 'highlights', 'logs', 'sidepanel']) {
+    f.q(`a[data-view="${view}"]`).click(); await f.settle(); await tick();
+    const target = f.q(`#beta-view-${view === 'sidepanel' ? 'search' : view}`);
+    assert.equal(target.hidden, false);
+    assert.ok(target.querySelector('.menu-anchor'));
+    assert.equal(f.window.document.querySelectorAll('.menu-anchor').length, 1);
+  }
+});
+
+test('capture queue hides when idle, opens from Menu and follows active and failed work', async t => {
+  let queue = [];
+  const f = await ui('sidepanel', { GET_PROCESSING: () => ({ queue }) }); t.after(f.close);
+  const details = f.q('#beta-queue-section');
+  assert.equal(details.hidden, true);
+  [...f.window.document.querySelectorAll('.panel-menu button')].find(button => button.textContent === 'Capture queue').click(); await f.settle();
+  assert.equal(details.hidden, false); assert.equal(details.open, true);
+  details.open = false; await waitFor(() => details.hidden, 'the idle queue to hide after its native toggle event');
+  assert.equal(details.hidden, true);
+  queue = [{ ...pages[0], status: 'processing', attempts: 1 }]; await f.poll();
+  assert.equal(details.hidden, false); assert.equal(details.open, false);
+  assert.match(f.q('#beta-queue-label').textContent, /1 capture in progress/);
+  assert.equal(f.q('#beta-capture-status button').disabled, true);
+  queue[0].status = 'failed'; await f.poll();
+  assert.match(f.q('#beta-queue-label').textContent, /1 failed/);
+  f.q('#beta-capture-status button').click(); await f.settle();
+  assert.equal(f.requests.find(message => message.type === 'RETRY_PROCESSING').url, pages[0].url);
+  queue = []; await f.poll(); assert.equal(details.hidden, true);
+});
+
+test('empty memory provides capture and setup actions without an empty queue or count', async t => {
+  const f = await ui('sidepanel', { GET_PAGE_LIST: () => ({ pages: [] }), CAPTURE_ACTIVE_TAB: () => ({ status: 'queued' }) }); t.after(f.close);
+  assert.equal(f.q('.results-toolbar').hidden, true);
+  assert.equal(f.q('#beta-queue-section').hidden, true);
+  f.q('.wr-empty-memory .primary-button').click(); await f.settle();
+  assert.ok(f.requests.some(message => message.type === 'CAPTURE_ACTIVE_TAB'));
+  f.q('.wr-empty-memory .text-button').click();
+  assert.equal(f.q('#beta-view-settings').hidden, false);
+  assert.equal(f.q('#settings-capture').open, true);
+  assert.ok(!f.requests.some(message => message.type === 'ASK_QUESTION'));
+});
+
+test('capture policy, theme, logging and calibration save through their real handlers', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('a[data-view="settings"]').click();
+  f.q('#beta-allowlist-input').value = 'EXAMPLE.TEST\n*.docs.test';
+  f.q('#beta-denylist-input').value = 'private.example.test';
+  f.q('#beta-save-rules').click(); await f.settle();
+  assert.deepEqual(backend.stored.betaSettings.allowlist, ['example.test', '*.docs.test']);
+  assert.deepEqual(backend.stored.betaSettings.denylist, ['private.example.test']);
+  f.q('#beta-pause-toggle').checked = false; f.change('#beta-pause-toggle', ''); await f.settle();
+  assert.equal(backend.stored.betaSettings.paused, false);
+  assert.match(f.q('#beta-capture-policy-note').textContent, /capture is on/);
+  f.change('#beta-theme-select', 'dark'); await f.settle();
+  assert.equal(backend.stored.betaSettings.theme, 'dark'); assert.equal(f.window.document.documentElement.dataset.theme, 'dark');
+  f.change('#beta-log-level', 'off'); await f.settle();
+  assert.equal(backend.stored.betaSettings.logLevel, 'off');
+  f.change('#beta-calib-sim', '.75'); await f.settle();
+  assert.equal((await backend.send({ type: 'GET_CALIBRATION' })).calibration.wSim, .75);
+  assert.ok(!f.requests.some(message => message.type === 'ASK_QUESTION'));
+});
+
+test('Memory filters, sorts, selects and deletes the intended saved records', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  for (const [title, manual] of [['Cats', false], ['Dogs', true]]) await db.savePageRecord({ url: `https://example.test/${title}`, title, manual, text: title, timestamp: title === 'Cats' ? 10 : 20, chunks: [] });
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('a[data-view="manage"]').click(); await f.settle();
+  f.change('#manage-sort', 'title-asc');
+  assert.match(f.q('#manage-rows > article').textContent, /Cats/);
+  f.q('#manage-filter-manual').checked = true; f.change('#manage-filter-manual', '');
+  assert.equal(f.q('#manage-count').textContent, '1 page'); assert.match(f.q('#manage-rows').textContent, /Dogs/);
+  f.q('#manage-select').click(); f.q('#manage-select-all').checked = true; f.change('#manage-select-all', '');
+  assert.equal(f.q('#manage-delete').disabled, false); f.q('#manage-delete').click(); await f.settle();
+  assert.deepEqual(Array.from(await db.listAllPages(), page => page.title), ['Cats']);
+});
+
+test('Highlights validates ranges, paginates and opens the actual captured sources', async t => {
+  const dates = [{ date: '2026-11-14', count: 1 }, { date: '2026-11-13', count: 1 }];
+  const f = await ui('highlights', {
+    LIST_HIGHLIGHT_DATES: message => ({ dates: dates.slice(message.offset, message.offset + message.limit), total: dates.length }),
+    GET_HIGHLIGHTS: () => ({ highlight: { text: '1. Cats', entries: pages } })
+  }); t.after(f.close);
+  f.q('#highlight-from').value = '2026-11-15'; f.q('#highlight-to').value = '2026-11-14'; f.submit('#highlight-filter');
+  assert.match(f.q('#highlight-status').textContent, /From must be/);
+  f.q('#highlight-from').value = ''; f.q('#highlight-to').value = ''; f.q('#highlight-size').value = '1'; f.submit('#highlight-filter'); await f.settle();
+  assert.equal(f.q('#highlight-next').disabled, false); f.q('#highlight-next').click(); await f.settle();
+  assert.match(f.q('#highlight-list').textContent, /November 13/);
+  assert.equal(f.q('.highlight-source').href, pages[0].url);
+  assert.equal(f.q('#highlight-next').disabled, true);
+});
+
+test('Logs recovers from a refresh error even if the entries have not changed', async t => {
+  let failed = false;
+  const f = await ui('logs', { GET_LOGS: () => { if (failed) throw Error('Connection lost'); return { logs: [{ id: 1, level: 'warn', message: 'Capture retry', data: { url: pages[0].url } }] }; } }); t.after(f.close);
+  failed = true; await f.poll(); assert.match(f.q('#logs-status').textContent, /Failed/);
+  failed = false; await f.poll(); assert.equal(f.q('#logs-status').dataset.variant, 'info');
+  assert.doesNotMatch(f.q('#logs-status').textContent, /Failed/);
+});
+
+test('Search, saved previews and Memory remain usable when model endpoints are unavailable', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const bg = await backend.load('src/background/orchestration/index.ts', { fetch: async () => Response.json({ error: 'No model available' }, { status: 404 }) }); bg.orchestrateLifecycle();
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ ...pages[0], text: 'Cats have whiskers.', chunks: [{ text: 'Cats have whiskers.', embedding: [] }] });
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('#beta-search-input').value = 'whiskers'; f.submit('#beta-search-form'); await f.settle();
+  assert.equal(f.q('#beta-search-status').textContent, '1 page'); assert.match(f.q('#beta-search-results').textContent, /Cats have whiskers/);
+  f.q('a[data-view="manage"]').click(); await f.settle(); assert.equal(f.q('#manage-count').textContent, '1 page');
+  f.q('#beta-view-manage .primary-button[href]').click(); await f.settle(); assert.match(f.q('#beta-search-results').textContent, /Cats have whiskers/);
+  assert.ok(!f.requests.some(message => message.type === 'ASK_QUESTION'));
+});
+
+test('downloaded model rows show stored revisions, select without downloading and confirm exact removal', async t => {
+  let config = { ...DEFAULT_EMBEDDING_CONFIG }, models = [
+    { model: config.browserModel, revision: config.browserRevision, sizeBytes: 123_000_000, fileCount: 4, hasWeights: true },
+    { model: 'custom/model', revision: 'partial-revision', sizeBytes: null, fileCount: 1, hasWeights: false }
+  ];
+  const pending = deferred();
+  const f = await ui('sidepanel', {
+    GET_EMBEDDING_CONFIG: () => ({ config }), LIST_BROWSER_MODELS: () => ({ models }),
+    SET_EMBEDDING_CONFIG: message => ({ config: config = { ...config, ...message.payload } }),
+    DELETE_BROWSER_MODEL: async message => { await pending.promise; models = models.filter(model => model.model !== message.model || model.revision !== message.revision); return { deletedFiles: 4 }; }
+  }); t.after(f.close);
+  assert.ok(!f.requests.some(message => message.type === 'LIST_BROWSER_MODELS'));
+  f.q('#settings-downloads').open = true;
+  await waitFor(() => f.window.document.querySelectorAll('.wr-model-download').length === 2, 'cached model rows');
+  assert.match(f.q('#beta-browser-models-list').textContent, /123|117/);
+  assert.match(f.q('#beta-browser-models-list').textContent, /Partial download.*Size unavailable/);
+  f.q('.wr-model-download .secondary-button').click();
+  await waitFor(() => f.q('#beta-browser-models-status').textContent.includes('Model selected'), 'model selection');
+  assert.equal(config.provider, 'browser');
+  assert.match(f.q('.wr-model-download summary').textContent, /Selected/);
+  assert.ok(!f.requests.some(message => ['DOWNLOAD_BROWSER_EMBED', 'BACKFILL_EMBEDDINGS'].includes(message.type)));
+  f.q('.wr-model-download .danger-text').click();
+  assert.ok(!f.requests.some(message => message.type === 'DELETE_BROWSER_MODEL'));
+  assert.equal(f.q('.wr-model-download .danger-text').textContent, 'Confirm removal');
+  f.q('.wr-model-download .button-row .text-button:not(.danger-text)').click();
+  assert.equal(f.q('.wr-model-download .danger-text').textContent, 'Remove download');
+  f.q('.wr-model-download .danger-text').click(); f.q('.wr-model-download .danger-text').click(); f.q('.wr-model-download .danger-text').click();
+  assert.equal(f.requests.filter(message => message.type === 'DELETE_BROWSER_MODEL').length, 1);
+  const removed = f.requests.find(message => message.type === 'DELETE_BROWSER_MODEL');
+  assert.equal(removed.model, DEFAULT_EMBEDDING_CONFIG.browserModel); assert.equal(removed.revision, DEFAULT_EMBEDDING_CONFIG.browserRevision);
+  assert.equal(f.q('#beta-refresh-browser-models').disabled, true);
+  pending.resolve(); await waitFor(() => !f.q('#beta-refresh-browser-models').disabled, 'removal to finish');
+  assert.equal(f.window.document.querySelectorAll('.wr-model-download').length, 1);
+  assert.match(f.q('#beta-browser-models-list').textContent, /partial-revision/);
+});
+
+test('download refresh failures remain visible after a successful deletion', async t => {
+  let fail = false;
+  const f = await ui('sidepanel', {
+    LIST_BROWSER_MODELS: () => { if (fail) throw Error('Cache unavailable'); return { models: [{ model: 'org/model', revision: 'pinned', sizeBytes: 100, fileCount: 1, hasWeights: true }] }; },
+    DELETE_BROWSER_MODEL: () => { fail = true; return { deletedFiles: 1 }; }
+  }); t.after(f.close);
+  f.q('#settings-downloads').open = true;
+  await waitFor(() => f.q('.wr-model-download'), 'model inventory'); f.q('.wr-model-download .danger-text').click(); f.q('.wr-model-download .danger-text').click();
+  await waitFor(() => !f.q('#beta-refresh-browser-models').disabled, 'refresh failure');
+  assert.equal(f.q('#beta-browser-models-status').dataset.variant, 'error');
+  assert.match(f.q('#beta-browser-models-status').textContent, /Cache unavailable/);
+  assert.doesNotMatch(f.q('#beta-browser-models-status').textContent, /Download removed/);
+});
+
+test('model inventory and deletion use registered handlers without touching captured records', async t => {
+  let models = [{ model: 'org/model', revision: 'one', sizeBytes: 1234, fileCount: 2, hasWeights: true }]; const calls = [];
+  const backend = providerFixture('http://localhost:11434', [], { sendOffscreenMessage: async message => {
+    calls.push(message);
+    if (message.type === 'OFFSCREEN_LIST_BROWSER_MODELS') return { models };
+    if (message.type === 'OFFSCREEN_REMOVE_BROWSER_MODEL') { models = []; return { deletedFiles: 2 }; }
+    return { runtimeAvailable: true };
+  } }); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ ...pages[0], text: 'Keep this captured content.', chunks: [{ text: 'Keep this captured content.', embedding: [1, 2], embeddingKey: 'original' }] });
+  const before = JSON.stringify(await db.getPageRecord(pages[0].url));
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  f.q('#settings-downloads').open = true; await waitFor(() => f.q('.wr-model-download'), 'stored cache inventory');
+  f.q('.wr-model-download .danger-text').click(); f.q('.wr-model-download .danger-text').click();
+  await waitFor(() => f.q('#beta-browser-models-status').textContent.includes('Download removed'), 'cache deletion');
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.find(message => message.type === 'OFFSCREEN_REMOVE_BROWSER_MODEL'))), { type: 'OFFSCREEN_REMOVE_BROWSER_MODEL', model: 'org/model', revision: 'one' });
+  assert.equal(JSON.stringify(await db.getPageRecord(pages[0].url)), before);
+  assert.match(f.q('#beta-browser-models-list').textContent, /No browser models downloaded/);
 });

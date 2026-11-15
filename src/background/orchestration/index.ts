@@ -8,6 +8,10 @@ import {
   updateEmbeddingConfig,
   getBrowserEmbedStatus,
   prefetchBrowserEmbeddings,
+  listBrowserModels,
+  deleteBrowserModel,
+  getBrowserModelDownload,
+  cancelBrowserModelDownload,
   probeBrowserEmbeddingRuntime
 } from '../embeddings/index';
 import { searchStoredPages } from '../search/index';
@@ -18,6 +22,7 @@ import {
   exportBackupPage,
   importBackupPage,
   getManagePages,
+  getPagePreview,
   importManagePages
 } from '../manage/index';
 import { getHighlightForDate, listHighlightDates } from '../highlights/index';
@@ -39,7 +44,7 @@ type RuntimeMessage =
   | { type: 'GET_EMBEDDING_CONFIG' }
   | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig>; acknowledgeRemoteOrigin?: boolean }
   | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string }
-  | { type: 'ASK_QUESTION'; question: string; options?: { useSearch?: boolean; maxResults?: number; requestId?: string } }
+  | { type: 'ASK_QUESTION'; question: string; options?: { useSearch?: boolean; maxResults?: number; requestId?: string; scopeUrls?: string[]; history?: Array<{ question: string; answer: string }> } }
   | { type: 'GET_MODEL_SETTINGS' }
   | { type: 'SET_MODEL'; key: 'chatModel' | 'summaryModel'; value?: string }
   | { type: 'LIST_MODELS' }
@@ -48,6 +53,7 @@ type RuntimeMessage =
   | { type: 'SET_PROVIDER_SETTING'; providerId: string; key: string; value?: string; acknowledgeRemoteOrigin?: boolean }
   | { type: 'PROVIDER_ACTION'; providerId: string; action: string; baseOverride?: string }
   | { type: 'GET_PAGE_LIST' }
+  | { type: 'GET_PAGE_PREVIEW'; url: string }
   | { type: 'DELETE_PAGE'; url?: string; urls?: string[] }
   | { type: 'GET_ALL_PAGES' }
   | { type: 'GET_BACKUP_PAGE'; afterUrl?: string }
@@ -63,7 +69,11 @@ type RuntimeMessage =
   | { type: 'SET_CALIBRATION'; payload?: { wSim?: number; wLLM?: number } }
   | { type: 'BACKFILL_EMBEDDINGS'; requestId?: string; limit?: number; force?: boolean; urls?: string[] }
   | { type: 'GET_BROWSER_EMBED_STATUS'; probe?: boolean }
-  | { type: 'DOWNLOAD_BROWSER_EMBED' };
+  | { type: 'DOWNLOAD_BROWSER_EMBED'; requestId?: string; model?: string; revision?: string }
+  | { type: 'GET_BROWSER_MODEL_DOWNLOAD' }
+  | { type: 'CANCEL_BROWSER_MODEL_DOWNLOAD'; requestId: string }
+  | { type: 'LIST_BROWSER_MODELS' }
+  | { type: 'DELETE_BROWSER_MODEL'; model: string; revision: string };
 
 type SendResponse = (response?: Record<string, unknown>) => void;
 type RuntimeHandler<K extends RuntimeMessage['type']> = (
@@ -213,6 +223,8 @@ const runtimeHandlers: RuntimeHandlerMap = {
       sendResponse
     ),
 
+  GET_PAGE_PREVIEW: (message, sendResponse) => respondWith(getPagePreview(String(message.url || '')).then(page => ({ page })), sendResponse),
+
   GET_PAGE_LIST: (_message, sendResponse) =>
     respondWith(
       getManagePages().then((pages) => ({ pages })),
@@ -313,8 +325,16 @@ const runtimeHandlers: RuntimeHandlerMap = {
           return false;
         })(),
 
-  DOWNLOAD_BROWSER_EMBED: (_message, sendResponse) =>
-    respondWith(prefetchBrowserEmbeddings().then(() => ({ ok: true })), sendResponse)
+  DOWNLOAD_BROWSER_EMBED: (message, sendResponse) =>
+    respondWith(prefetchBrowserEmbeddings({ requestId: message.requestId, model: message.model, revision: message.revision }).then(() => ({ ok: true })), sendResponse),
+
+  GET_BROWSER_MODEL_DOWNLOAD: (_message, sendResponse) => respondWith(getBrowserModelDownload().then(download => ({ download })), sendResponse),
+
+  CANCEL_BROWSER_MODEL_DOWNLOAD: (message, sendResponse) => respondWith(cancelBrowserModelDownload(String(message.requestId || '')), sendResponse),
+
+  LIST_BROWSER_MODELS: (_message, sendResponse) => respondWith(listBrowserModels().then(models => ({ models })), sendResponse),
+
+  DELETE_BROWSER_MODEL: (message, sendResponse) => respondWith(deleteBrowserModel(String(message.model || ''), String(message.revision || '')), sendResponse)
 };
 
 export function orchestrateLifecycle(): void {

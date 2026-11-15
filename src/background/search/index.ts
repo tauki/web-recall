@@ -23,6 +23,7 @@ export type SearchResult = {
 };
 
 export type SearchOptions = {
+  scopeUrls?: string[];
   signal?: AbortSignal;
   rewrite?: boolean;
   rerank?: boolean;
@@ -96,10 +97,10 @@ function textFallbackScore(page: PageRecord, tokens: string[]): { score: number;
   return { score: score * simWeight, snippet };
 }
 
-async function fallbackSearch(query: string, limit: number): Promise<SearchResult[]> {
+async function fallbackSearch(query: string, limit: number, scopeUrls?: string[]): Promise<SearchResult[]> {
   const tokens = tokenize(query);
   if (!tokens.length) return [];
-  const pages = await storageManager.listAllPages();
+  const pages = scopeUrls ? (await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)))).filter((page): page is PageRecord => Boolean(page)) : await storageManager.listAllPages();
   const scored: SearchResult[] = pages
     .map((page) => {
       const { score, snippet } = textFallbackScore(page, tokens);
@@ -427,23 +428,23 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
   options.signal?.throwIfAborted();
   const embeddingKey = embeddingSpaceKey(getEmbeddingConfig());
   const embeddings = await computeEmbeddingsForQueries(variations, options.signal).catch((err) => { options.signal?.throwIfAborted(); console.warn(err); return []; });
-  if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit);
+  if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit, options.scopeUrls);
   options.signal?.throwIfAborted();
   const validEmbeddings = embeddings.filter((emb) => Array.isArray(emb) && emb.length);
   if (!validEmbeddings.length) {
-    return fallbackSearch(normalized, limit);
+    return fallbackSearch(normalized, limit, options.scopeUrls);
   }
 
   try {
     await ensureOffscreenDocument();
-    const topResp = await sendOffscreenMessage<OffscreenTopPageResponse>({
+    const topResp = options.scopeUrls ? { pages: options.scopeUrls.map(url => ({ url })) } : await sendOffscreenMessage<OffscreenTopPageResponse>({
       type: 'OFFSCREEN_TOP_PAGES',
       variationEmbeddings: validEmbeddings,
       embeddingKey,
       topN: Math.max(limit * 3, 30)
     });
     const pageUrls = (topResp.pages || []).map((p) => p.url);
-    if (!pageUrls.length) return fallbackSearch(normalized, limit);
+    if (!pageUrls.length) return fallbackSearch(normalized, limit, options.scopeUrls);
     const chunkResp = await sendOffscreenMessage<OffscreenScoreResponse>({
       type: 'OFFSCREEN_SCORE_CHUNKS',
       pageUrls,
@@ -457,7 +458,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       const bw = b.weightedScore ?? b.score ?? 0;
       return bw - aw;
     });
-    const dedupedCandidates = mergeRetrievalResults(dedupeByUrl(candidates), await fallbackSearch(normalized, limit));
+    const dedupedCandidates = mergeRetrievalResults(dedupeByUrl(candidates), await fallbackSearch(normalized, limit, options.scopeUrls));
     const reranked = await rerankWithCrossEncoder(normalized, dedupedCandidates, options);
     const calibration = getCalibrationSnapshot();
     const dynamicLimit = Math.max(1, Math.min(50, Math.round(limit * (1 + calibration.wLLM))));
@@ -478,12 +479,13 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
   } catch (err) {
     options.signal?.throwIfAborted();
     console.warn('[beta-background:search] offscreen search failed, falling back', err);
-    const fallback = await fallbackSearch(normalized, limit);
+    const fallback = await fallbackSearch(normalized, limit, options.scopeUrls);
     return dedupeByUrl(fallback).slice(0, limit);
   }
 }
 
 export async function searchStoredPages(query: string, limit = 10, options: SearchOptions = {}): Promise<SearchResult[]> {
   options.signal?.throwIfAborted();
-  return abortable(semanticSearchInternal(query, limit, options), options.signal);
+  const results = await abortable(semanticSearchInternal(query, limit, options), options.signal);
+  return options.scopeUrls ? results.filter(hit => options.scopeUrls!.includes(hit.url)) : results;
 }

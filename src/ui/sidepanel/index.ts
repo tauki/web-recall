@@ -1,344 +1,21 @@
-import { installSharedStyles, relativeDate } from '../shared/presentation';
+import { installSharedStyles, createToolNavigation, createPageEntry, iconMarkup, icon, navigateTo, type AppView } from '../shared/presentation';
 import { renderAnswer } from '../shared/answer';
 import { renderSettingsPanel } from './settings/index';
+import { mountManage } from '../manage/index';
+import { mountHighlights } from '../highlights/index';
+import { mountLogs } from '../logs/index';
 import { startPolling } from '../shared/polling';
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 import { DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
 import { getProviderOriginInfo } from '../../shared/providerOrigin';
 
-type SearchResult = {
-  url: string;
-  title: string;
-  snippet: string;
-  timestamp: number;
-  score: number;
-  hitsFromPage?: number;
-  crossScore?: number;
-  textMatch?: boolean;
-};
-
-type RecentPage = {
-  url: string;
-  title: string;
-  timestamp: number;
-};
-
-type AskSource = {
-  index: number;
-  title: string;
-  url: string;
-  snippet: string;
-  domain: string;
-};
-
-function ensureStyles(): void {
-  if (document.getElementById('beta-sidepanel-style')) return;
-  const style = document.createElement('style');
-  style.id = 'beta-sidepanel-style';
-  style.textContent = `
-    :root, body {
-      margin: 0;
-      padding: 0;
-      overflow-x: hidden;
-    }
-    :root {
-      --bg: #f5f5f7;
-      --surface: #ffffff;
-      --surface-muted: #f1f5f9;
-      --border: #d1d5db;
-      --text: #0f172a;
-      --muted: #4b5563;
-      --muted-strong: #6b7280;
-      --accent: #4f46e5;
-      --accent-contrast: #ffffff;
-      --link: #2563eb;
-      --shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
-    }
-    :root[data-theme="dark"] {
-      --bg: #0a0f1a;
-      --surface: #0f172a;
-      --surface-muted: #0b1220;
-      --border: #1e293b;
-      --text: #e2e8f0;
-      --muted: #cbd5e1;
-      --muted-strong: #94a3b8;
-      --accent: #8b5cf6;
-      --accent-contrast: #0b1020;
-      --link: #a5b4fc;
-      --shadow: 0 1px 2px rgba(0, 0, 0, 0.55);
-    }
-    body {
-      background: var(--bg);
-      color: var(--text);
-    }
-    .beta-sidepanel-shell {
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      background: var(--bg);
-      overflow: hidden;
-      max-width: 100%;
-    }
-    a {
-      color: var(--link);
-    }
-    .beta-sidepanel-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      padding: 10px 12px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      overflow: hidden;
-    }
-    .beta-header-actions {
-      display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .beta-header-actions button {
-      border: 1px solid var(--border);
-      background: var(--surface-muted);
-      border-radius: 6px;
-      padding: 6px 10px;
-      cursor: pointer;
-      font-weight: 600;
-      color: var(--text);
-    }
-    .beta-sidepanel-tabs {
-      display: flex;
-      border-bottom: 1px solid var(--border);
-      background: var(--surface);
-      overflow-x: auto;
-    }
-    .beta-remote-provider-banner {
-      padding: 10px 12px;
-      border-bottom: 1px solid var(--border);
-      background: #fef3c7;
-      color: #7c2d12;
-      font-size: 0.9rem;
-    }
-    :root[data-theme="dark"] .beta-remote-provider-banner {
-      background: #3f2c00;
-      color: #fde68a;
-    }
-    .beta-sidepanel-tabs button {
-      flex: 1;
-      padding: 10px 12px;
-      border: none;
-      background: transparent;
-      cursor: pointer;
-      font-weight: 600;
-      color: var(--muted);
-    }
-    .beta-sidepanel-tabs button.active {
-      color: var(--text);
-      border-bottom: 3px solid var(--accent);
-    }
-    .beta-sidepanel-view {
-      flex: 1;
-      overflow-y: auto;
-      padding: 12px;
-      box-sizing: border-box;
-      overflow-x: hidden;
-      width: 100%;
-    }
-    .beta-search-form {
-      display: flex;
-      gap: 8px;
-      margin-bottom: 12px;
-    }
-    .beta-search-form input {
-      flex: 1;
-      padding: 8px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      font-size: 0.95rem;
-      background: var(--surface);
-      color: var(--text);
-    }
-    .beta-search-form button {
-      padding: 8px 14px;
-      border-radius: 6px;
-      border: none;
-      background: var(--accent);
-      color: var(--accent-contrast);
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .beta-search-results {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-    .beta-capture-status {
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 10px;
-      margin-bottom: 12px;
-    }
-    .beta-capture-setup {
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 10px;
-      margin-bottom: 12px;
-      box-shadow: var(--shadow);
-    }
-    .beta-capture-setup h2 {
-      margin: 0 0 6px 0;
-      font-size: 1rem;
-    }
-    .beta-capture-setup p {
-      margin: 0 0 8px 0;
-      color: var(--muted);
-      font-size: 0.9rem;
-    }
-    .beta-capture-setup-actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
-    }
-    .beta-capture-setup-actions button {
-      padding: 8px 12px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--surface-muted);
-      color: var(--text);
-      cursor: pointer;
-      font-weight: 600;
-    }
-    .beta-capture-status ul {
-      list-style: none;
-      margin: 0;
-      padding: 0;
-    }
-    .beta-capture-status li {
-      padding: 4px 0;
-      border-bottom: 1px solid #f3f4f6;
-      font-size: 0.85rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-    }
-    .beta-capture-status li:last-child {
-      border-bottom: none;
-    }
-    .beta-queue-actions {
-      display: flex;
-      gap: 4px;
-    }
-    .beta-queue-actions button {
-      padding: 4px 8px;
-      border-radius: 6px;
-      border: 1px solid var(--border);
-      background: var(--surface);
-      cursor: pointer;
-      font-size: 0.75rem;
-      color: var(--text);
-    }
-    .beta-result-card {
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 10px;
-      box-shadow: var(--shadow);
-    }
-    .beta-result-card h3 {
-      margin: 0 0 4px 0;
-      font-size: 1rem;
-      color: var(--text);
-    }
-    .beta-result-card p {
-      margin: 0 0 6px 0;
-      color: var(--muted);
-      font-size: 0.9rem;
-      white-space: pre-wrap;
-    }
-    .beta-result-meta {
-      display: flex;
-      justify-content: space-between;
-      font-size: 0.8rem;
-      color: var(--muted-strong);
-    }
-    .beta-result-meta a {
-      color: var(--accent);
-    }
-    .beta-status {
-      font-size: 0.85rem;
-      margin-bottom: 6px;
-      min-height: 1em;
-      color: var(--text);
-    }
-    .beta-status[data-variant="error"] {
-      color: #ef4444;
-    }
-    .beta-ask-form {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      margin-bottom: 10px;
-      width: 100%;
-    }
-    .beta-ask-form textarea {
-      width: 100%;
-      min-height: 120px;
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 8px;
-      font-size: 0.95rem;
-      box-sizing: border-box;
-      background: var(--surface);
-      color: var(--text);
-    }
-    .beta-ask-options {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      font-size: 0.85rem;
-      color: var(--muted);
-    }
-    .beta-ask-actions {
-      display: flex;
-      justify-content: flex-end;
-    }
-    .beta-ask-actions button {
-      padding: 8px 14px;
-      border-radius: 6px;
-      border: none;
-      background: var(--accent);
-      color: var(--accent-contrast);
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .beta-ask-log {
-      font-size: 0.85rem;
-      color: var(--muted-strong);
-      min-height: 1.5em;
-      max-height: 220px;
-      overflow-y: auto;
-      margin-bottom: 6px;
-    }
-    .beta-ask-log[data-variant="error"] {
-      color: #ef4444;
-    }
-    .beta-ask-answer {
-      background: var(--surface);
-      border-radius: 8px;
-      border: 1px solid var(--border);
-      padding: 10px;
-      margin-bottom: 10px;
-      white-space: pre-wrap;
-      color: var(--text);
-    }
-  `;
-  document.head.appendChild(style);
-}
+type SearchResult = { url: string; title: string; snippet: string; timestamp: number; score: number; hitsFromPage?: number; crossScore?: number; textMatch?: boolean };
+type SavedPage = { url: string; title: string; timestamp?: number; snippet?: string };
+type AskSource = { index: number; title: string; url: string; snippet: string; domain: string; evidence?: string; excerpts?: string[] };
+type AskTurn = { question: string; answer: string; sources: AskSource[] };
+type AskSession = { draft: string; turns: AskTurn[]; activity: string[] };
+type AskController = { open: (target: HTMLElement, pages: SavedPage[] | null, title: string) => void; close: () => void; invalidate: () => void };
 
 function formatDate(timestamp: number): string {
   try {
@@ -378,15 +55,6 @@ async function initTheme(): Promise<void> {
   bindSystemThemeListener();
 }
 
-function openToolPage(path: string): void {
-  try {
-    const url = chrome.runtime.getURL(path);
-    chrome.tabs.create({ url });
-  } catch (err) {
-    console.warn('[beta-ui:sidepanel] openToolPage failed', err);
-  }
-}
-
 async function refreshRemoteProviderBanner(
   banner: HTMLElement | null,
   settingsOverride?: BetaSettings
@@ -417,624 +85,371 @@ function replaceWithMessage(container: HTMLElement, message: string, tagName = '
   container.replaceChildren(node);
 }
 
-function buildResultCard(params: {
-  url: string;
-  title: string;
-  snippet?: string;
-  meta: string[];
-  headingPrefix?: string;
-  details?: string[];
-}): HTMLElement {
-  const article = document.createElement('article');
-  article.className = 'beta-result-card';
 
-  const heading = document.createElement('h3');
-  if (params.headingPrefix) {
-    heading.append(document.createTextNode(params.headingPrefix));
-  }
-  const link = document.createElement('a');
-  link.href = params.url;
-  link.target = '_blank';
-  link.rel = 'noreferrer';
-  link.textContent = params.title;
-  heading.appendChild(link);
-  article.appendChild(heading);
-
-  if (params.snippet) {
-    const body = document.createElement('p');
-    body.textContent = params.snippet;
-    article.appendChild(body);
-  }
-
-  const meta = document.createElement('div');
-  meta.className = 'beta-result-meta';
-  params.meta
-    .filter(Boolean)
-    .forEach((item) => {
-      const span = document.createElement('span');
-      span.textContent = item;
-      meta.appendChild(span);
-    });
-  article.appendChild(meta);
-  if (params.details?.length) {
-    const details = document.createElement('details'); details.className = 'wr-match-details';
-    const summary = document.createElement('summary'); summary.textContent = 'Match details'; details.append(summary);
-    for (const text of params.details.filter(Boolean)) { const p = document.createElement('p'); p.textContent = text; details.append(p); }
-    article.append(details);
-  }
-
-  return article;
-}
-
-function createSearchView(container: HTMLElement): void {
+function createAskView(container: HTMLElement): AskController {
+  container.id = 'beta-ask-host'; container.hidden = true;
   container.innerHTML = `
-    <form class="beta-search-form" id="beta-search-form">
-      <input type="search" id="beta-search-input" placeholder="Search captured pages" aria-label="Search query" />
-      <button type="submit">Search</button>
-      <button type="button" id="beta-search-stop" data-secondary hidden>Stop</button>
-      <button type="button" id="beta-search-clear" data-secondary hidden>Clear</button>
-    </form>
-    <div id="beta-search-status" role="status" aria-live="polite" class="beta-status"></div>
-    <div class="beta-search-results" id="beta-search-results"></div>
-    <section id="beta-capture-setup" class="beta-capture-setup" hidden>
-      <h2>Choose your capture policy</h2>
-      <p>Web Recall now starts paused on first run. You can resume broad capture, or set an allowlist first and only capture approved domains.</p>
-      <div class="beta-capture-setup-actions">
-        <button type="button" id="beta-enable-broad-capture">Enable broad capture</button>
-        <button type="button" id="beta-open-capture-settings">Set allowlist first</button>
-      </div>
-    </section>
-    <section class="beta-capture-status" id="beta-queue-section" aria-live="polite">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-        <h2 style="margin:0;">Capture queue</h2>
-        <div style="display:flex; gap:8px; flex-wrap:wrap;">
-          <button type="button" id="beta-capture-now">Capture current tab</button>
-          <button type="button" id="beta-retry-failed">Retry failed</button>
-        </div>
-      </div>
-      <div id="beta-capture-status">No pending captures.</div>
-    </section>
-    <section class="beta-capture-status" id="beta-recents-section" aria-live="polite">
-      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-        <h2 style="margin:0;">Recent captures</h2>
-        <button type="button" id="beta-refresh-recents">Refresh</button>
-      </div>
-      <div id="beta-recents-list"><p>Loading…</p></div>
-    </section>
-  `;
-  const form = container.querySelector<HTMLFormElement>('#beta-search-form');
-  const input = container.querySelector<HTMLInputElement>('#beta-search-input');
-  const status = container.querySelector<HTMLDivElement>('#beta-search-status');
-  const captureSetupNotice = container.querySelector<HTMLElement>('#beta-capture-setup');
-  const enableBroadCaptureBtn = container.querySelector<HTMLButtonElement>('#beta-enable-broad-capture');
-  const openCaptureSettingsBtn = container.querySelector<HTMLButtonElement>('#beta-open-capture-settings');
-  const remoteProviderBanner = document.querySelector<HTMLElement>('#beta-remote-provider-banner');
-  const resultsWrap = container.querySelector<HTMLDivElement>('#beta-search-results');
-  const captureStatusView = container.querySelector<HTMLDivElement>('#beta-capture-status');
-  const captureNowBtn = container.querySelector<HTMLButtonElement>('#beta-capture-now');
-  const retryFailedBtn = container.querySelector<HTMLButtonElement>('#beta-retry-failed');
-  const recentsList = container.querySelector<HTMLDivElement>('#beta-recents-list');
-  const recentsRefresh = container.querySelector<HTMLButtonElement>('#beta-refresh-recents');
-  let currentSettings: BetaSettings = { ...DEFAULT_SETTINGS };
-  let captureQueue: Array<{ url: string; title: string; status: string; attempts: number; updatedAt?: number }> = [];
-  let recentPages: RecentPage[] = [];
-  let searchRequestId: string | null = null;
-  const stopSearch = container.querySelector<HTMLButtonElement>('#beta-search-stop')!;
-  function cancelSearch(): void {
-    const requestId = searchRequestId;
-    searchRequestId = null; stopSearch.hidden = true;
-    if (requestId) void sendRuntimeMessage({ type: 'CANCEL_SEARCH', requestId }).catch((err) => console.warn('Unable to cancel search', err));
-  }
-  stopSearch.addEventListener('click', () => {
-    searchGeneration++; cancelSearch(); setStatus('Stopped.');
-  });
-  let searchGeneration = 0;
-  let searching = false;
-  const clearSearch = container.querySelector<HTMLButtonElement>('#beta-search-clear')!;
-  const queueSection = container.querySelector<HTMLElement>('#beta-queue-section')!;
-  const recentsSection = container.querySelector<HTMLElement>('#beta-recents-section')!;
-  function syncSearchLayout(): void {
-    recentsSection.hidden = searching;
-    queueSection.hidden = searching && captureQueue.length === 0;
-    clearSearch.hidden = !searching;
-  }
-  function resetSearch(): void {
-    cancelSearch();
-    searchGeneration++; searching = false;
-    if (input) input.value = '';
-    resultsWrap?.replaceChildren(); setStatus(''); syncSearchLayout();
-  }
-  clearSearch.addEventListener('click', () => { resetSearch(); input?.focus(); });
-  input?.addEventListener('input', () => { if (!input.value) resetSearch(); });
-
-  function setStatus(text: string, isError = false): void {
-    if (!status) return;
-    status.textContent = text;
-    status.dataset.variant = isError ? 'error' : 'info';
-  }
-
-  function renderResults(results: SearchResult[]): void {
-    if (!resultsWrap) return;
-    if (!results.length) {
-      replaceWithMessage(resultsWrap, 'No matching pages yet. Capture pages or adjust your query.');
-      return;
-    }
-    resultsWrap.replaceChildren(
-      ...results.map((result) =>
-        buildResultCard({
-          url: result.url,
-          title: result.title,
-          snippet: result.snippet.replace(/\s+/g, ' ').trim(),
-          meta: [
-            extractDomain(result.url),
-            relativeDate(result.timestamp)
-          ],
-          details: [formatScoreLabel(result),
-            result.hitsFromPage && result.hitsFromPage > 1 ? `${result.hitsFromPage} matches` : '',
-            formatDate(result.timestamp)
-          ]
-        })
-      )
-    );
-  }
-
-  function renderCaptureSetupNotice(): void {
-    if (!captureSetupNotice) return;
-    captureSetupNotice.hidden = currentSettings.captureSetupComplete;
-  }
-
-  function applySettings(settings: BetaSettings): void {
-    currentSettings = settings;
-    renderCaptureSetupNotice();
-  }
-
-  function renderCaptureStatus(): void {
-    syncSearchLayout();
-    if (!captureStatusView) return;
-    if (!captureQueue.length) {
-      replaceWithMessage(captureStatusView, 'No pending captures.');
-      return;
-    }
-    const list = document.createElement('ul');
-    captureQueue.slice(0, 5).forEach((entry) => {
-      const item = document.createElement('li');
-      const summary = document.createElement('div');
-      const statusStrong = document.createElement('strong');
-      statusStrong.textContent = entry.status;
-      const time = entry.updatedAt ? new Date(entry.updatedAt).toLocaleTimeString() : '';
-      summary.appendChild(statusStrong);
-      summary.append(
-        document.createTextNode(
-          ` · ${entry.title || entry.url} · attempts: ${entry.attempts}${time ? ` · ${time}` : ''}`
-        )
-      );
-
-      const actions = document.createElement('div');
-      actions.className = 'beta-queue-actions';
-      const retryBtn = document.createElement('button');
-      retryBtn.type = 'button';
-      retryBtn.textContent = 'Retry';
-      retryBtn.addEventListener('click', () => {
-        void retryEntry(entry.url);
-      });
-      actions.appendChild(retryBtn);
-
-      item.append(summary, actions);
-      list.appendChild(item);
-    });
-    captureStatusView.replaceChildren(list);
-  }
-
-  async function retryEntry(url: string): Promise<void> {
-    if (!url) return;
-    setStatus('Retrying capture…');
-    try {
-      const response = await sendRuntimeMessage<{ retried: number }>({ type: 'RETRY_PROCESSING', url });
-      setStatus(`Retry queued (${response.retried || 0} item)`);
-      void refreshCaptureStatus();
-    } catch (err) {
-      setStatus(`Retry failed: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  }
-
-  function renderRecents(): void {
-    if (!recentsList) return;
-    if (!recentPages.length) {
-      replaceWithMessage(recentsList, 'No recent captures yet.');
-      return;
-    }
-    recentsList.replaceChildren(
-      ...recentPages.slice(0, 6).map((page) =>
-        buildResultCard({
-          url: page.url,
-          title: page.title,
-          meta: [extractDomain(page.url), relativeDate(page.timestamp)]
-        })
-      )
-    );
-  }
-
-  async function refreshRecents(): Promise<void> {
-    try {
-      const response = await sendRuntimeMessage<{ pages: RecentPage[] }>({ type: 'GET_PAGE_LIST' });
-      recentPages = Array.isArray(response.pages) ? response.pages.slice(0, 20) : [];
-      renderRecents();
-    } catch (err) {
-      if (recentsList) {
-        replaceWithMessage(
-          recentsList,
-          `Unable to load recents: ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
-  }
-
-  async function refreshCaptureStatus(): Promise<void> {
-    try {
-      const response = await sendRuntimeMessage<{ queue: typeof captureQueue }>({ type: 'GET_PROCESSING' });
-      captureQueue = response.queue || [];
-      renderCaptureStatus();
-    } catch (err) {
-      if (captureStatusView) captureStatusView.textContent = `Status unavailable: ${err instanceof Error ? err.message : String(err)}`;
-    }
-  }
-
-  form?.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const query = input?.value.trim() || '';
-    if (!query) {
-      resetSearch();
-      return;
-    }
-    cancelSearch();
-    const requestId = crypto.randomUUID(); searchRequestId = requestId; stopSearch.hidden = false;
-    const generation = ++searchGeneration;
-    searching = true; syncSearchLayout(); resultsWrap?.replaceChildren();
-    setStatus('Searching…');
-    try {
-      const response = await sendRuntimeMessage<{ results: SearchResult[] }>({
-        type: 'SEARCH_QUERY',
-        requestId,
-        query,
-        limit: 20
-      });
-      if (generation !== searchGeneration) return;
-      renderResults(response.results || []);
-      setStatus(`Found ${response.results?.length || 0} result(s).`);
-    } catch (err) {
-      if (generation !== searchGeneration) return;
-      setStatus(`Search failed: ${err instanceof Error ? err.message : String(err)}`, true);
-      renderResults([]);
-    } finally {
-      if (searchRequestId === requestId) { searchRequestId = null; stopSearch.hidden = true; }
-    }
-  });
-
-  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
-    if (message?.type === 'CAPTURE_QUEUE_UPDATED') {
-      captureQueue = Array.isArray(message.queue) ? (message.queue as typeof captureQueue) : [];
-      renderCaptureStatus();
-    }
-    if (message?.type === 'BETA_SETTINGS_UPDATED') {
-      const settings = (message as { settings?: BetaSettings }).settings;
-      const theme = settings?.theme;
-      if (theme) applyTheme(theme);
-      if (settings) {
-        applySettings(settings);
-        void refreshRemoteProviderBanner(remoteProviderBanner, settings);
-      }
-    }
-  });
-
-  void sendRuntimeMessage<{ settings?: BetaSettings }>({ type: 'GET_SETTINGS' })
-    .then((response) => {
-      if (response.settings) {
-        applySettings(response.settings);
-        void refreshRemoteProviderBanner(remoteProviderBanner, response.settings);
-      }
-    })
-    .catch(() => {});
-
-  startPolling(() => {
-    void refreshCaptureStatus();
-    void refreshRecents();
-    void refreshRemoteProviderBanner(remoteProviderBanner);
-  }, 5000);
-
-  captureNowBtn?.addEventListener('click', async () => {
-    try {
-      await sendRuntimeMessage<{ ok: boolean }>({ type: 'CAPTURE_ACTIVE_TAB' });
-      setStatus('Capture requested');
-    } catch (err) {
-      setStatus(`Capture request failed: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  });
-
-  retryFailedBtn?.addEventListener('click', async () => {
-    try {
-      const response = await sendRuntimeMessage<{ retried: number }>({ type: 'RETRY_FAILED_CAPTURES' });
-      setStatus(`Retried ${response.retried || 0} capture(s)`);
-      void refreshCaptureStatus();
-    } catch (err) {
-      setStatus(`Retry failed: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  });
-
-  recentsRefresh?.addEventListener('click', () => {
-    void refreshRecents();
-  });
-
-  enableBroadCaptureBtn?.addEventListener('click', async () => {
-    try {
-      const response = await sendRuntimeMessage<{ settings: BetaSettings }>({
-        type: 'SET_SETTINGS',
-        payload: { paused: false, captureSetupComplete: true }
-      });
-      applySettings(response.settings || { ...currentSettings, paused: false, captureSetupComplete: true });
-      setStatus('Broad capture enabled');
-    } catch (err) {
-      setStatus(`Unable to enable capture: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  });
-
-  openCaptureSettingsBtn?.addEventListener('click', () => {
-    const settingsTab = document.querySelector<HTMLButtonElement>('#tab-settings');
-    settingsTab?.click();
-    document.querySelector<HTMLTextAreaElement>('#beta-allowlist-input')?.focus();
-  });
-}
-
-function createAskView(container: HTMLElement): void {
-  container.innerHTML = `
-    <form class="beta-ask-form" id="beta-ask-form">
-      <label for="beta-ask-input">Ask about your captured pages</label>
-      <textarea id="beta-ask-input" placeholder="What would you like to know?" required></textarea>
-      <div class="beta-ask-options">
-        <label><input type="checkbox" id="beta-ask-use-search" checked /> Search memory</label>
-        <label>Max sources (optional) <input type="number" id="beta-ask-max-results" min="1" placeholder="auto" style="width:80px" /></label>
-      </div>
-      <p class="wr-help">Auto chooses an initial source count from Settings; tools can retrieve more. With Search memory off, Ask starts from recent captures.</p>
-      <div class="beta-ask-actions">
-        <button type="button" id="beta-ask-clear" data-secondary>Clear</button>
-        <button type="button" id="beta-ask-stop" data-secondary hidden>Stop</button>
-        <button type="submit" id="beta-ask-submit">Ask</button>
-      </div>
-    </form>
-    <p id="beta-ask-status" class="wr-status" role="status" aria-live="polite"></p>
-    <details id="beta-ask-activity" hidden>
-      <summary>Activity <span id="beta-ask-activity-count"></span></summary>
-      <div id="beta-ask-log" class="beta-ask-log" tabindex="0" aria-label="Ask activity history"></div>
-    </details>
+    <div class="wr-ask-header"><span id="beta-ask-title">Ask your memory</span><button id="beta-ask-close" type="button" class="icon-button" aria-label="Back to preview">${iconMarkup('arrow-u-up-left')}</button></div>
+    <details id="beta-source-picker"><summary class="source-picker-trigger"><span id="beta-source-label">All saved pages</span>${iconMarkup('caret-down')}</summary><div id="beta-source-options" class="wr-source-chooser"></div></details>
+    <div id="beta-ask-history"></div>
+    <p id="beta-ask-question" class="wr-ask-question" hidden></p>
     <div id="beta-ask-answer" class="beta-ask-answer" hidden></div>
-    <div id="beta-ask-sources" class="beta-search-results beta-ask-sources"></div>
+    <div id="beta-ask-sources" class="beta-ask-sources"></div>
+    <p id="beta-ask-status" class="wr-status" role="status" aria-live="polite"></p>
+    <form id="beta-ask-form" class="beta-ask-form">
+      <div class="wr-composer"><textarea id="beta-ask-input" placeholder="Ask a question…" aria-label="Ask a question" required></textarea><button type="submit" id="beta-ask-submit" class="icon-button" aria-label="Send question">${iconMarkup('paper-plane-right')}</button></div>
+      <details class="wr-ask-options"><summary>Answer options</summary><div class="beta-ask-options"><label><input type="checkbox" id="beta-ask-use-search" checked />Search memory</label><label>Initial sources (optional)<input type="number" id="beta-ask-max-results" min="1" placeholder="Auto" /></label><p class="wr-help">Auto starts from Settings and tools can retrieve more. A page selection stays within those saved pages. With Search memory off and no selection, Ask starts from recent captures.</p></div></details>
+      <div class="beta-ask-actions"><button id="beta-ask-clear" type="button" class="text-button">Clear conversation</button><button id="beta-ask-stop" type="button" class="text-button" hidden>Stop</button></div>
+    </form>
+    <details id="beta-ask-activity" hidden><summary>Activity <span id="beta-ask-activity-count"></span></summary><div id="beta-ask-log" class="beta-ask-log" tabindex="0" aria-label="Ask activity history"></div></details>
   `;
-  const form = container.querySelector<HTMLFormElement>('#beta-ask-form')!;
-  const input = container.querySelector<HTMLTextAreaElement>('#beta-ask-input')!;
-  const useSearch = container.querySelector<HTMLInputElement>('#beta-ask-use-search')!;
-  const maxResults = container.querySelector<HTMLInputElement>('#beta-ask-max-results')!;
-  const submit = container.querySelector<HTMLButtonElement>('#beta-ask-submit')!;
-  const stop = container.querySelector<HTMLButtonElement>('#beta-ask-stop')!;
-  const clear = container.querySelector<HTMLButtonElement>('#beta-ask-clear')!;
-  const status = container.querySelector<HTMLElement>('#beta-ask-status')!;
-  const activity = container.querySelector<HTMLDetailsElement>('#beta-ask-activity')!;
-  const activityCount = container.querySelector<HTMLElement>('#beta-ask-activity-count')!;
-  const logView = container.querySelector<HTMLElement>('#beta-ask-log')!;
-  const answerView = container.querySelector<HTMLElement>('#beta-ask-answer')!;
-  const sourcesView = container.querySelector<HTMLElement>('#beta-ask-sources')!;
-  let activeRequestId: string | null = null;
-  let generation = 0;
-  let entries = 0;
-  let lastLog = '';
+  const q = <T extends HTMLElement>(selector: string): T => container.querySelector<T>(selector)!;
+  const form = q<HTMLFormElement>('#beta-ask-form'), input = q<HTMLTextAreaElement>('#beta-ask-input');
+  const useSearch = q<HTMLInputElement>('#beta-ask-use-search'), maxResults = q<HTMLInputElement>('#beta-ask-max-results');
+  const submit = q<HTMLButtonElement>('#beta-ask-submit'), stop = q<HTMLButtonElement>('#beta-ask-stop');
+  const status = q('#beta-ask-status'), answerView = q('#beta-ask-answer'), sourcesView = q('#beta-ask-sources');
+  const activity = q<HTMLDetailsElement>('#beta-ask-activity'), log = q('#beta-ask-log'), questionView = q('#beta-ask-question');
+  const sessions = new Map<string, AskSession>();
+  let key = 'memory', session: AskSession = { draft: '', turns: [], activity: [] }, pages: SavedPage[] | null = null, selected: string[] | undefined;
+  let activeRequestId: string | null = null, generation = 0, entries = 0, lastLog = '';
 
   function setRunning(running: boolean): void {
-    submit.disabled = running;
-    submit.textContent = running ? 'Answering…' : 'Ask';
-    stop.hidden = !running;
-    input.readOnly = running;
-    useSearch.disabled = maxResults.disabled = running;
+    submit.disabled = running || !input.value.trim() || selected?.length === 0; stop.hidden = !running; input.readOnly = running;
+    useSearch.disabled = Boolean(selected) || running; maxResults.disabled = running;
     form.setAttribute('aria-busy', String(running));
   }
-  function setStatus(text: string, error = false): void {
-    status.textContent = text;
-    status.dataset.variant = error ? 'error' : 'info';
+  function setStatus(text: string, error = false): void { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; status.dataset.state = text.startsWith('Answer ready') ? 'ready' : 'active'; }
+  function resetOutput(clearActivity = true): void {
+    if (clearActivity) session.activity = [];
+    entries = 0; lastLog = ''; log.replaceChildren(); activity.hidden = true; activity.open = false;
+    answerView.replaceChildren(); answerView.hidden = true; delete answerView.dataset.streaming;
+    sourcesView.replaceChildren(); questionView.hidden = true;
   }
-  function resetOutput(): void {
-    entries = 0; lastLog = '';
-    logView.replaceChildren(); activity.hidden = true; activity.open = false;
-    answerView.replaceChildren(); answerView.hidden = true;
-    delete answerView.dataset.streaming;
-    sourcesView.replaceChildren();
+  function appendLogRow(text: string): void {
+    if (!text || text === lastLog) return;
+    const row = document.createElement('div'); row.textContent = text; log.append(row); entries++; lastLog = text;
+    q('#beta-ask-activity-count').textContent = `(${entries})`; activity.hidden = false;
   }
   function appendLog(text: string): void {
     if (!text || text === lastLog) return;
-    const atBottom = logView.scrollHeight - logView.scrollTop - logView.clientHeight < 24;
-    const row = document.createElement('div'); row.textContent = text;
-    logView.append(row); entries++; lastLog = text;
-    activityCount.textContent = `(${entries})`; activity.hidden = false;
-    if (atBottom) logView.scrollTop = logView.scrollHeight;
+    session.activity.push(text);
+    appendLogRow(text);
   }
-  function renderSources(sources: AskSource[]): void {
-    sourcesView.replaceChildren(...sources.map((source) => {
-      const card = buildResultCard({ url: source.url, title: source.title, snippet: source.snippet,
-        meta: [source.domain], headingPrefix: `[${source.index}] ` });
-      card.id = `ask-source-${source.index}`;
-      card.tabIndex = -1;
-      return card;
+  function renderSources(sources: AskSource[], target = sourcesView, prefix = 'ask-source-'): void {
+    target.replaceChildren(...sources.map(source => {
+      const row = createPageEntry({ url: source.url, title: `[${source.index}] ${source.title}`, snippet: source.excerpts?.join('\n\n') || source.evidence || source.snippet });
+      row.article.classList.add('beta-result-card'); row.article.hidden = true; row.article.id = `${prefix}${source.index}`; row.article.tabIndex = -1;
+      const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noreferrer'; link.className = 'original-link'; link.textContent = 'Open page'; row.body.append(link);
+      return row.article;
     }));
+  }
+  function showSession(): void {
+    resetOutput(false); session.activity.forEach(appendLogRow); setStatus(''); input.value = session.draft;
+    const history = q('#beta-ask-history'); history.replaceChildren();
+    for (const [index, turn] of session.turns.slice(0, -1).entries()) {
+      const details = document.createElement('details'); details.className = 'wr-ask-options';
+      const summary = document.createElement('summary'); summary.textContent = turn.question;
+      const answer = document.createElement('div'); answer.className = 'beta-ask-answer'; const prefix = `ask-history-${index}-source-`; renderAnswer(answer, turn.answer, turn.sources.map(source => source.index), prefix); const references = document.createElement('div'); references.className = 'beta-ask-sources'; renderSources(turn.sources, references, prefix); details.append(summary, answer, references); history.append(details);
+    }
+    const latest = session.turns.at(-1);
+    if (latest) { questionView.textContent = latest.question; questionView.hidden = false; renderSources(latest.sources); renderAnswer(answerView, latest.answer, latest.sources.map(source => source.index)); answerView.hidden = false; }
   }
   async function stopRequest(): Promise<void> {
     const requestId = activeRequestId;
     if (!requestId) return;
-    const stoppedGeneration = generation;
-    activeRequestId = null; // Invalidate callbacks before awaiting cancellation.
-    setRunning(false);
-    sourcesView.replaceChildren();
-    setStatus('Stopped. Any partial answer has not been verified.');
-    appendLog('Answer stopped');
+    const stoppedGeneration = generation; activeRequestId = null; setRunning(false); sourcesView.replaceChildren();
+    setStatus('Stopped. Any partial answer has not been verified.'); appendLog('Answer stopped');
     try { await sendRuntimeMessage({ type: 'CANCEL_ASK', requestId }); }
     catch { if (!activeRequestId && generation === stoppedGeneration) setStatus('Stopped showing updates. The background connection was lost; the request may still finish.', true); }
   }
-  stop.addEventListener('click', () => { void stopRequest(); submit.focus(); });
-  clear.addEventListener('click', () => {
-    void stopRequest();
-    generation++;
-    resetOutput(); input.value = ''; setStatus(''); input.focus();
-  });
-  form.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    if (activeRequestId) return;
+  function selectSession(preserveDraft = false): void {
+    const draft = input.value; session.draft = draft;
+    const nextKey = selected ? JSON.stringify(selected.slice().sort()) : 'memory';
+    if (nextKey === key && activeRequestId) return;
+    if (nextKey !== key) { void stopRequest(); generation++; }
+    key = nextKey; session = sessions.get(key) || { draft: preserveDraft ? draft : '', turns: [], activity: [] }; sessions.set(key, session);
+    showSession(); setRunning(false);
+    q('#beta-source-label').textContent = selected ? `Using ${selected.length} ${selected.length === 1 ? 'page' : 'pages'}` : 'All saved pages';
+    submit.disabled = !input.value.trim() || selected?.length === 0;
+  }
+  function close(): void { session.draft = input.value; void stopRequest(); container.hidden = true; window.dispatchEvent(new window.Event('wr-ask-closed')); }
+  q('#beta-ask-close').addEventListener('click', close);
+  stop.addEventListener('click', () => { void stopRequest(); input.focus(); });
+  q('#beta-ask-clear').addEventListener('click', () => { void stopRequest(); generation++; session.turns = []; session.activity = []; session.draft = ''; input.value = ''; showSession(); setRunning(false); input.focus(); });
+  input.addEventListener('input', () => { session.draft = input.value; if (!activeRequestId) submit.disabled = !input.value.trim() || selected?.length === 0; input.style.height = '28px'; input.style.height = `${Math.max(28, Math.min(160, input.scrollHeight))}px`; });
+  input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } });
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); if (activeRequestId) return;
     const question = input.value.trim();
     if (!question) { setStatus('Enter a question to begin.'); input.focus(); return; }
-    const requestId = `ask-${crypto.randomUUID()}`;
-    generation++;
-    activeRequestId = requestId; resetOutput(); setRunning(true);
-    setStatus('Gathering sources…');
+    if (selected?.length === 0) { setStatus('Choose at least one page.'); return; }
+    const requestId = `ask-${crypto.randomUUID()}`; generation++; activeRequestId = requestId; resetOutput(); setRunning(true); setStatus('Gathering sources…');
+    questionView.textContent = question; questionView.hidden = false;
     try {
       const raw = maxResults.value.trim();
-      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>({
-        type: 'ASK_QUESTION', question,
-        options: { useSearch: useSearch.checked, maxResults: raw ? Number(raw) : undefined, requestId }
-      });
+      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>({ type: 'ASK_QUESTION', question, options: { useSearch: useSearch.checked, maxResults: raw ? Number(raw) : undefined, requestId, scopeUrls: selected, history: session.turns.map(turn => ({ question: turn.question, answer: turn.answer })) } });
       if (activeRequestId !== requestId) return;
-      delete answerView.dataset.streaming;
-      const sources = response.sources || [];
-      renderSources(sources);
-      renderAnswer(answerView, response.answer || 'No answer returned.', sources.map((source) => source.index));
-      answerView.hidden = false;
-      setStatus(sources.length ? `Answer ready · ${sources.length} source${sources.length === 1 ? '' : 's'}` : 'Answer ready · No cited sources');
-    } catch (err) {
+      const turn = { question, answer: response.answer || 'No answer returned.', sources: response.sources || [] };
+      session.turns.push(turn); session.draft = ''; showSession();
+      setStatus(turn.sources.length ? `Answer ready · ${turn.sources.length} source${turn.sources.length === 1 ? '' : 's'}` : 'Answer ready · No cited sources');
+    } catch (error) {
       if (activeRequestId !== requestId) return;
-      const message = `Ask failed: ${err instanceof Error ? err.message : String(err)}. Try again or check Settings.`;
-      setStatus(message, true); appendLog(message);
-      if (!answerView.hidden) appendLog('The partial answer has not been verified.');
-    } finally {
-      if (activeRequestId === requestId) { activeRequestId = null; setRunning(false); }
-    }
+      const message = `Ask failed: ${error instanceof Error ? error.message : String(error)}. Try again or check Settings.`;
+      setStatus(message, true); appendLog(message); if (!answerView.hidden) appendLog('The partial answer has not been verified.');
+    } finally { if (activeRequestId === requestId) { activeRequestId = null; setRunning(false); } }
   });
-  answerView.addEventListener('click', (event) => {
-    const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#ask-source-"]');
-    if (!link) return;
-    const source = sourcesView.querySelector<HTMLElement>(link.getAttribute('href')!);
-    if (source) { event.preventDefault(); source.focus(); source.scrollIntoView({ block: 'nearest' }); }
+  container.addEventListener('click', event => {
+    const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href^="#ask-"]'); if (!link) return;
+    const source = container.querySelector<HTMLElement>(link.getAttribute('href')!);
+    if (source) { event.preventDefault(); const reveal = source.hidden; source.parentElement!.querySelectorAll<HTMLElement>(':scope > article').forEach(item => { item.hidden = true; }); source.hidden = !reveal; if (reveal) { source.querySelector<HTMLDetailsElement>('details')!.open = true; source.focus(); source.scrollIntoView({ block: 'nearest' }); } }
   });
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
     if (!activeRequestId || message.requestId !== activeRequestId) return;
     if (message.type === 'ASK_PROGRESS') { appendLog(String(message.message || '')); setStatus(String(message.message || 'Working…')); }
-    if (message.type === 'ASK_ANSWER_UPDATE') {
-      answerView.hidden = false; answerView.dataset.streaming = 'true';
-      answerView.textContent = String(message.chunk || '');
-    }
+    if (message.type === 'ASK_ANSWER_UPDATE') { answerView.hidden = false; answerView.dataset.streaming = 'true'; answerView.textContent = String(message.chunk || ''); }
   });
+  return {
+    open(target, candidates, title) {
+      const next = candidates?.map(page => page.url);
+      const changed = JSON.stringify(next) !== JSON.stringify(pages?.map(page => page.url));
+      pages = candidates; if (changed) selected = next;
+      q('#beta-ask-title').textContent = title;
+      q<HTMLDetailsElement>('#beta-source-picker').hidden = !pages || pages.length <= 1;
+      const options = q('#beta-source-options'); options.replaceChildren();
+      for (const page of pages || []) {
+        const label = document.createElement('label'), checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.checked = Boolean(selected?.includes(page.url));
+        const text = document.createElement('span'); text.textContent = page.title || page.url;
+        const domain = document.createElement('small'); domain.textContent = extractDomain(page.url); text.append(domain); label.append(checkbox, text); options.append(label);
+        checkbox.addEventListener('change', () => { selected = (pages || []).filter(candidate => candidate.url === page.url ? checkbox.checked : selected?.includes(candidate.url)).map(candidate => candidate.url); selectSession(true); });
+      }
+      selectSession(); target.append(container); container.hidden = false; input.focus({ preventScroll: true }); container.scrollIntoView({ block: 'nearest' });
+    },
+    close,
+    invalidate() { close(); sessions.clear(); session = { draft: '', turns: [], activity: [] }; resetOutput(); }
+  };
+}
+
+type SearchController = { askMemory: () => void; openPage: (url: string) => Promise<void>; refresh: () => void; openQueue: () => void };
+function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: AskController): SearchController {
+  container.innerHTML = `
+    <div class="search-header">
+      <div class="search-row"><form id="beta-search-form" class="search-form beta-search-form" role="search"><button type="submit" class="icon-button" aria-label="Search saved pages">${iconMarkup('magnifying-glass')}</button><input id="beta-search-input" type="search" placeholder="Search your saved pages" aria-label="Search query" autocomplete="off" /><button type="button" id="beta-search-stop" class="text-button" hidden>Stop</button><button type="button" id="beta-search-clear" class="icon-button" aria-label="Clear search" hidden>${iconMarkup('x')}</button></form></div>
+      <div class="results-toolbar"><span id="beta-search-status" role="status" aria-live="polite"></span><button id="beta-ask-results" class="ask-results" hidden>Ask these pages${iconMarkup('arrow-up-right')}</button></div>
+    </div>
+    <div class="results-list">
+      <div id="beta-results-conversation"></div>
+      <div id="beta-search-results" class="beta-search-results"></div>
+      <section id="beta-recents-section"><div id="beta-recents-list" class="beta-search-results"></div><button id="beta-refresh-recents" class="text-button wr-refresh-recents" hidden>Refresh</button></section>
+      <button id="beta-capture-now" hidden>Capture current tab</button>
+      <details id="beta-queue-section" hidden><summary><span id="beta-queue-label">Capture queue</span>${iconMarkup('caret-down')}</summary>
+        <div class="button-row"><button id="beta-retry-failed" class="text-button" hidden>Retry failed</button></div>
+        <div id="beta-capture-status" class="wr-help"></div>
+        <section id="beta-capture-setup" hidden><h2>Choose your capture policy</h2><p class="wr-help">Capture starts paused. Choose broad capture or allow approved domains first.</p><div class="button-row"><button id="beta-enable-broad-capture" class="secondary-button">Enable broad capture</button><button id="beta-open-capture-settings" class="text-button">Set allowlist first</button></div></section>
+      </details>
+    </div>`;
+  const q = <T extends HTMLElement>(selector: string): T => container.querySelector<T>(selector)!;
+  const input = q<HTMLInputElement>('#beta-search-input'), form = q<HTMLFormElement>('#beta-search-form');
+  const status = q('#beta-search-status'), resultsWrap = q('#beta-search-results'), recents = q('#beta-recents-list');
+  const recentSection = q('#beta-recents-section'), clear = q<HTMLButtonElement>('#beta-search-clear'), stop = q<HTMLButtonElement>('#beta-search-stop');
+  const askResults = q<HTMLButtonElement>('#beta-ask-results'), multi = q('#beta-results-conversation');
+  const captureQueue = q<HTMLDetailsElement>('#beta-queue-section');
+  let searchRequestId: string | null = null, generation = 0, debounce: ReturnType<typeof setTimeout> | undefined;
+  let searching = false, resultPages: SearchResult[] = [], recentPages: SavedPage[] = [], currentSettings = { ...DEFAULT_SETTINGS };
+  let queue: Array<{ url: string; title: string; status: string; attempts: number }> = [];
+  let activeAskButton: HTMLButtonElement | null = null, multiAsk = false;
+  function setStatus(text: string, error = false): void { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; status.dataset.state = text.startsWith('Answer ready') ? 'ready' : 'active'; }
+  function candidates(): SavedPage[] { return searching ? resultPages : recentPages.slice(0, 20); }
+  function sync(): void { recentSection.hidden = searching; clear.hidden = !input.value; askResults.hidden = !candidates().length || multiAsk; askResults.disabled = Boolean(searchRequestId); q('.results-toolbar').hidden = !status.textContent && askResults.hidden; }
+  function syncQueue(): void {
+    captureQueue.hidden = queue.length === 0 && !captureQueue.open;
+    const failed = queue.filter(item => item.status === 'failed').length;
+    q('#beta-queue-label').textContent = queue.length ? `${queue.length} capture${queue.length === 1 ? '' : 's'}${failed ? ` · ${failed} failed` : ' in progress'}` : 'Capture queue';
+    q('#beta-retry-failed').hidden = !failed;
+  }
+  captureQueue.addEventListener('toggle', syncQueue);
+  function cancelSearch(): void { const id = searchRequestId; searchRequestId = null; stop.hidden = true; if (id) void sendRuntimeMessage({ type: 'CANCEL_SEARCH', requestId: id }).catch(error => console.warn('Unable to cancel search', error)); }
+  function closeAsk(): void { ask.close(); multiAsk = false; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; sync(); }
+  window.addEventListener('wr-ask-closed', () => { multiAsk = false; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; sync(); });
+  function row(page: SavedPage, result?: SearchResult): HTMLElement {
+    const entry = createPageEntry(page); entry.article.classList.add('beta-result-card'); entry.details.name = 'search-preview';
+    if (page.snippet) { const snippet = document.createElement('span'); snippet.className = 'result-snippet'; snippet.textContent = page.snippet.replace(/\s+/g, ' ').trim(); entry.summary.append(snippet); }
+    const passage = page.snippet ? entry.body.querySelector('p')! : document.createElement('p');
+    if (!page.snippet) entry.body.append(passage);
+    const actions = document.createElement('div'); actions.className = 'preview-actions';
+    const original = document.createElement('a'); original.href = page.url; original.target = '_blank'; original.rel = 'noreferrer'; original.className = 'open-page-button'; original.append(icon('arrow-up-right'), document.createTextNode('Open page'));
+    const button = document.createElement('button'); button.className = 'ask-this-page'; button.append(icon('chat-circle'), document.createTextNode('Ask about this'));
+    button.addEventListener('click', () => { if (activeAskButton) activeAskButton.hidden = false; activeAskButton = button; button.hidden = true; multiAsk = false; ask.open(entry.body, [page], 'Ask about this page'); sync(); });
+    actions.append(original, button); entry.body.append(actions);
+    if (result) { const details = document.createElement('details'); details.className = 'wr-match-details'; const summary = document.createElement('summary'); summary.append(document.createTextNode('Match details'), icon('caret-down')); const copy = document.createElement('p'); copy.textContent = [formatScoreLabel(result), result.hitsFromPage ? `${result.hitsFromPage} matches` : '', formatDate(result.timestamp)].filter(Boolean).join(' · '); details.append(summary, copy); entry.body.append(details); }
+    entry.summary.addEventListener('keydown', event => {
+      if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+      const summaries = Array.from(container.querySelectorAll<HTMLElement>(searching ? '#beta-search-results > article > details > summary' : '#beta-recents-list > article > details > summary'));
+      const index = summaries.indexOf(entry.summary); event.preventDefault();
+      if (event.key === 'ArrowUp' && index === 0) input.focus(); else summaries[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
+    });
+    let loaded = Boolean(page.snippet);
+    entry.details.addEventListener('toggle', () => {
+      if (!entry.details.open) { if (entry.body.contains(askHost)) closeAsk(); return; }
+      if (loaded) return;
+      loaded = true; passage.textContent = 'Loading saved passage…';
+      void sendRuntimeMessage<{ page: SavedPage | null }>({ type: 'GET_PAGE_PREVIEW', url: page.url }).then(response => { passage.textContent = response.page?.snippet || 'No captured text is available for this page.'; }).catch(error => { loaded = false; passage.textContent = `Preview unavailable: ${(error instanceof Error ? error.message : String(error))}`; });
+    });
+    return entry.article;
+  }
+  function resetSearch(): void { clearTimeout(debounce); generation++; cancelSearch(); closeAsk(); searching = false; input.value = ''; resultPages = []; resultsWrap.replaceChildren(); setStatus(recentPages.length ? `${recentPages.length} ${recentPages.length === 1 ? 'page' : 'pages'}` : ''); sync(); }
+  function renderResults(results: SearchResult[]): void {
+    resultPages = results; resultsWrap.replaceChildren(...results.map(page => row(page, page)));
+    if (!results.length) replaceWithMessage(resultsWrap, 'No matching pages. Try another search or capture a page.');
+    sync();
+  }
+  async function refreshRecents(force = false): Promise<void> {
+    try {
+      const response = await sendRuntimeMessage<{ pages: SavedPage[] }>({ type: 'GET_PAGE_LIST' });
+      const incoming = (response.pages || []).slice(0, 20);
+      if (recents.querySelector('details[open]') && recents.children.length) { if (!force) return; closeAsk(); }
+      if (JSON.stringify(incoming) !== JSON.stringify(recentPages) || !recents.children.length) {
+        recentPages = incoming; recents.replaceChildren(...recentPages.map(page => row(page)));
+        if (!recentPages.length) {
+          const empty = document.createElement('div'); empty.className = 'wr-empty-memory';
+          const title = document.createElement('p'); title.textContent = 'No saved pages yet.';
+          const note = document.createElement('p'); note.className = 'wr-help'; note.textContent = 'Start with the page you’re browsing.';
+          const capture = document.createElement('button'); capture.className = 'primary-button'; capture.textContent = 'Capture current tab'; capture.addEventListener('click', () => q('#beta-capture-now').click());
+          const settings = document.createElement('button'); settings.className = 'text-button'; settings.textContent = 'Capture settings'; settings.addEventListener('click', () => navigateTo('settings', 'capture'));
+          const actions = document.createElement('div'); actions.className = 'button-row'; actions.append(capture, settings); empty.append(title, note, actions); recents.append(empty);
+        }
+      }
+      if (!searching && !searchRequestId) setStatus(recentPages.length ? `${recentPages.length} ${recentPages.length === 1 ? 'page' : 'pages'}` : '');
+      sync();
+    } catch (error) { if (!searching) setStatus(`Unable to load pages: ${error instanceof Error ? error.message : String(error)}`, true); }
+  }
+  async function refreshQueue(): Promise<void> {
+    try {
+      const response = await sendRuntimeMessage<{ queue: typeof queue }>({ type: 'GET_PROCESSING' }); queue = response.queue || [];
+      syncQueue();
+      const view = q('#beta-capture-status'); view.replaceChildren();
+      if (!queue.length) view.textContent = 'No pending captures.';
+      else {
+        const list = document.createElement('ul');
+        for (const item of queue.slice(0, 5)) {
+          const li = document.createElement('li'), copy = document.createElement('span'); copy.textContent = `${item.title || item.url} · ${item.status} · ${item.attempts} attempts`;
+          const retry = document.createElement('button'); retry.className = 'text-button'; retry.textContent = 'Retry'; retry.disabled = item.status !== 'failed'; retry.addEventListener('click', () => { void action({ type: 'RETRY_PROCESSING', url: item.url }, 'Retry queued'); }); li.append(copy, retry); list.append(li);
+        }
+        view.append(list);
+      }
+    } catch (error) { q('#beta-capture-status').textContent = `Status unavailable: ${(error instanceof Error ? error.message : String(error))}`; }
+  }
+  async function action(message: Record<string, unknown>, success: string): Promise<void> {
+    try { await sendRuntimeMessage(message); setStatus(success); void refreshQueue(); void refreshRecents(); }
+    catch (error) { setStatus(`Request failed: ${error instanceof Error ? error.message : String(error)}`, true); }
+  }
+  form.addEventListener('submit', async event => {
+    event.preventDefault(); clearTimeout(debounce);
+    const query = input.value.trim(); if (!query) { resetSearch(); return; }
+    closeAsk(); cancelSearch();
+    const requestId = crypto.randomUUID(), current = ++generation; searchRequestId = requestId; searching = true; stop.hidden = false;
+    resultPages = []; resultsWrap.replaceChildren(); setStatus('Searching…'); sync();
+    try {
+      const response = await sendRuntimeMessage<{ results: SearchResult[] }>({ type: 'SEARCH_QUERY', requestId, query, limit: 20 });
+      if (current !== generation) return;
+      renderResults(response.results || []); setStatus(`${resultPages.length} ${resultPages.length === 1 ? 'page' : 'pages'}`);
+    } catch (error) { if (current === generation) { renderResults([]); setStatus(`Search failed: ${error instanceof Error ? error.message : String(error)}`, true); } }
+    finally { if (searchRequestId === requestId) { searchRequestId = null; stop.hidden = true; sync(); } }
+  });
+  input.addEventListener('input', () => { clearTimeout(debounce); generation++; cancelSearch(); closeAsk(); clear.hidden = !input.value; if (!input.value) resetSearch(); else { searching = true; resultPages = []; resultsWrap.replaceChildren(); setStatus('Searching…'); sync(); debounce = setTimeout(() => form.requestSubmit(), 450); } });
+  input.addEventListener('keydown', event => { if (event.key === 'ArrowDown') { event.preventDefault(); container.querySelector<HTMLElement>(searching ? '#beta-search-results > article > details > summary' : '#beta-recents-list > article > details > summary')?.focus(); } });
+  clear.addEventListener('click', () => { resetSearch(); input.focus(); });
+  stop.addEventListener('click', () => { generation++; cancelSearch(); setStatus('Stopped.'); sync(); });
+  askResults.addEventListener('click', () => { multiAsk = true; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; ask.open(multi, candidates(), 'Ask your results'); sync(); });
+  q('#beta-capture-now').addEventListener('click', () => { void action({ type: 'CAPTURE_ACTIVE_TAB' }, 'Capture requested'); });
+  q('#beta-retry-failed').addEventListener('click', () => { void action({ type: 'RETRY_FAILED_CAPTURES' }, 'Retry requested'); });
+  q('#beta-refresh-recents').addEventListener('click', () => { if (input.value.trim()) form.requestSubmit(); else void refreshRecents(true); });
+  q('#beta-enable-broad-capture').addEventListener('click', () => { void action({ type: 'SET_SETTINGS', payload: { paused: false, captureSetupComplete: true } }, 'Broad capture enabled'); });
+  q('#beta-open-capture-settings').addEventListener('click', () => { navigateTo('settings', 'capture'); });
+  function applySettings(settings: BetaSettings): void { currentSettings = settings; q('#beta-capture-setup').hidden = currentSettings.captureSetupComplete; }
+  void sendRuntimeMessage<{ settings: BetaSettings }>({ type: 'GET_SETTINGS' }).then(response => applySettings(response.settings || DEFAULT_SETTINGS)).catch(() => {});
+  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+    if (message.type === 'CAPTURE_QUEUE_UPDATED') void refreshQueue();
+    if (message.type === 'BETA_SETTINGS_UPDATED' && message.settings) applySettings(message.settings as BetaSettings);
+  });
+  window.addEventListener('wr-memory-changed', () => { ask.invalidate(); generation++; cancelSearch(); if (searching) form.requestSubmit(); else { recents.replaceChildren(); void refreshRecents(); } });
+  startPolling(() => { if (container.hidden) return; void refreshQueue(); void refreshRecents(); void refreshRemoteProviderBanner(document.querySelector('#beta-remote-provider-banner')); }, 5000);
+  return {
+    openQueue() { captureQueue.hidden = false; captureQueue.open = true; void refreshQueue(); captureQueue.querySelector<HTMLElement>('summary')!.focus(); captureQueue.scrollIntoView({ block: 'nearest' }); },
+    askMemory() { multiAsk = true; ask.open(multi, null, 'Ask your memory'); sync(); },
+    async openPage(url) {
+      closeAsk(); const current = ++generation; cancelSearch();
+      try {
+        const response = await sendRuntimeMessage<{ page: SavedPage | null }>({ type: 'GET_PAGE_PREVIEW', url });
+        if (current !== generation) return;
+        if (!response.page) { setStatus('This page is no longer saved.', true); return; }
+        input.value = response.page.title; searching = true;
+        resultPages = [{ ...response.page, timestamp: response.page.timestamp || 0, snippet: response.page.snippet || '', score: 0 }];
+        resultsWrap.replaceChildren(row(response.page)); resultsWrap.querySelector<HTMLDetailsElement>('details')!.open = true; setStatus('1 page'); sync();
+        resultsWrap.querySelector<HTMLElement>('summary')!.focus({ preventScroll: true });
+      } catch (error) { if (current !== generation) return; setStatus(`Unable to open saved page: ${(error instanceof Error ? error.message : String(error))}`, true); }
+    },
+    refresh() { void refreshRecents(); void refreshQueue(); }
+  };
 }
 
 function renderApp(root: HTMLElement): void {
-  ensureStyles();
-  root.dataset.view = 'sidepanel';
-  root.innerHTML = `
-    <div class="beta-sidepanel-shell">
-      <div class="beta-sidepanel-header">
-        <div style="font-weight:700;">Web Recall</div>
-        <div class="beta-header-actions">
-          <button type="button" data-action="open-logs">Logs</button>
-          <button type="button" data-action="open-highlights">Highlights</button>
-          <button type="button" data-action="open-settings">Memory</button>
-        </div>
-      </div>
-      <div id="beta-remote-provider-banner" class="beta-remote-provider-banner" hidden></div>
-      <div class="beta-sidepanel-tabs" role="tablist" aria-label="Web Recall views">
-        <button type="button" id="tab-search" aria-controls="beta-view-search" tabindex="0" data-tab="search" class="active" aria-selected="true" role="tab">Search</button>
-        <button type="button" id="tab-ask" aria-controls="beta-view-ask" tabindex="-1" data-tab="ask" role="tab" aria-selected="false">Ask</button>
-        <button type="button" id="tab-settings" aria-controls="beta-view-settings" tabindex="-1" data-tab="settings" role="tab" aria-selected="false">Settings</button>
-      </div>
-      <section id="beta-view-search" aria-labelledby="tab-search" class="beta-sidepanel-view" role="tabpanel"></section>
-      <section id="beta-view-ask" aria-labelledby="tab-ask" class="beta-sidepanel-view" role="tabpanel" hidden></section>
-      <section id="beta-view-settings" aria-labelledby="tab-settings" class="beta-sidepanel-view" role="tabpanel" hidden></section>
-    </div>
-  `;
-  const searchView = root.querySelector<HTMLElement>('#beta-view-search');
-  const askView = root.querySelector<HTMLElement>('#beta-view-ask');
-  const settingsView = root.querySelector<HTMLElement>('#beta-view-settings');
-  const remoteProviderBanner = root.querySelector<HTMLElement>('#beta-remote-provider-banner');
-  const tabButtons = root.querySelectorAll<HTMLButtonElement>('.beta-sidepanel-tabs button');
-  const headerActions = root.querySelectorAll<HTMLButtonElement>('.beta-header-actions button');
-
-  if (searchView) {
-    createSearchView(searchView);
-  }
-  if (askView) {
-    createAskView(askView);
-  }
-  if (settingsView) {
-    renderSettingsPanel(settingsView);
-  }
-
-  void refreshRemoteProviderBanner(remoteProviderBanner);
-
-  tabButtons.forEach((btn, index) => {
-    btn.addEventListener('keydown', (event) => {
-      let next = index;
-      if (event.key === 'ArrowRight') next = (index + 1) % tabButtons.length;
-      else if (event.key === 'ArrowLeft') next = (index + tabButtons.length - 1) % tabButtons.length;
-      else if (event.key === 'Home') next = 0;
-      else if (event.key === 'End') next = tabButtons.length - 1;
-      else return;
-      event.preventDefault(); tabButtons[next]?.click(); tabButtons[next]?.focus();
-    });
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.tab;
-      tabButtons.forEach((button) => {
-        button.classList.toggle('active', button === btn);
-        button.tabIndex = button === btn ? 0 : -1;
-        button.setAttribute('aria-selected', button === btn ? 'true' : 'false');
-      });
-      searchView?.setAttribute('hidden', 'true');
-      askView?.setAttribute('hidden', 'true');
-      settingsView?.setAttribute('hidden', 'true');
-      if (tab === 'search') {
-        searchView?.removeAttribute('hidden');
-      } else if (tab === 'ask') {
-        askView?.removeAttribute('hidden');
-      } else if (tab === 'settings') {
-        settingsView?.removeAttribute('hidden');
-      }
-    });
-  });
-
-  installSharedStyles();
-  if (window.location.hash.startsWith('#settings')) {
-    root.querySelector<HTMLButtonElement>('[data-tab="settings"]')?.click();
-    if (window.location.hash === '#settings-advanced') {
-      root.querySelector<HTMLDetailsElement>('#settings-advanced')?.setAttribute('open', '');
-      root.querySelector<HTMLElement>('#settings-advanced')?.scrollIntoView();
+  installSharedStyles(); root.dataset.view = 'sidepanel';
+  root.innerHTML = `<div class="beta-sidepanel-shell"><div id="beta-remote-provider-banner" class="wr-remote-notice" hidden></div><section id="beta-view-search" aria-label="Search & Ask"></section><section id="beta-view-settings" aria-label="Settings" hidden></section><section id="beta-view-manage" aria-label="Memory Manager" hidden></section><section id="beta-view-highlights" aria-label="Daily Highlights" hidden></section><section id="beta-view-logs" aria-label="Structured Logs" hidden></section></div>`;
+  const navigation = createToolNavigation('sidepanel');
+  const menuAnchor = navigation.querySelector<HTMLDetailsElement>('.menu-anchor')!;
+  const askHost = document.createElement('section'), ask = createAskView(askHost);
+  const search = createSearchView(root.querySelector('#beta-view-search')!, askHost, ask);
+  const settings = root.querySelector<HTMLElement>('#beta-view-settings')!; renderSettingsPanel(settings);
+  root.querySelector('.search-row')!.append(menuAnchor);
+  const mounted = new Set<AppView>(['sidepanel', 'settings']);
+  let active: AppView = 'sidepanel';
+  function show(view: AppView, detail?: string): void {
+    active = view;
+    root.querySelectorAll<HTMLElement>('.beta-sidepanel-shell > section').forEach(section => { section.hidden = section.id !== `beta-view-${view === 'sidepanel' ? 'search' : view}`; });
+    const target = root.querySelector<HTMLElement>(`#beta-view-${view === 'sidepanel' ? 'search' : view}`)!;
+    if (!mounted.has(view)) { mounted.add(view); if (view === 'manage') mountManage(target); if (view === 'highlights') mountHighlights(target); if (view === 'logs') mountLogs(target); }
+    else target.dispatchEvent(new window.Event('wr-refresh'));
+    if (view === 'sidepanel') target.querySelector('.search-row')!.append(menuAnchor);
+    else {
+      const back = target.querySelector<HTMLElement>('.utility-back')!;
+      let row = target.querySelector<HTMLElement>('.wr-utility-navigation');
+      if (!row) { row = document.createElement('div'); row.className = 'wr-utility-navigation'; back.replaceWith(row); row.append(back); }
+      row.append(menuAnchor);
+      const heading = target.querySelector<HTMLElement>('h1')!; heading.tabIndex = -1; heading.focus({ preventScroll: true });
     }
+    menuAnchor.querySelectorAll('a[data-view]').forEach(link => { if ((link as HTMLElement).dataset.view === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current'); });
+    if (view === 'settings' && detail) {
+      const group = settings.querySelector<HTMLDetailsElement>(`#settings-${detail === 'logging' ? 'advanced' : detail}`); if (group) group.open = true;
+      const logging = settings.querySelector<HTMLDetailsElement>('#settings-logging'); if (detail === 'logging' && logging) { logging.open = true; logging.querySelector<HTMLElement>('summary')?.focus(); }
+    }
+    if (view === 'sidepanel') { search.refresh(); if (detail) void search.openPage(detail); else target.querySelector<HTMLInputElement>('#beta-search-input')!.focus({ preventScroll: true }); }
+    window.scrollTo?.({ top: 0 });
   }
-  headerActions.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const action = btn.dataset.action;
-      if (action === 'open-logs') {
-        openToolPage('dist/beta/ui/logs/index.html');
-      } else if (action === 'open-highlights') {
-        openToolPage('dist/beta/ui/highlights/index.html');
-      } else if (action === 'open-settings') {
-        openToolPage('dist/beta/ui/manage/index.html');
+  window.addEventListener('wr-navigate', event => { const { view, url } = (event as CustomEvent<{ view: AppView; url?: string }>).detail; show(view, url); });
+  const menu = menuAnchor.querySelector('nav')!;
+  const askMemory = document.createElement('button'); askMemory.id = 'beta-ask-memory'; askMemory.append(icon('chat-circle'), document.createTextNode('Ask your memory')); askMemory.addEventListener('click', () => { menuAnchor.open = false; show('sidepanel'); search.askMemory(); }); menu.append(askMemory);
+  const capture = document.createElement('button'); capture.append(icon('file-text'), document.createTextNode('Capture current tab')); capture.addEventListener('click', () => { menuAnchor.open = false; show('sidepanel'); root.querySelector<HTMLButtonElement>('#beta-capture-now')!.click(); }); menu.append(capture);
+  for (const [label, id] of [['Capture queue', 'beta-queue-section'], ['Refresh pages', 'beta-refresh-recents']]) {
+    const button = document.createElement('button'); button.textContent = label!;
+    button.addEventListener('click', () => { menuAnchor.open = false; show('sidepanel'); if (id === 'beta-queue-section') search.openQueue(); else document.getElementById(id!)!.click(); }); menu.append(button);
+  }
+  window.addEventListener('keydown', event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); show('sidepanel'); root.querySelector<HTMLInputElement>('#beta-search-input')!.focus(); }
+    if (event.key === 'Escape') {
+      if (active !== 'sidepanel') show('sidepanel');
+      else {
+        const picker = askHost.querySelector<HTMLDetailsElement>('#beta-source-picker');
+        if (picker?.open) { picker.open = false; picker.querySelector<HTMLElement>('summary')!.focus(); }
+        else if (!askHost.hidden) ask.close();
+        else { const preview = root.querySelector<HTMLDetailsElement>('details[name=search-preview][open]'); if (preview) { preview.open = false; preview.querySelector<HTMLElement>('summary')!.focus(); } else root.querySelector<HTMLInputElement>('#beta-search-input')!.focus(); }
       }
-    });
+    }
   });
+  if (window.location.hash.startsWith('#settings')) show('settings', window.location.hash === '#settings-logging' ? 'logging' : window.location.hash === '#settings-advanced' ? 'advanced' : undefined);
+  else if (window.location.hash.startsWith('#page=')) void search.openPage(decodeURIComponent(window.location.hash.slice(6)));
+  void refreshRemoteProviderBanner(root.querySelector('#beta-remote-provider-banner'));
+  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => { if (message.type === 'BETA_SETTINGS_UPDATED') { const settings = message.settings as BetaSettings; if (settings?.theme) applyTheme(settings.theme); void refreshRemoteProviderBanner(root.querySelector('#beta-remote-provider-banner'), settings); } });
 }
 
 const root = document.querySelector<HTMLElement>('#app-root');
-
-if (root) {
-  void initTheme().then(() => {
-    renderApp(root);
-    console.info('[beta-ui:sidepanel] search + settings rendered');
-  });
-  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
-    if (message?.type === 'BETA_SETTINGS_UPDATED') {
-      const theme = (message as { settings?: { theme?: ThemeChoice } }).settings?.theme;
-      if (theme) applyTheme(theme);
-    }
-  });
-} else {
-  console.error('[beta-ui:sidepanel] #app-root not found');
-}
+if (root) void initTheme().then(() => renderApp(root));

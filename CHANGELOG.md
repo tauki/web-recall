@@ -4,6 +4,18 @@ Changelog
 All notable changes to this project are documented in this file.
 This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may include breaking changes.
 
+0.2.2 - Unreleased
+------------------
+- Bring the compact design to Search, inline saved-page previews, contextual Ask, Settings, Memory Manager, Highlights and Logs, with shared navigation and locally bundled Inter and Phosphor assets.
+- Remove the duplicate sidepanel title, use the available width, and keep the capture queue hidden while idle unless opened from Menu. Show active and failed work with retry controls.
+- Keep page-scoped Ask, follow-ups, retrieval tools and citations within the selected saved URLs, with cancellation and stale-response protection when the selection changes.
+- Preserve the real capture, settings, backup, embedding, highlights and log handlers behind the redesigned pages; give empty memory direct capture and setup actions.
+- Add downloaded browser model inventory with pinned revisions, file counts, estimated sizes, selected-model state and explicit Use/Remove controls. Removal preserves saved pages and vectors.
+- Require an explicit browser model download when files are missing. Show per-file download progress, a separate preparation state, cancellation and retry with completed cached files retained.
+- Restore active download controls when Models is reopened, serialize model loading and inference, wait for cleanup before removal, and prevent stale model work from marking a different selection ready.
+- Apply the selected faceted interlocking mark across toolbar icons, extension management, favicons and in-page branding, with transparent PNG exports verified at actual toolbar sizes.
+- Clear recovered log refresh errors, preserve keyboard focus through navigation, and add regression coverage plus an isolated preview for non-LLM flows and browser model controls.
+
 0.2.1 - Unreleased
 ------------------
 - Wait for pending capture admissions before restoring or deleting pages, including delayed retry lookups; keep later captures working normally.

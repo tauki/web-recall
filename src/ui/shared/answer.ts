@@ -1,5 +1,5 @@
 /** A deliberately small Markdown subset. Raw HTML, images and external link syntax stay text. */
-function appendInline(parent: HTMLElement, text: string, citations: Set<number>): void {
+function appendInline(parent: HTMLElement, text: string, citations: Set<number>, prefix = 'ask-source-'): void {
   const pattern = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*]+\*|\[\d+\])/g;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
@@ -8,7 +8,7 @@ function appendInline(parent: HTMLElement, text: string, citations: Set<number>)
     const number = Number(token.slice(1, -1));
     if (token.startsWith('[') && citations.has(number)) {
       const link = document.createElement('a');
-      link.href = `#ask-source-${number}`;
+      link.href = `#${prefix}${number}`;
       link.textContent = token;
       link.setAttribute('aria-label', `Source ${number}`);
       parent.append(link);
@@ -22,7 +22,7 @@ function appendInline(parent: HTMLElement, text: string, citations: Set<number>)
   parent.append(document.createTextNode(text.slice(offset)));
 }
 
-export function renderAnswer(target: HTMLElement, text: string, sourceIndices: number[] = []): void {
+export function renderAnswer(target: HTMLElement, text: string, sourceIndices: number[] = [], prefix = 'ask-source-'): void {
   const citations = new Set(sourceIndices);
   const fragment = document.createDocumentFragment();
   let paragraph: HTMLElement | null = null;
@@ -41,16 +41,16 @@ export function renderAnswer(target: HTMLElement, text: string, sourceIndices: n
     const item = /^\s*(?:[-*+] |\d+[.)] )(.+)$/.exec(line);
     if (heading) {
       const h = document.createElement(heading[1]!.length === 1 ? 'h2' : 'h3');
-      appendInline(h, heading[2]!, citations); fragment.append(h); paragraph = list = null;
+      appendInline(h, heading[2]!, citations, prefix); fragment.append(h); paragraph = list = null;
     } else if (item) {
       const tag = /^\s*\d/.test(line) ? 'OL' : 'UL';
       if (!list || list.tagName !== tag) { list = document.createElement(tag.toLowerCase()); fragment.append(list); }
-      const li = document.createElement('li'); appendInline(li, item[1]!, citations); list.append(li); paragraph = null;
+      const li = document.createElement('li'); appendInline(li, item[1]!, citations, prefix); list.append(li); paragraph = null;
     } else {
       list = null;
       if (!paragraph) { paragraph = document.createElement('p'); fragment.append(paragraph); }
       else paragraph.append(document.createTextNode(' '));
-      appendInline(paragraph, line, citations);
+      appendInline(paragraph, line, citations, prefix);
     }
   }
   target.replaceChildren(fragment);
