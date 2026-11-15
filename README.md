@@ -16,6 +16,13 @@ Screenshots
 These screenshots show the production UI with an isolated sample library and
 unavailable model endpoints. They do not show an installed extension's private data.
 
+**Search saved pages alongside the page you're reading.**
+
+![Web Recall open in Chrome's native sidepanel beside an MDN article, with search results and an expanded saved-page preview](.github/assets/screenshots/browser-sidepanel-0.2.2.jpg)
+
+Captured from the running extension in Chrome's native sidepanel, using the
+sample library with automatic capture paused and no model running.
+
 **Search and preview saved pages without repeating Chrome's side-panel title.**
 
 ![Web Recall Search with Menu beside the search field and an inline saved-page preview](.github/assets/screenshots/sidepanel-search-0.2.2.jpg)
