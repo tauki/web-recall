@@ -15,6 +15,9 @@ function renderLogs(): void {
   const tokens = state.text.toLowerCase().split(/\s+/).filter(Boolean);
   const filtered = state.entries.filter(entry => (state.level === 'all' || entry.level === state.level) && tokens.every(token => JSON.stringify(entry).toLowerCase().includes(token)));
   const list = document.getElementById('logs-list')!;
+  const focusedKey = list.contains(document.activeElement)
+    ? document.activeElement?.closest<HTMLDetailsElement>('details.log-entry')?.dataset.key
+    : undefined;
   const open = new Set(Array.from(list.querySelectorAll<HTMLDetailsElement>('details[open]')).map(item => item.dataset.key));
   list.replaceChildren();
   for (const entry of filtered.slice().reverse()) {
@@ -29,6 +32,10 @@ function renderLogs(): void {
     const heading = document.createElement('h2'); heading.textContent = 'Metadata';
     const code = document.createElement('pre'); code.textContent = entry.data ? JSON.stringify(entry.data, null, 2) : 'No metadata'; row.body.append(heading, code);
     list.append(row.article);
+  }
+  if (focusedKey) {
+    const focusedEntry = Array.from(list.querySelectorAll<HTMLDetailsElement>('details.log-entry')).find(entry => entry.dataset.key === focusedKey);
+    focusedEntry?.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
   }
   if (!filtered.length) { const p = document.createElement('p'); p.className = 'empty-tool-state'; p.textContent = state.entries.length ? 'No matching entries. Try another search or level.' : 'No logs yet. New runtime entries will appear here.'; list.append(p); }
   document.getElementById('logs-count')!.textContent = `${filtered.length} ${filtered.length === 1 ? 'entry' : 'entries'}${filtered.length !== state.entries.length ? ` of ${state.entries.length}` : ''}`;

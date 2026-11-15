@@ -6,6 +6,7 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.2 - Unreleased
 ------------------
+- Keep first-run capture choices visible independently of the idle queue, and preserve keyboard focus and expanded metadata when new log entries arrive.
 - Bring the compact design to Search, inline saved-page previews, contextual Ask, Settings, Memory Manager, Highlights and Logs, with shared navigation and locally bundled Inter and Phosphor assets.
 - Remove the duplicate sidepanel title, use the available width, and keep the capture queue hidden while idle unless opened from Menu. Show active and failed work with retry controls.
 - Keep page-scoped Ask, follow-ups, retrieval tools and citations within the selected saved URLs, retrieving question-matching passages even with tools disabled, with cancellation and stale-response protection when the selection changes.

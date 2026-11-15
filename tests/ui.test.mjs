@@ -594,6 +594,45 @@ test('capture queue hides when idle, opens from Menu and follows active and fail
   queue = []; await f.poll(); assert.equal(details.hidden, true);
 });
 
+test('incomplete capture setup remains visible with no jobs and disappears after an explicit policy choice', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  backend.stored.betaSettings.captureSetupComplete = false;
+  await backend.connect();
+  const fixture = await ui('sidepanel', {}, backend); t.after(fixture.close); await fixture.settle();
+  const setup = fixture.q('#beta-capture-setup');
+  assert.equal(setup.closest('[hidden], details:not([open])'), null, 'first-run policy choices must be exposed without opening a menu');
+  assert.match(setup.textContent, /capture starts paused/i);
+  assert.equal(backend.stored.betaSettings.paused, true);
+  assert.equal(fixture.q('#beta-queue-section').hidden, true);
+  fixture.q('#beta-open-capture-settings').click();
+  assert.equal(fixture.q('#beta-view-settings').hidden, false);
+  assert.equal(fixture.q('#settings-capture').open, true);
+  fixture.q('a[data-view="sidepanel"]').click();
+  fixture.q('#beta-enable-broad-capture').click(); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.captureSetupComplete, true);
+  assert.equal(backend.stored.betaSettings.paused, false);
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: backend.stored.betaSettings });
+  assert.equal(setup.hidden, true);
+  assert.equal(fixture.q('#beta-queue-section').hidden, true, 'completing setup must not expose an idle queue');
+});
+
+test('new log entries preserve keyboard focus and expanded metadata without stealing focus from filters', async t => {
+  let entries = [{ id: 1, level: 'info', message: 'Captured an article', data: { title: 'Saved article' } }];
+  const fixture = await ui('logs', { GET_LOGS: () => ({ logs: entries }) }); t.after(fixture.close); await fixture.settle();
+  const summary = fixture.q('#logs-list summary');
+  const label = summary.textContent;
+  summary.parentElement.open = true;
+  summary.focus();
+  entries = [...entries, { id: 2, level: 'warn', message: 'Indexing is waiting', data: {} }];
+  await fixture.poll(); await fixture.settle();
+  assert.equal(fixture.window.document.activeElement.textContent, label, 'a background update must retain keyboard position in the same log entry');
+  assert.match(fixture.q('#logs-list details[open]').textContent, /Saved article/);
+  const filter = fixture.q('#logs-text'); filter.focus();
+  entries = [...entries, { id: 3, level: 'info', message: 'Indexing resumed', data: {} }];
+  await fixture.poll(); await fixture.settle();
+  assert.equal(fixture.window.document.activeElement, filter, 'refresh must not move focus out of a filter');
+});
+
 test('empty memory provides capture and setup actions without an empty queue or count', async t => {
   const f = await ui('sidepanel', { GET_PAGE_LIST: () => ({ pages: [] }), CAPTURE_ACTIVE_TAB: () => ({ status: 'queued' }) }); t.after(f.close);
   assert.equal(f.q('.results-toolbar').hidden, true);

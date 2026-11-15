@@ -241,10 +241,10 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
       <div id="beta-search-results" class="beta-search-results"></div>
       <section id="beta-recents-section"><div id="beta-recents-list" class="beta-search-results"></div><button id="beta-refresh-recents" class="text-button wr-refresh-recents" hidden>Refresh</button></section>
       <button id="beta-capture-now" hidden>Capture current tab</button>
+      <section id="beta-capture-setup" hidden><h2>Choose your capture policy</h2><p class="wr-help">Capture starts paused. Choose broad capture or allow approved domains first.</p><div class="button-row"><button id="beta-enable-broad-capture" class="secondary-button">Enable broad capture</button><button id="beta-open-capture-settings" class="text-button">Set allowlist first</button></div></section>
       <details id="beta-queue-section" hidden><summary><span id="beta-queue-label">Capture queue</span>${iconMarkup('caret-down')}</summary>
         <div class="button-row"><button id="beta-retry-failed" class="text-button" hidden>Retry failed</button></div>
         <div id="beta-capture-status" class="wr-help"></div>
-        <section id="beta-capture-setup" hidden><h2>Choose your capture policy</h2><p class="wr-help">Capture starts paused. Choose broad capture or allow approved domains first.</p><div class="button-row"><button id="beta-enable-broad-capture" class="secondary-button">Enable broad capture</button><button id="beta-open-capture-settings" class="text-button">Set allowlist first</button></div></section>
       </details>
     </div>`;
   const q = <T extends HTMLElement>(selector: string): T => container.querySelector<T>(selector)!;
