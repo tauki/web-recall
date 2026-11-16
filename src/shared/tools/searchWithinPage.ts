@@ -14,6 +14,17 @@ function validateWithinPage(args: SearchWithinPageArgs | undefined): { ok: boole
   return { ok: true, value: { url: args.url.trim(), query: args.query.trim(), k, offset: args.offset ?? 0 } };
 }
 
+function originalMatchOffset(text: string, lowercaseOffset: number): number {
+  let original = 0, lowercase = 0;
+  for (const character of text) {
+    const next = lowercase + character.toLowerCase().length;
+    if (next > lowercaseOffset) return original;
+    lowercase = next;
+    original += character.length;
+  }
+  return original;
+}
+
 export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unknown): Promise<ToolHandlerResult> {
   const validation = validateWithinPage(rawArgs as SearchWithinPageArgs | undefined);
   if (!validation.ok || !validation.value) {
@@ -41,7 +52,8 @@ export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unk
       const text = chunk.text || '', lower = text.toLowerCase(), words = query.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [];
       const exact = lower.indexOf(query.toLowerCase());
       const first = exact >= 0 ? exact : words.map(word => lower.indexOf(word)).filter(position => position >= 0).sort((left, right) => left - right)[0] ?? 0;
-      const offset = Math.max(0, first - 80);
+      const originalFirst = lower.length === text.length ? first : originalMatchOffset(text, first);
+      const offset = Math.max(0, originalFirst - 80);
       return { chunkIndex: index, offset, score: ctx.scoreChunkMatch(text, query), snippet: ctx.cleanPreview(text.slice(offset, offset + 220)) };
     })
     .filter((chunk) => chunk.score > 0 && chunk.snippet)

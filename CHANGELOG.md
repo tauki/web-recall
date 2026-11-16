@@ -6,6 +6,10 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.3 - Unreleased
 ------------------
+- Restrict embedding/summary backfill and cancellation to trusted extension UI senders, including individual summary jobs sharing the backfill registry.
+- Recheck Private Cloud Compute consent after saved-memory tools finish, withholding newly retrieved text if consent was revoked while a tool was running.
+- Preserve literal backslashes and incomplete Unicode escape boundaries in streamed Ask drafts without clearing already decoded text.
+- Map case-insensitive Unicode search matches back to original saved-text offsets so previews and follow-up passage reads reach the actual evidence.
 - Show session-cached recents while refreshing immediately when the sidepanel becomes visible. Read bounded metadata-only index pages instead of the whole library, lazy-load older recents while scrolling, and invalidate cached snapshots after deletion or restore without changing saved content or vectors.
 - Keep updater controls only in the companion dashboard, show them inline without a Details disclosure, and use a stable update-check button and status area without a Cancel check control. Clarify Refresh model status separately from app updates.
 - Keep Web Recall's right-click menu available on selections, links, media, editable fields and frames. Capture this page saves the current tab, even when automatic capture is paused, while respecting domain rules.

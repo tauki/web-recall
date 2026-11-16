@@ -86,6 +86,8 @@ export function callApple(
                 options.signal?.throwIfAborted();
                 if (request.mode === 'private-cloud' && !(await getSettings()).applePrivateCloud) throw new Error('Private Cloud Compute consent was revoked.');
                 const result = await options.onToolCall!(call.name, JSON.parse(call.arguments), call.callId);
+                if (settled || options.signal?.aborted) return;
+                if (request.mode === 'private-cloud' && !(await getSettings()).applePrivateCloud) throw new Error('Private Cloud Compute consent was revoked.');
                 if (!settled && !options.signal?.aborted) port.postMessage({ id, action: 'tool_result', callId: call.callId, result: result.content });
               } catch (error) {
                 if (!settled && !options.signal?.aborted) finish(error instanceof Error ? error : new Error(String(error)));

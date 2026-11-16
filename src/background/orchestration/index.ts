@@ -357,7 +357,7 @@ export function orchestrateLifecycle(): void {
       }
       const handler = runtimeHandlers[message.type as RuntimeMessage['type']];
       if (!handler) return false;
-      const guarded = ['ASK_QUESTION', 'SEARCH_QUERY', 'CANCEL_ASK', 'CANCEL_SEARCH', 'PROVIDER_ACTION', 'SET_APPLE_CLOUD', 'REGENERATE_PAGE_SUMMARY'];
+      const guarded = ['ASK_QUESTION', 'SEARCH_QUERY', 'CANCEL_ASK', 'CANCEL_SEARCH', 'PROVIDER_ACTION', 'SET_APPLE_CLOUD', 'REGENERATE_PAGE_SUMMARY', 'BACKFILL_EMBEDDINGS', 'CANCEL_BACKFILL'];
       if (guarded.includes(message.type)) {
         const source = sender as { id?: string; url?: string };
         let trusted = false;

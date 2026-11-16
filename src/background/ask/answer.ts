@@ -21,7 +21,9 @@ export function streamedAnswer(text: string): string {
   if (!text.trimStart().startsWith('{')) return text;
   const match = /"answer"\s*:\s*"((?:\\[\s\S]|[^"\\])*)/.exec(text);
   if (!match) return '';
-  const fragment = match[1]!.replace(/\\u[0-9a-fA-F]{0,3}$/, '').replace(/\\$/, '');
+  let fragment = match[1]!;
+  const trailingEscape = /(\\+)(?:u[0-9a-fA-F]{0,3})?$/.exec(fragment);
+  if (trailingEscape && trailingEscape[1]!.length % 2 === 1) fragment = fragment.slice(0, trailingEscape.index + trailingEscape[1]!.length - 1);
   try { return JSON.parse(`"${fragment}"`) as string; }
   catch { return ''; }
 }

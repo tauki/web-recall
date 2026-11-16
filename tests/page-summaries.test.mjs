@@ -35,6 +35,69 @@ test('the registered single-summary action changes only its selected summary, ne
   assert.equal(requests.length, calls);
 });
 
+test('only extension UI senders can request embedding or summary backfills', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord(record('A saved page about local search.'));
+  const before = plain(await db.getPageRecord(url)), requests = [];
+  const runtime = await backend.load('src/background/orchestration/index.ts', { fetch: async input => {
+    const path = new URL(input).pathname; requests.push(path);
+    if (path === '/api/tags') return Response.json({ models: [{ name: 'chosen-model' }] });
+    if (path === '/api/ps') return Response.json({ models: [{ name: 'chosen-model', context_length: 4096 }] });
+    if (path === '/api/chat') return Response.json({ message: { content: 'The page explains local search.' } });
+    assert.fail(`Backfill must not request ${path}`);
+  } });
+  runtime.orchestrateLifecycle();
+  const senders = [
+    { id: backend.runtime.id, url: 'https://example.test/' },
+    { id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', url: backend.runtime.getURL('dist/beta/ui/manage/index.html') },
+    { id: backend.runtime.id, url: backend.runtime.getURL('dist/beta/offscreen/index.html') },
+    {}
+  ];
+  for (const sender of senders) {
+    for (const flags of [{}, { createSummaries: true }, { regenerateSummaries: true }]) {
+      const denied = await backend.send({ type: 'BACKFILL_EMBEDDINGS', requestId: 'untrusted-backfill', urls: [url], ...flags }, sender);
+      assert.match(denied.error || '', /Only Web Recall extension pages/, 'Untrusted backfill must be rejected before model work starts');
+    }
+  }
+  assert.deepEqual(requests, [], 'Rejected callers must not contact any provider');
+  assert.deepEqual(plain(await db.getPageRecord(url)), before);
+  const accepted = await backend.send({ type: 'BACKFILL_EMBEDDINGS', requestId: 'ui-backfill', urls: [url], createSummaries: true });
+  assert.equal(accepted.result.summariesUpdated, 1);
+  assert.equal((await db.getPageRecord(url)).summary, 'The page explains local search.');
+  assert.deepEqual(requests.filter(path => path === '/api/chat'), ['/api/chat']);
+});
+
+for (const action of ['BACKFILL_EMBEDDINGS', 'REGENERATE_PAGE_SUMMARY']) test(`untrusted cancellation cannot stop a UI-owned ${action} request`, async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts'); t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord(record('Saved text that must survive cancellation.'));
+  const before = plain(await db.getPageRecord(url)), generation = deferred();
+  let signal;
+  const runtime = await backend.load('src/background/orchestration/index.ts', { fetch: async (input, options = {}) => {
+    const path = new URL(input).pathname;
+    if (path === '/api/tags') return Response.json({ models: [{ name: 'chosen-model' }] });
+    if (path === '/api/ps') return Response.json({ models: [{ name: 'chosen-model', context_length: 4096 }] });
+    if (path === '/api/chat') { signal = options.signal; return generation.promise; }
+    assert.fail(`Summary work must not request ${path}`);
+  } });
+  runtime.orchestrateLifecycle();
+  const work = backend.send({ type: action, requestId: 'protected-summary', url, urls: [url], createSummaries: true });
+  t.after(async () => { generation.resolve(Response.json({ message: { content: 'Late summary.' } })); await work; });
+  await waitFor(() => signal, 'the active summary request');
+  for (const sender of [{ id: backend.runtime.id, url: 'https://example.test/' }, { id: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', url: backend.runtime.getURL('dist/beta/ui/manage/index.html') }]) {
+    const denied = await backend.send({ type: 'CANCEL_BACKFILL', requestId: 'protected-summary' }, sender);
+    assert.match(denied.error || '', /Only Web Recall extension pages/, 'Untrusted cancellation must be rejected even with a valid active request ID');
+    assert.equal(signal.aborted, false, 'An untrusted sender cannot stop a protected summary');
+  }
+  const stopped = await backend.send({ type: 'CANCEL_BACKFILL', requestId: 'protected-summary' });
+  assert.equal(stopped.cancelled, true);
+  assert.equal(signal.aborted, true);
+  assert.match((await work).error, /Stopped by user/);
+  generation.resolve(Response.json({ message: { content: 'Late summary.' } })); await tick();
+  assert.deepEqual(plain(await db.getPageRecord(url)), before, 'Stopping must preserve saved text, embeddings and summary state');
+});
+
 async function fixture(t, generate = async () => 'A concise saved summary.') {
   const db = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   t.after(async () => (await db.openDatabase()).close());

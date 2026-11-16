@@ -27,3 +27,25 @@ test('streaming a structured answer reveals only its answer field across escaped
   }
   assert.equal(streamedAnswer(json), answer);
 });
+
+test('streamed JSON answers preserve literal backslashes and never erase a decoded prefix at escape boundaries', () => {
+  const cases = [];
+  for (const count of [1, 2, 3, 4]) {
+    for (const suffix of ['', 'u', 'u1', 'u12', 'u123', 'u1234']) {
+      const answer = 'Saved path: ' + '\\'.repeat(count) + suffix;
+      cases.push({ answer, json: JSON.stringify({ outcome: 'answered', answer }) });
+    }
+  }
+  cases.push({ answer: 'Keep \\ then cat [7]', json: String.raw`{"answer":"Keep \\ then \u0063\u0061\u0074 [7]"}` });
+  cases.push({ answer: 'Path \\cat [7]', json: String.raw`{"answer":"Path \\\u0063\u0061\u0074 [7]"}` });
+  for (const { answer, json } of cases) {
+    let previous = '';
+    for (let end = 1; end <= json.length; end++) {
+      const partial = streamedAnswer(json.slice(0, end));
+      assert.ok(answer.startsWith(partial), `Unexpected decoded text at ${end} in ${json}`);
+      assert.ok(partial.startsWith(previous), `The visible draft regressed at ${end} in ${json}`);
+      previous = partial;
+    }
+    assert.equal(previous, answer);
+  }
+});

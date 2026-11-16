@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource, plain, tick } from './helpers.mjs';
+import { loadSource, plain, tick, waitFor } from './helpers.mjs';
 import { providerFixture } from './provider-fixture.mjs';
 
 async function nativeFixture(settings = {}) {
@@ -178,6 +178,39 @@ test('revoking cloud consent blocks later dispatch even when a request retains t
   settings.applePrivateCloud = false;
   await assert.rejects(module.callApple({ action: 'generate', mode: 'private-cloud', cloudConsent: true, prompt: 'Private saved evidence' }), /consent was revoked/);
   assert.equal(ports.length, 1, 'revoked cloud requests must not start a helper or fall back to another mode');
+});
+
+for (const revoke of [true, false]) test(`a deferred cloud tool result ${revoke ? 'is withheld after consent is revoked' : 'is delivered while consent remains granted'}`, async () => {
+  const settings = { applePrivateCloud: true };
+  const { module, ports } = await nativeFixture(settings);
+  let release, started;
+  const waiting = new Promise(resolve => { release = resolve; });
+  const entered = new Promise(resolve => { started = resolve; });
+  const chunks = [];
+  const pending = module.callApple({ action: 'generate', mode: 'private-cloud', cloudConsent: true, prompt: 'Read saved evidence', tools: [{ name: 'search_memory', description: 'Search saved memory', parameters: { type: 'object', properties: {} } }] }, {
+    onToolCall: async () => { started(); return waiting; }, onChunk: text => chunks.push(text)
+  });
+  const completed = pending.then(value => ({ value }), error => ({ error }));
+  await waitFor(() => ports.length === 1, 'the consented native request');
+  const port = ports[0];
+  port.emit({ type: 'tool_call', toolCall: { callId: 'deferred-read', name: 'search_memory', arguments: '{}' } });
+  await entered;
+  if (revoke) settings.applePrivateCloud = false;
+  release({ content: 'Newly retrieved saved evidence' });
+  await waitFor(() => port.closed || port.messages.some(message => message.action === 'tool_result'), 'the completed tool delivery decision');
+  const delivered = port.messages.filter(message => message.action === 'tool_result');
+  if (revoke) {
+    assert.equal(delivered.length, 0, 'Revoked cloud access must not receive newly retrieved text');
+    assert.match((await completed).error.message, /consent was revoked/);
+    assert.equal(port.closed, true);
+    port.emit({ type: 'chunk', text: 'Late cloud output' });
+    assert.deepEqual(chunks, []);
+  } else {
+    assert.deepEqual(delivered, [{ id: port.messages[0].id, action: 'tool_result', callId: 'deferred-read', result: 'Newly retrieved saved evidence' }]);
+    port.emit({ type: 'done', text: 'A supported answer' });
+    assert.equal((await completed).value, 'A supported answer');
+  }
+  assert.equal(ports.length, 1, 'The tool response must not start another provider or native request');
 });
 
 test('oversized UTF-8 requests fail before starting a native host', async () => {

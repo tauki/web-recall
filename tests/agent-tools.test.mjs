@@ -97,6 +97,35 @@ test('finding text late in a large saved chunk gives a bounded read offset that 
   assert.ok(read.data.text.length <= 1200);
 });
 
+test('case-insensitive Unicode matches lead back to the original saved passage for exact and token searches', async () => {
+  for (const prefix of ['İstanbul '.repeat(120), '😀 İSTANBUL ΣΟΣ '.repeat(120)]) {
+    const text = prefix + 'The rollout code is MAPLE-42. More details.';
+    for (const query of ['MAPLE-42', 'MAPLE-42 absentword']) {
+      const runtime = await fixture({ pages: [{ ...saved, text, chunks: [{ text }] }], pageText: new Map([[url, text]]) });
+      const found = await run(runtime, 'search_within_page', { url, query });
+      assert.equal(found.ok, true);
+      assert.equal(found.data.matches.length, 1, `A saved match must not disappear for ${query}`);
+      const match = found.data.matches[0];
+      assert.match(match.snippet, /MAPLE-42/);
+      assert.ok(match.offset >= 0 && match.offset < text.length);
+      const read = await run(runtime, 'fetch_more', { url, chunkIndex: match.chunkIndex, offset: match.offset });
+      assert.equal(read.ok, true);
+      assert.match(read.data.text, /MAPLE-42/);
+      assert.ok(read.data.text.length <= 1200);
+    }
+  }
+});
+
+test('a query matching an expanded lowercase character still previews the original Unicode text', async () => {
+  const text = '😀 Background. '.repeat(120) + 'İstanbul holds the saved evidence.';
+  const runtime = await fixture({ pages: [{ ...saved, text, chunks: [{ text }] }], pageText: new Map([[url, text]]) });
+  const found = await run(runtime, 'search_within_page', { url, query: 'i\u0307stanbul' });
+  assert.equal(found.data.matches.length, 1);
+  assert.match(found.data.matches[0].snippet, /İstanbul/);
+  const read = await run(runtime, 'fetch_more', { url, chunkIndex: found.data.matches[0].chunkIndex, offset: found.data.matches[0].offset });
+  assert.match(read.data.text, /İstanbul/);
+});
+
 test('concurrent page tools share one authorized snapshot and keep distinct invocation identities', async () => {
   let reads = 0, release;
   const waiting = new Promise(resolve => { release = resolve; }), events = [];
