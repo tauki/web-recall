@@ -12,13 +12,37 @@ test('deletion removes associated text, vectors, pending work and highlight cach
   await mod.savePageRecord(page());
   await mod.savePageRecord(page('https://keep.test'));
   await mod.appendProcessing({ url: page().url, status: 'queued', payload: { text: 'private text' } });
-  await mod.upsertHighlight({ date: '2026-09-18', payload: { text: 'private text' } });
+  const initial = await mod.openDatabase();
+  await new Promise((resolve, reject) => {
+    const transaction = initial.transaction(['embeddings', 'highlights'], 'readwrite');
+    for (const url of [page().url, 'https://keep.test']) transaction.objectStore('embeddings').put({ key: `${url}::0`, pageUrl: url, embedding: [1, 0] });
+    transaction.objectStore('highlights').put({ date: '2026-09-18', payload: { text: 'private text' } });
+    transaction.oncomplete = resolve; transaction.onabort = reject;
+  });
   await mod.deletePages([page().url]);
   const db = await mod.openDatabase();
   assert.equal((await rows(db, 'pages')).length, 1);
   assert.deepEqual((await rows(db, 'embeddings')).map(row => row.pageUrl), ['https://keep.test']);
   assert.equal((await rows(db, 'processing')).length, 0);
   assert.equal((await rows(db, 'highlights')).length, 0);
+  db.close();
+});
+
+test('ordinary page writes use canonical vectors without rewriting or deleting retained legacy stores', async () => {
+  const mod = await database();
+  const db = await mod.openDatabase();
+  const legacyVector = { key: 'legacy', pageUrl: 'https://legacy.test', embedding: [9, 8] };
+  const legacyHighlight = { date: '2020-01-01', payload: 'Keep legacy content until an explicit deletion' };
+  await new Promise((resolve, reject) => {
+    const transaction = db.transaction(['embeddings', 'highlights'], 'readwrite');
+    transaction.objectStore('embeddings').put(legacyVector); transaction.objectStore('highlights').put(legacyHighlight);
+    transaction.oncomplete = resolve; transaction.onabort = reject;
+  });
+  await mod.savePageRecord(page());
+  assert.deepEqual(plain((await mod.getPageRecord(page().url)).chunks), page().chunks);
+  assert.deepEqual(await rows(db, 'embeddings'), [legacyVector]);
+  assert.deepEqual(await rows(db, 'highlights'), [legacyHighlight]);
+  db.close();
 });
 
 test('compare-and-save rejects stale backfill and deleted capture work atomically', async () => {
@@ -36,6 +60,7 @@ async function backfillFixture(vectors) {
   let current = { ...page(), updatedAt: 123, chunks: [{ text: 'already filled', embedding: [9, 9], embeddingKey: 'old' }, { text: 'missing', embedding: [] }] };
   const requests = []; let invalidations = 0;
   const mod = await loadSource('src/background/embeddings/backfill.ts', '', {
+    '../summaries/index': { queuePageSummary: async () => false },
     './index': { getEmbeddingConfig: () => ({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'test' }), computeEmbeddingsForChunks: async texts => { requests.push(plain(texts)); return vectors; } },
     '../storage/manager': { storageManager: { listAllPages: async () => [current], getPageRecord: async () => current, savePageRecord: async value => { current = value; } } },
     '../offscreen/index': { invalidateOffscreenIndex: async () => { invalidations++; } },
@@ -62,6 +87,32 @@ test('empty explicit backfill targets never select the whole library', async () 
   const f = await backfillFixture([[1, 2]]);
   const result = await f.mod.backfillMissingEmbeddings(50, true, []);
   assert.equal(result.processed, 0); assert.equal(f.requests.length, 0);
+});
+
+test('single-page backfill reads only its selected record and never enumerates unrelated saved content', async () => {
+  const selected = { ...page(), updatedAt: 1, chunks: [{ text: 'Selected text', embedding: [] }] };
+  const reads = [], requests = [];
+  const mod = await loadSource('src/background/embeddings/backfill.ts', '', {
+    '../storage/manager': { storageManager: { listAllPages: () => assert.fail('A selected-page operation must not enumerate the library'), getPageRecord: async url => { reads.push(url); return url === selected.url ? selected : undefined; }, savePageRecord: async () => {} } },
+    './index': { getEmbeddingConfig: () => ({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'test' }), computeEmbeddingsForChunks: async texts => { requests.push(plain(texts)); return [[1, 0]]; } },
+    '../offscreen/index': { invalidateOffscreenIndex: async () => {} },
+    '../../shared/logger/index': { log: async () => {} },
+    '../summaries/index': { queuePageSummary: async () => false }
+  });
+  const result = await mod.backfillMissingEmbeddings(1, false, [selected.url, selected.url]);
+  assert.equal(result.updated, 1);
+  assert.deepEqual(requests, [['Selected text']]);
+  assert.ok(reads.every(url => url === selected.url));
+});
+
+test('Highlights is a read-only view and remains available when derived-cache writes fail', async () => {
+  const mod = await loadSource('src/background/highlights/index.ts', '', {
+    '../storage/manager': { storageManager: { listAllPages: async () => [page()], upsertHighlight: async () => { throw Error('Disk is read-only'); } } }
+  });
+  const date = new Date(1);
+  const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const result = await mod.getHighlightForDate(key);
+  assert.deepEqual(plain(result.entries), [{ title: 'Article', url: page().url }]);
 });
 
 test('browser provider can be disabled and partial model updates preserve custom endpoint', async () => {
@@ -114,13 +165,11 @@ test('streaming delivers progressive text including split unicode and trailing N
 const askMocks = {
   '../storage/manager': { storageManager: { getPageRecord: async () => ({ title: 'Article', chunks: [{ text: 'UNRELATED HEADER' }, { text: 'RELEVANT PASSAGE' }] }) } },
   '../search/index': { searchStoredPages: async () => [] },
-  '../../shared/tools/index': { ToolsRuntime: class {} },
   '../providers/chat': { callChat: async () => ({}), callChatJson: async () => null, getChatConfig: async () => ({}), normalizeToolArguments: value => value, streamChat: async () => '' },
   '../settings/index': { getSettings: async () => ({}) },
-  '../calibration/index': { getCalibrationSnapshot: () => ({ wLLM: 0 }) }
 };
 test('Ask synthesis keeps selected passages; references resolve against all supplied sources', async () => {
-  const mod = await loadSource('src/background/ask/index.ts', 'buildContextBlocks, buildContextFromSources, filterSourcesByCitations, hasValidCitations', askMocks, { chrome: chromeFixture });
+  const mod = await loadSource('src/background/ask/index.ts', 'buildContextBlocks, buildContextFromSources, filterSourcesByCitations', askMocks, { chrome: chromeFixture });
   const { sources } = await mod.buildContextBlocks([{ url: 'https://a.test', chunkIndex: 1, snippet: 'RELEVANT PASSAGE' }], 1200);
   const blocks = await mod.buildContextFromSources(sources, 1200);
   assert.match(blocks, /RELEVANT PASSAGE/); assert.doesNotMatch(blocks, /UNRELATED HEADER/);
@@ -128,7 +177,6 @@ test('Ask synthesis keeps selected passages; references resolve against all supp
   assert.deepEqual(plain(mod.filterSourcesByCitations(sources, 'Fact [1]')).map(source => source.index), [1]);
   assert.equal(mod.filterSourcesByCitations(sources, 'Fact [99]').length, 0);
   assert.equal(mod.filterSourcesByCitations(sources, 'No citation').length, 0);
-  assert.equal(mod.hasValidCitations('Fact [1], invented [99]', sources), false);
 });
 
 test('Ask cancellation interrupts retrieval and does not start synthesis after it resolves', async () => {
@@ -246,7 +294,6 @@ test('tool evidence receives stable source IDs across repeated reads', async () 
 test('search reranking sees the matched chunk, not the page introduction', async () => {
   const mod = await loadSource('src/background/search/index.ts', 'enrichRerankCandidates', {
     '../storage/manager': { storageManager: { getPageRecord: async () => ({ title: 'Article', chunks: [{ text: 'unrelated introduction' }, { text: 'matching evidence' }] }) } },
-    '../calibration/index': { getCalibrationSnapshot: () => ({ wLLM: 0 }) },
     '../embeddings/index': { computeEmbeddingsForQueries: async () => [], getEmbeddingConfig: () => ({}) },
     '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}) },
     '../providers/chat': { callChat: async () => ({}), callChatJson: async () => ({}), getChatConfig: async () => ({}) },

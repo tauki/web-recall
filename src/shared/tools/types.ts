@@ -9,6 +9,7 @@ export type ToolSearchHit = {
   score?: number;
   hitsFromPage?: number;
   partial?: boolean;
+  timestamp?: number;
 };
 
 export type ToolsRuntimeOptions = {
@@ -16,13 +17,25 @@ export type ToolsRuntimeOptions = {
   pageText: Map<string, string>;
   pages: PageRecord[];
   maxSlice?: number;
-  recordEvidence?: (url: string, text: string) => number;
+  recordEvidence?: (url: string, text: string, metadata?: { timestamp?: number; title?: string }) => number;
+  loadPage?: (url: string) => Promise<PageRecord | undefined>;
+  maxCalls?: number;
+  signal?: AbortSignal;
+  onActivity?: (event: ToolActivity) => void;
+  allowSearchDiscovery?: boolean;
   searchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
-  quickSearchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
 };
 
 export type ToolRunResult = {
   content: string;
+};
+
+export type ToolActivity = {
+  callId: string;
+  tool: string;
+  status: 'started' | 'completed' | 'failed' | 'cached' | 'cancelled';
+  ms?: number;
+  error?: string;
 };
 
 export type ToolMetric = {
@@ -40,11 +53,13 @@ export type FetchMoreArgs = {
   radius?: number;
   start?: number;
   end?: number;
+  offset?: number;
+  limit?: number;
 };
 
-export type SearchMemoryArgs = { query: string; k?: number };
-export type SearchWithinPageArgs = { url: string; query: string; k?: number };
-export type GetPageChunksArgs = { url: string; limit?: number };
+export type SearchMemoryArgs = { query: string; k?: number; offset?: number };
+export type SearchWithinPageArgs = { url: string; query: string; k?: number; offset?: number };
+export type GetPageChunksArgs = { url: string; limit?: number; offset?: number };
 export type SummaryArgs = { url: string };
 
 export type ToolName =
@@ -67,9 +82,9 @@ export type ToolHandlerResult = {
 };
 
 export type ToolsCache = {
-  fetchMore: Map<string, Array<{ s: number; e: number; text: string }>>;
   summary: Map<string, string>;
   search: Map<string, string>;
+  searchResults: Map<string, ToolSearchHit[]>;
 };
 
 export interface ToolsHandlerContext {
@@ -78,7 +93,6 @@ export interface ToolsHandlerContext {
   pages: PageRecord[];
   maxSlice: number;
   searchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
-  quickSearchMemory: (query: string, k: number) => Promise<ToolSearchHit[]>;
   cache: ToolsCache;
   metrics: ToolMetric[];
   usedUrls: Set<string>;
@@ -86,8 +100,7 @@ export interface ToolsHandlerContext {
   getPage(url: string): PageRecord | undefined;
   extractDomain(url: string): string;
   cleanPreview(text: string, limit?: number): string;
-  buildChunkRows(url: string, limit?: number): Array<{ chunkIndex: number; preview: string; length: number }>;
+  buildChunkRows(url: string, limit?: number, offset?: number): Array<{ chunkIndex: number; preview: string; length: number }>;
   scoreChunkMatch(text: string, query: string): number;
-  mergeRange(url: string, start: number, end: number, content: string): string;
   ensureUrlTracked(url: string): void;
 }

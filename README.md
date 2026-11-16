@@ -8,58 +8,116 @@ text of pages you visit, generates semantic embeddings locally via either
 Ollama or the optional in-browser runtime, stores the results in your browser,
 and provides a side-panel UI for semantic search. You can also ask questions
 about what you've read using retrieval-augmented generation (RAG) powered by
-locally running models.
+locally running models, including Apple's on-device Foundation Models through
+the optional [Mac companion](#mac-companion).
 
 Screenshots
 -----------
 
-These screenshots show the production UI with an isolated sample library and
-unavailable model endpoints. They do not show an installed extension's private data.
+Shown with sample pages.
 
 **Search saved pages alongside the page you're reading.**
 
-![Web Recall open in Chrome's native sidepanel beside an MDN article, with search results and an expanded saved-page preview](.github/assets/screenshots/browser-sidepanel-0.2.2.jpg)
-
-Captured from the running extension in Chrome's native sidepanel, using the
-sample library with automatic capture paused and no model running.
-
-**Search and preview saved pages without repeating Chrome's side-panel title.**
-
-![Web Recall Search with Menu beside the search field and an inline saved-page preview](.github/assets/screenshots/sidepanel-search-0.2.2.jpg)
-
-Ask remains available inside a preview, with exact page selection and expandable
-citations. These screenshots were captured without running Ask or a model.
+![Web Recall's native Chrome sidepanel showing saved pages beside an MDN article](.github/assets/screenshots/readme-browser-sidepanel-0.2.3.jpg)
 
 <details>
-<summary>Settings, Memory Manager, Highlights and Logs</summary>
+<summary>More screenshots: Search, Ask, Settings, Memory, Highlights and Logs</summary>
+
+**Search and preview saved pages.**
+
+![Search results with an expanded saved-page preview](.github/assets/screenshots/readme-search-0.2.3.png)
+
+**Ask about an individual page or your search results.**
+
+![A question composed inside an individual saved-page preview](.github/assets/screenshots/readme-ask-0.2.3.png)
 
 **Settings reveal capture, model, appearance and advanced controls on demand.**
 
-![Settings with capture controls expanded and Menu beside Back to search](.github/assets/screenshots/settings-0.2.2.jpg)
+![Settings with appearance controls expanded](.github/assets/screenshots/readme-settings-0.2.3.png)
 
-**Review saved pages and their embedding status in Memory Manager.**
+**Manage saved pages, backups and embeddings.**
 
-![Memory Manager with an expanded saved page and its maintenance actions](.github/assets/screenshots/memory-manager-0.2.2.jpg)
+![Memory Manager with saved pages and maintenance tools](.github/assets/screenshots/readme-memory-manager-0.2.3.png)
 
 **Expand a day to see its highlighted pages, or a log entry to inspect metadata.**
 
-![Daily Highlights grouped by capture date](.github/assets/screenshots/highlights-0.2.2.jpg)
+![Daily Highlights with an expanded day's saved pages](.github/assets/screenshots/readme-highlights-0.2.3.png)
 
-![Structured Logs with text filtering and expanded metadata](.github/assets/screenshots/logs-0.2.2.jpg)
-
-**Inspect and remove browser model downloads in Settings.**
-
-This view uses small, synthetic cache files for visual verification; the displayed
-sizes are fixture sizes, not the actual embedding model sizes.
-
-![Downloaded browser model rows with cached sizes, selected state and removal action](.github/assets/screenshots/browser-model-downloads-0.2.2.jpg)
-
-Browser model downloads also show per-file progress, with Cancel and Retry controls.
-Completed files are reused on retry; model preparation has its own state.
-
-![Browser model download progress with cancellation in the compact Settings view](.github/assets/screenshots/browser-download-progress-0.2.2.jpg)
+![Structured Logs with filtering controls and expanded entry metadata](.github/assets/screenshots/readme-logs-0.2.3.png)
 
 </details>
+
+Mac companion
+-------------
+
+The optional **Web Recall Mac companion** runs Ask and background page summaries
+with Apple Foundation Models instead of an Ollama chat model. Your saved pages
+and embeddings stay in Chrome; the companion does not store a second library.
+Keep the app running while using the Apple provider.
+
+### Requirements
+
+- An Apple Silicon Mac running macOS 26.4 or newer, with Apple Intelligence
+  enabled and its on-device model available.
+- Google Chrome 142 or newer with Web Recall installed.
+- To build from source: Xcode 27 with its Swift toolchain selected, Node.js 24
+  or newer, and pnpm. See [Setup](#setup) for the Node.js and pnpm commands.
+
+### Installation
+
+1. From this repository's root, install dependencies and build the app:
+
+   ```sh
+   pnpm install
+   pnpm apple:build
+   ```
+
+2. Open `chrome://extensions` and copy Web Recall's extension ID. Register that
+   exact ID, replacing `YOUR_EXTENSION_ID` below:
+
+   ```sh
+   node scripts/install-apple-host.mjs --extension-id YOUR_EXTENSION_ID
+   ```
+
+   The installer copies the app to `~/Applications/Web Recall.app` and registers
+   its native messaging bridge in Google Chrome's default user-data directory.
+   Add `--dry-run` to inspect the installation paths and registration without
+   changing anything. Opening the app alone does not register it with Chrome.
+
+3. Open `~/Applications/Web Recall.app`. Its menu-bar icon provides **Open
+   dashboard**, **Pause / Resume native inference**, **Stop active work** and
+   **Quit**. Closing the dashboard leaves the app running; **Launch at login**
+   is optional.
+
+### Connect to Chrome
+
+1. Open Web Recall's sidepanel, then **Menu → Settings → Models → Chat provider**.
+2. Select **Apple Foundation Models** and grant Chrome's optional native-app
+   permission when prompted.
+3. Use **Test connection** to check model availability and the detected context
+   size. If Chrome cannot find the bridge, rerun the registration command with
+   the ID of the extension you are currently using.
+4. Keep your current embedding provider, or select **In-browser EmbeddingGemma**
+   for browser-local embeddings. Changing the chat provider does not regenerate
+   existing vectors. Open a saved page and ask a question to try Apple inference.
+
+**Pause** and **Stop** affect native inference, not browser capture. **Quit**
+disconnects Chrome; reopen the app to reconnect. Private Cloud Compute is off by
+default and is not required for on-device use.
+
+Protecting your library
+-----------------------
+
+Saved pages, summaries and embeddings live in IndexedDB in your Chrome profile.
+The extension requests `unlimitedStorage` to exempt its library and browser-model
+cache from Chrome's storage eviction. Library and capture-queue writes request
+strict durability and report success only after the transaction completes.
+Logs and generated Highlights retain the browser's default write durability.
+
+This is not a backup: uninstalling the extension, removing the Chrome profile,
+storage corruption or disk failure can still lose data. Periodically use
+**Memory → Export** to save a backup outside Chrome, especially before removing
+or reinstalling the extension. Export does not run automatically or upload data.
 
 Directory contents
 ------------------
@@ -198,8 +256,36 @@ Setup
    **Using N pages** disclosure lets you inspect and change the exact selection.
    Tools remain within those selected saved URLs. Open a numbered citation to
    inspect the captured evidence, then **Open page** to visit the original URL.
-   Follow-up questions retain the conversation for that page selection until
-   you clear it or close the panel. **Menu → Ask your memory** searches the library.
+   Follow-up questions keep earlier answers visible, and sending clears the
+   composer immediately. Longer conversations compact older context for the
+   selected model while keeping the full visible chat and stable source IDs.
+   Each page selection has a separate conversation. These chats stay in the
+   current panel session. Individual-page questions keep running when another
+   item is opened; the item's status indicates when its answer is ready. Stop
+   affects only the displayed chat. Saved-text previews use Show more/Show less
+   without making a model request. These chats are
+   not a persistent chat archive; Clear conversation,
+   replacing/deleting memory, or closing the browser panel clears them.
+   **Menu → Ask your memory** searches the library.
+
+   After capture is saved, background summarization uses your selected chat
+   provider and model. Unchanged pages reuse their saved summary; changed text
+   invalidates it. Previews show the summary when ready, otherwise saved text.
+   Capture and embeddings remain saved even if the chat model is unavailable.
+   In **Memory → Tools → Embeddings**, select **Create missing summaries after
+   embeddings** to summarize older pages after backfill. This also includes pages
+   whose embeddings are already complete and never replaces existing summaries.
+   To replace an older or poor summary, select **Regenerate existing summaries
+   too** and run **Backfill**. This explicitly rebuilds summaries within the page
+   limit; it does not force replacement embeddings. Summaries use independent
+   section notes followed by a whole-page overview, rather than keeping only the
+   final section's rolling summary. A failed regeneration keeps the old summary.
+   For just one page, expand its Memory Manager row and choose **Regenerate
+   summary**. This does not generate or replace embeddings or touch other pages.
+   The button becomes **Stop summary** while working; failures keep the old summary.
+   An individual page's **Re-embed** also creates its missing summary afterward,
+   regardless of the bulk checkbox; an existing summary is kept unchanged.
+   **Stop** cancels that backfill's pending model work.
 
 6. Manage & inspect captures
 
@@ -219,6 +305,14 @@ Setup
    it stays hidden unless opened from Menu; closing the empty queue hides it again.
    An empty library offers a direct capture action and a capture settings link.
 
+   Recents show a small browser-session snapshot immediately on reopening and
+   refresh from local storage as soon as the panel becomes visible. Only the
+   latest 20 titles, URLs and timestamps are cached—not saved text or vectors.
+   Older pages load in batches as you scroll, with **Load more** available for
+   keyboard use. Deletion and imports invalidate the snapshot. The session
+   cache clears on browser restart or extension reload; your IndexedDB library
+   remains saved. These refreshes do not run models or regenerate embeddings.
+
    Chrome's **Extension options** still opens Memory Manager. Standalone
    Highlights and Logs remain at `dist/beta/ui/highlights/index.html` and
    `dist/beta/ui/logs/index.html` under the extension origin.
@@ -231,23 +325,98 @@ Setup
    model. The connection test probes the actual chat endpoint, which helps
    surface `OLLAMA_ORIGINS` misconfiguration.
 
+   **Apple Foundation Models:** Follow [Mac companion](#mac-companion) for
+   requirements, installation and connecting Chrome. Its dashboard shows model
+   availability, context size, connections and operation outcomes—not prompts
+   or page contents.
+
+   **Companion updates:** The dashboard offers **Check for updates**
+   and **Install & restart**. **Automatic updates** is off by default. When
+   enabled, the app checks GitHub at startup and daily, verifies the signed
+   release, and waits for active inference to finish before restarting.
+   You can cancel the download or wait. A failed startup restores and
+   relaunches the previous app; failed automatic versions are not retried
+   automatically. Updates replace only the companion, not Chrome's saved
+   pages, models, settings or extension. Keep the app at
+   `~/Applications/Web Recall.app`, in a directory owned by your user.
+   Existing companions without the updater need one manual installation.
+   **Refresh model status** checks Apple's on-device model readiness and
+   reported context size; it does not check GitHub or generate an answer.
+
+   Release maintainers generate the dedicated updater key once with
+   `pnpm apple:update:keygen`: its private key stays in macOS Keychain and
+   only `native/apple/update-public-key.txt` belongs in Git. Do not regenerate
+   or replace that public key for an ordinary release. After building,
+   `pnpm apple:package` produces the companion ZIP and signed update metadata
+   in `dist/apple-release/`. Pull requests run native regression tests; companion
+   app assembly, signing and packaging run only for release tags. Tag builds use
+   the matching `APPLE_UPDATE_SIGNING_KEY` Actions secret and attach both assets
+   to the GitHub release. This key is separate from the Chrome extension key and
+   from Apple's Developer ID signing identity.
+
+   Ask streams answers with saved-source citations and supports **Stop**.
+   The menu bar uses the extension mark and shows operational status; the
+   dashboard contains the reported Apple model and app version. On macOS 27,
+   the model name comes from Apple's
+   runtime variant API rather than an assumed model version.
+   When tools are enabled, Apple uses the same browser-owned saved-memory
+   tools as Ollama. It can discover additional saved pages in a library-wide
+   Ask, or stay strictly within a page selection. Only bounded previews and
+   requested passages cross the native bridge, not a whole-library copy.
+   The helper queries the model's actual
+   context size and budgets prompts and tool output against it. It stores no
+   library and runs no HTTP server. The Chrome bridge talks to the running
+   companion over a same-user, executable-checked private Unix socket.
+   **Pause** cancels native work and blocks new model requests, but does not
+   pause browser capture. **Quit** cancels native work and disconnects Chrome;
+   the bridge never silently launches the companion again. Reopen the app to
+   reconnect. Browser embeddings and saved-page reading remain independent.
+   When research context fills, the same selected model compacts working notes
+   and continues with stable evidence references. If the tool-call allowance
+   is exhausted, or recovery still finds no new evidence, it finishes from
+   already-read evidence without more tools.
+   It does not retry unrelated failures, switch providers, bypass Stop, or
+   introduce an inference timeout. Apple citations are rendered from structured
+   source IDs; an honest insufficient-evidence response does not need a citation.
+
+   **Private Cloud Compute is off by default.** Its separate switch requires
+   confirmation because prompts and selected passages leave the Mac. It also
+   requires macOS 27, network access, Apple eligibility, and a companion signed
+   with Apple's managed PCC entitlement. The locally built companion does not
+   include that entitlement. An unavailable Apple mode fails explicitly;
+   neither cloud mode nor Ollama is selected as a silent fallback.
+
+   Local and CI builds use ad-hoc macOS code signatures unless
+   `APPLE_CODESIGN_IDENTITY` is supplied; update signatures do not replace
+   Developer ID signing or notarization for public Mac distribution. The
+   updater does not disable Gatekeeper or remove quarantine. Run
+   `pnpm apple:test` for deterministic protocol, tool and lifecycle
+   checks. After `pnpm apple:build:debug` and
+   `pnpm build:beta`, the advisory command
+   `node tests/apple-native-smoke.mjs --allow-local-inference` exercises real
+   on-device Ask, citations, and Stop in an isolated Chrome for Testing
+   profile with synthetic pages. It uses no existing Chrome profile or PCC,
+   removes its temporary host registration, and is not part of `pnpm test`.
+
    Configure the final provider endpoint URL directly: redirects, including
    same-origin redirects, are rejected. Remote-origin consent is checked before
    each request and embedding retry; revoking consent stops subsequent requests.
 
    If Tools are enabled, Ask can call:
-   - `search_memory({ query, k? })`
+   - `search_memory({ query, k?, offset? })`
    - `get_page_summary({ url })`
-   - `get_page_chunks({ url, limit? })`
-   - `search_within_page({ url, query, k? })`
-   - `fetch_more({ url, chunkIndex })`
-   - `fetch_more({ url, aroundChunkIndex, radius })`
-   - `fetch_more({ url, start, end })`
+   - `get_page_chunks({ url, limit?, offset? })`
+   - `search_within_page({ url, query, k?, offset? })`
+   - `fetch_more({ url, chunkIndex, offset, limit? })`
 
    **Settings → Advanced** contains retrieval, answer, tool and logging controls.
-   `Max tool steps = 0` means no user-imposed limit. Model inference has no
-   automatic timeout; use **Stop** to cancel. Auto's initial source count is a
-   retrieval starting point, not a hard cap on citations.
+   `Max tool calls = 0` means no user-imposed limit; a 100-call safety allowance
+   still applies. Follow `nextArgs` to continue bounded reads or result pages.
+   Model inference has no automatic timeout; use **Stop** to cancel. Auto's
+   initial source count is a retrieval starting point, not a hard cap on citations.
+   Repeated lookups carry their original evidence plus a no-progress notice;
+   the loop can reorganize its context but will not spend the whole allowance
+   repeating unchanged reads.
 
 8. Shortcuts and context menu
 
@@ -256,8 +425,10 @@ Setup
    - Within the panel, `Ctrl+K` / `Command+K` returns to search. Arrow keys move
      between results; Escape closes the source chooser, Ask or an open preview,
      or returns from a utility page. Enter sends a question; Shift+Enter adds a line.
-   - Right-click: open the panel, capture the current page now, search the
-     current selection, toggle pause, or open Highlights.
+   - Right-click a page, selected text, link or image → **Web Recall → Capture
+     this page**. This captures the current tab, not just the selected text or
+     linked page. **Open Web Recall** opens the panel. The extension toolbar's
+     right-click menu also offers **Pause capture / Resume capture**.
 
 9. Capture rules and pause
 
@@ -295,11 +466,10 @@ Add `--model-cache` on a separate port to seed synthetic model files in that
 localhost origin and exercise inventory/removal through the browser Cache API.
 These are non-runnable fixtures; they do not access the installed extension's cache.
 
-Release
--------
+Changelog
+---------
 
-- Workspace version: `0.2.2` (unreleased).
-- See [CHANGELOG.md](./CHANGELOG.md) for details.
+See [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 Security and privacy
 --------------------
@@ -319,7 +489,6 @@ Limitations
 * Semantic search still uses a browser-local retrieval pipeline over stored
   embeddings; larger datasets will need more aggressive optimization.
 * Reranking uses a local chat model. Keep candidate sets small for predictable latency.
-* Memory Manager and logs are functional but still likely to evolve.
 
 Export/Import
 -------------

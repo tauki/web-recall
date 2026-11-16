@@ -11,7 +11,44 @@ permissions:
   contents: write
 
 jobs:
+  apple-native:
+    name: Apple companion build and tests
+    runs-on: xcode-27
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+      - name: Run native regression tests
+        timeout-minutes: 10
+        env:
+          LIBDISPATCH_COOPERATIVE_POOL_STRICT: '1'
+        run: pnpm apple:test
+      - name: Build companion release
+        if: startsWith(github.ref, 'refs/tags/')
+        run: pnpm apple:build
+      - name: Sign companion release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          APPLE_UPDATE_SIGNING_KEY: ${{ secrets.APPLE_UPDATE_SIGNING_KEY }}
+        run: |
+          test -n "$APPLE_UPDATE_SIGNING_KEY" || { echo 'Missing companion update-signing secret'; exit 1; }
+          pnpm apple:package
+      - name: Upload signed companion
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-companion
+          if-no-files-found: error
+          path: dist/apple-release/*
+
   build:
+    needs: apple-native
     runs-on: ubuntu-latest
 
     steps:
@@ -50,6 +87,13 @@ jobs:
             dist/web-recall-${{ steps.meta.outputs.version }}.zip
             dist/web-recall-${{ steps.meta.outputs.version }}.sha256
 
+      - name: Download signed companion
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/download-artifact@v4
+        with:
+          name: signed-companion
+          path: dist/apple-release
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -57,5 +101,6 @@ jobs:
           files: |
             dist/web-recall-${{ steps.meta.outputs.version }}.zip
             dist/web-recall-${{ steps.meta.outputs.version }}.sha256
+            dist/apple-release/*
           generate_release_notes: true
           token: ${{ secrets.GITHUB_TOKEN }}

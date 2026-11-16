@@ -78,15 +78,15 @@ test('streaming keeps the worker alive through the response body and cleans up o
 });
 
 test('memory search tool waits for local inference and ignores obsolete timeout settings', async () => {
-  let finish; const pending=new Promise(resolve=>{finish=resolve;}); let fallbacks=0;
+  let finish; const pending=new Promise(resolve=>{finish=resolve;});
   const {ToolsRuntime}=await loadSource('src/shared/tools/runtime.ts','',{}, {setTimeout(){throw Error('No tool deadline');}});
-  const runtime=new ToolsRuntime({allowedUrls:new Set(),pageText:new Map(),pages:[],toolTimeoutMs:8000,
-    searchMemory:()=>pending,quickSearchMemory:async()=>{fallbacks++;return[];}});
+  const runtime=new ToolsRuntime({allowedUrls:new Set(),pageText:new Map(),pages:[],toolTimeoutMs:8000,allowSearchDiscovery:true,
+    searchMemory:()=>pending});
   const result=runtime.runToolCall('search_memory',{query:'slow inference'});
-  await tick(); assert.equal(fallbacks,0);
+  await tick();
   finish([{url:'https://example.test',title:'Relevant page',snippet:'Evidence'}]);
   const payload=JSON.parse((await result).content);
-  assert.equal(payload.data[0].title,'Relevant page'); assert.equal(fallbacks,0);
+  assert.equal(payload.data[0].title,'Relevant page');
 });
 
 test('explicit cancellation targets only its operation and prevents duplicate request IDs', async () => {
@@ -110,6 +110,7 @@ test('stopping backfill aborts inference, preserves existing vectors and skips l
   const controller=new AbortController(); let requests=0, writes=0, signal;
   const page={url:'https://a.test',chunks:[{text:'saved',embedding:[9,9]},{text:'missing',embedding:[]}],updatedAt:1};
   const mod=await loadSource('src/background/embeddings/backfill.ts','',{
+    '../summaries/index': { queuePageSummary: async () => false },
     './index':{getEmbeddingConfig:()=>({provider:'ollama',model:'test',baseUrl:'http://localhost'}),computeEmbeddingsForChunks:async(_text,s)=>{requests++;signal=s;return new Promise((_resolve,reject)=>s.addEventListener('abort',()=>reject(s.reason),{once:true}));}},
     '../storage/manager':{storageManager:{listAllPages:async()=>[page,{...page,url:'https://b.test'}],savePageRecord:async()=>{writes++;}}},
     '../offscreen/index':{invalidateOffscreenIndex:async()=>{}},'../../shared/logger/index':{log:async()=>{}}
@@ -128,7 +129,6 @@ test('Search passes cancellation to query rewriting and reranking without starti
     const mod=await loadSource('src/background/search/index.ts','generateQueryVariations, rerankWithCrossEncoder',{
       '../providers/chat':{getChatConfig:async()=>({model:'test'}),callChat:chat,callChatJson:chat},
       '../settings/index':{getSettings:async()=>({})},
-      '../calibration/index':{getCalibrationSnapshot:()=>({wSim:0,wLLM:0})},
       '../storage/manager':{storageManager:{getPageRecord:async()=>undefined}},
       '../embeddings/index':{computeEmbeddingsForQueries:async()=>{throw Error('Unexpected embedding call');},getEmbeddingConfig:()=>({})},
       '../offscreen/index':{ensureOffscreenDocument:async()=>{},sendOffscreenMessage:async()=>({})}

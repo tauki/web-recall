@@ -1,16 +1,28 @@
 import type { SearchWithinPageArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
-function validateWithinPage(args: SearchWithinPageArgs | undefined): { ok: boolean; value?: { url: string; query: string; k: number }; errors?: string[] } {
+function validateWithinPage(args: SearchWithinPageArgs | undefined): { ok: boolean; value?: { url: string; query: string; k: number; offset: number }; errors?: string[] } {
   if (!args || typeof args.url !== 'string' || args.url.trim().length === 0) {
     return { ok: false, errors: ['url (string) is required'] };
   }
+  if ([args.k, args.offset].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0))) return { ok: false, errors: ['k and offset must be non-negative integers'] };
   if (typeof args.query !== 'string' || args.query.trim().length === 0) {
     return { ok: false, errors: ['query (string) is required'] };
   }
   let k = typeof args.k === 'number' ? Math.trunc(args.k) : 5;
   if (k < 1) k = 1;
   if (k > 10) k = 10;
-  return { ok: true, value: { url: args.url.trim(), query: args.query.trim(), k } };
+  return { ok: true, value: { url: args.url.trim(), query: args.query.trim(), k, offset: args.offset ?? 0 } };
+}
+
+function originalMatchOffset(text: string, lowercaseOffset: number): number {
+  let original = 0, lowercase = 0;
+  for (const character of text) {
+    const next = lowercase + character.toLowerCase().length;
+    if (next > lowercaseOffset) return original;
+    lowercase = next;
+    original += character.length;
+  }
+  return original;
 }
 
 export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unknown): Promise<ToolHandlerResult> {
@@ -23,7 +35,7 @@ export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unk
     };
   }
 
-  const { url, query, k } = validation.value;
+  const { url, query, k, offset } = validation.value;
   if (!ctx.allowedUrls.has(url)) {
     return {
       ok: false,
@@ -33,16 +45,19 @@ export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unk
   }
 
   const record = ctx.getPage(url);
+  if (!record) return { ok: false, error: { code: 'not_found', message: 'This saved page is no longer available' }, content: '' };
   const chunks = record?.chunks || [];
   const matches = chunks
-    .map((chunk, index) => ({
-      chunkIndex: index,
-      score: ctx.scoreChunkMatch(chunk.text || '', query),
-      snippet: ctx.cleanPreview(chunk.text || '')
-    }))
+    .map((chunk, index) => {
+      const text = chunk.text || '', lower = text.toLowerCase(), words = query.toLowerCase().match(/[\p{L}\p{N}]{2,}/gu) || [];
+      const exact = lower.indexOf(query.toLowerCase());
+      const first = exact >= 0 ? exact : words.map(word => lower.indexOf(word)).filter(position => position >= 0).sort((left, right) => left - right)[0] ?? 0;
+      const originalFirst = lower.length === text.length ? first : originalMatchOffset(text, first);
+      const offset = Math.max(0, originalFirst - 80);
+      return { chunkIndex: index, offset, score: ctx.scoreChunkMatch(text, query), snippet: ctx.cleanPreview(text.slice(offset, offset + 220)) };
+    })
     .filter((chunk) => chunk.score > 0 && chunk.snippet)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, k);
+    .sort((a, b) => b.score - a.score);
 
   ctx.ensureUrlTracked(url);
   return {
@@ -53,10 +68,11 @@ export async function runSearchWithinPage(ctx: ToolsHandlerContext, rawArgs: unk
         title: record?.title || url,
         url,
         domain: ctx.extractDomain(url),
-        matches
+        matches: matches.slice(offset, offset + k)
       },
-      usedArgs: { url, query, k },
-      suggest: matches.length ? 'Use fetch_more with a returned chunkIndex to inspect surrounding context' : 'Try get_page_chunks({ url }) to inspect the page structure'
+      usedArgs: { url, query, k, offset },
+      nextArgs: offset + k < matches.length ? { url, query, k, offset: offset + k } : null,
+      suggest: matches.length ? 'Use fetch_more with the returned chunkIndex and offset to read the matching passage' : 'Try get_page_chunks({ url }) to inspect the page structure'
     })
   };
 }

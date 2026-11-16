@@ -210,6 +210,11 @@ export function installSharedStyles(): void {
     .beta-result-card details[open] > summary .result-snippet { display:none; }
     .beta-result-card > .content-entry > summary > .content-entry-caret { top:20px;bottom:auto; }
     .wr-ask-question { font-size:13px;line-height:20px;font-weight:500;margin:12px 0; }
+    .wr-ask-turn { padding-bottom:16px;margin-bottom:16px;border-bottom:1px solid var(--border); }
+    .wr-item-ask-state:not(:empty) { display:block;margin-top:4px;color:var(--accent); }
+    .preview-toggle { margin-bottom:8px; }
+    .content-entry-body:has(> #beta-ask-host:not([hidden])) > .preview-toggle { display:none; }
+    .content-entry-body:has(> #beta-ask-host:not([hidden])) > .wr-help { display:none; }
     .wr-ask-options > summary { padding:5px 0; }
     .wr-source-chooser { max-height:300px;overflow:auto; }
     .tool-disclosure > summary > .wr-icon { margin-left:auto;color:var(--muted); }

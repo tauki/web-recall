@@ -15,7 +15,7 @@ import {
   probeBrowserEmbeddingRuntime
 } from '../embeddings/index';
 import { searchStoredPages } from '../search/index';
-import { handleAskQuestion, cancelAskQuestion } from '../ask/index';
+import { handleAskQuestion, cancelAskQuestion, type AskOptions } from '../ask/index';
 import {
   deleteManagePages,
   exportManagePages,
@@ -31,9 +31,11 @@ import { providerManager } from '../providers/manager';
 import { getProviderBaseUrl } from '../providers/config';
 import { listLogs, clearLogs } from '../logs/index';
 import { listProcessingEntries } from '../processing/index';
-import { getCalibration, updateCalibration } from '../calibration/index';
 import { backfillMissingEmbeddings } from '../embeddings/backfill';
+import { queuePageSummary } from '../summaries/index';
 import type { BetaSettings, EmbeddingConfig } from '../../shared/config/index';
+import { AppleSafetyBlockError } from '../../shared/providerErrors';
+import { getRecentPages } from '../manage/recents';
 
 type RuntimeMessage =
   | { type: 'CANCEL_ASK'; requestId: string }
@@ -41,18 +43,20 @@ type RuntimeMessage =
   | { type: 'CANCEL_BACKFILL'; requestId: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'SET_SETTINGS'; payload?: Partial<BetaSettings> }
+  | { type: 'SET_APPLE_CLOUD'; enabled: boolean; acknowledgeCloud?: boolean }
   | { type: 'GET_EMBEDDING_CONFIG' }
   | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig>; acknowledgeRemoteOrigin?: boolean }
   | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string }
-  | { type: 'ASK_QUESTION'; question: string; options?: { useSearch?: boolean; maxResults?: number; requestId?: string; scopeUrls?: string[]; history?: Array<{ question: string; answer: string }> } }
+  | { type: 'ASK_QUESTION'; question: string; options?: AskOptions }
   | { type: 'GET_MODEL_SETTINGS' }
-  | { type: 'SET_MODEL'; key: 'chatModel' | 'summaryModel'; value?: string }
+  | { type: 'SET_MODEL'; key: 'chatModel'; value?: string }
   | { type: 'LIST_MODELS' }
   | { type: 'GET_PROVIDERS' }
   | { type: 'GET_PROVIDER_CONFIG'; providerId: string }
   | { type: 'SET_PROVIDER_SETTING'; providerId: string; key: string; value?: string; acknowledgeRemoteOrigin?: boolean }
   | { type: 'PROVIDER_ACTION'; providerId: string; action: string; baseOverride?: string }
   | { type: 'GET_PAGE_LIST' }
+  | { type: 'GET_RECENT_PAGES'; after?: unknown }
   | { type: 'GET_PAGE_PREVIEW'; url: string }
   | { type: 'DELETE_PAGE'; url?: string; urls?: string[] }
   | { type: 'GET_ALL_PAGES' }
@@ -65,9 +69,8 @@ type RuntimeMessage =
   | { type: 'CLEAR_LOGS' }
   | { type: 'GET_PROCESSING' }
   | { type: 'CAPTURE_ACTIVE_TAB' }
-  | { type: 'GET_CALIBRATION' }
-  | { type: 'SET_CALIBRATION'; payload?: { wSim?: number; wLLM?: number } }
-  | { type: 'BACKFILL_EMBEDDINGS'; requestId?: string; limit?: number; force?: boolean; urls?: string[] }
+  | { type: 'BACKFILL_EMBEDDINGS'; requestId?: string; limit?: number; force?: boolean; urls?: string[]; createSummaries?: boolean; regenerateSummaries?: boolean }
+  | { type: 'REGENERATE_PAGE_SUMMARY'; requestId: string; url: string }
   | { type: 'GET_BROWSER_EMBED_STATUS'; probe?: boolean }
   | { type: 'DOWNLOAD_BROWSER_EMBED'; requestId?: string; model?: string; revision?: string }
   | { type: 'GET_BROWSER_MODEL_DOWNLOAD' }
@@ -92,7 +95,10 @@ function respondWith(
   promise: Promise<Record<string, unknown>>,
   sendResponse: SendResponse
 ): boolean {
-  promise.then(sendResponse).catch((err) => sendResponse({ error: toErrorMessage(err) }));
+  promise.then(sendResponse).catch((err) => sendResponse({
+    error: toErrorMessage(err),
+    ...(err instanceof AppleSafetyBlockError ? { errorCode: err.code } : {})
+  }));
   return true;
 }
 
@@ -121,11 +127,18 @@ const runtimeHandlers: RuntimeHandlerMap = {
   GET_SETTINGS: (_message, sendResponse) =>
     respondWith(getSettings().then((settings) => ({ settings })), sendResponse),
 
-  SET_SETTINGS: (message, sendResponse) =>
-    respondWith(
-      updateSettings(message.payload || {}).then((settings) => ({ settings })),
-      sendResponse
-    ),
+  SET_SETTINGS: (message, sendResponse) => {
+    const payload = { ...message.payload };
+    delete payload.applePrivateCloud;
+    return respondWith(updateSettings(payload).then(settings => ({ settings })), sendResponse);
+  },
+
+  SET_APPLE_CLOUD: (message, sendResponse) => {
+    if (typeof message.enabled !== 'boolean' || (message.enabled && message.acknowledgeCloud !== true)) {
+      sendResponse({ error: 'Private Cloud Compute requires explicit acknowledgement.' }); return false;
+    }
+    return respondWith(updateSettings({ applePrivateCloud: message.enabled }).then(settings => ({ settings })), sendResponse);
+  },
 
   GET_EMBEDDING_CONFIG: (_message, sendResponse) => {
     try {
@@ -178,14 +191,8 @@ const runtimeHandlers: RuntimeHandlerMap = {
         sendResponse
       );
     }
-    return respondWith(
-      updateModelSettings({
-        [message.key]: message.value
-      } as Partial<Awaited<ReturnType<typeof getModelSettings>>>).then((settings) => ({
-        settings
-      })),
-      sendResponse
-    );
+    sendResponse({ error: 'Choose a chat model.' });
+    return false;
   },
 
   LIST_MODELS: (_message, sendResponse) =>
@@ -230,6 +237,9 @@ const runtimeHandlers: RuntimeHandlerMap = {
       getManagePages().then((pages) => ({ pages })),
       sendResponse
     ),
+
+  GET_RECENT_PAGES: (message, sendResponse) =>
+    respondWith(getRecentPages(message.after).then(batch => ({ ...batch })), sendResponse),
 
   DELETE_PAGE: (message, sendResponse) => {
     const urls = Array.isArray(message.urls)
@@ -293,18 +303,6 @@ const runtimeHandlers: RuntimeHandlerMap = {
 
   CAPTURE_ACTIVE_TAB: (_message, sendResponse) => handleCaptureActiveTab(sendResponse),
 
-  GET_CALIBRATION: (_message, sendResponse) =>
-    respondWith(
-      getCalibration().then((calibration) => ({ calibration })),
-      sendResponse
-    ),
-
-  SET_CALIBRATION: (message, sendResponse) =>
-    respondWith(
-      updateCalibration(message.payload || {}).then((calibration) => ({ calibration })),
-      sendResponse
-    ),
-
   BACKFILL_EMBEDDINGS: (message, sendResponse) =>
     respondWith(
       runOperation('backfill', message.requestId, (signal) => backfillMissingEmbeddings(
@@ -312,10 +310,19 @@ const runtimeHandlers: RuntimeHandlerMap = {
         Boolean(message.force),
         Array.isArray(message.urls) ? (message.urls as string[]) : undefined,
         (progress) => { void chrome.runtime.sendMessage({ type: 'BACKFILL_PROGRESS', requestId: message.requestId, ...progress }).catch(() => {}); },
-        signal
+        signal,
+        message.createSummaries === true,
+        message.regenerateSummaries === true
       )).then((result) => ({ result })),
       sendResponse
     ),
+
+  REGENERATE_PAGE_SUMMARY: (message, sendResponse) => {
+    if (typeof message.url !== 'string' || !/^https?:\/\//i.test(message.url) || typeof message.requestId !== 'string' || !message.requestId) {
+      sendResponse({ error: 'Choose a saved page to regenerate its summary.' }); return false;
+    }
+    return respondWith(runOperation('backfill', message.requestId, async signal => ({ updated: await queuePageSummary(message.url, signal, true) })), sendResponse);
+  },
 
   GET_BROWSER_EMBED_STATUS: (message, sendResponse) =>
     message.probe
@@ -342,7 +349,7 @@ export function orchestrateLifecycle(): void {
   chrome.runtime.onMessage.addListener(
     (
       message: (RuntimeMessage & Record<string, unknown>) | undefined,
-      _sender: unknown,
+      sender: unknown,
       sendResponse: SendResponse
     ) => {
       if (!message || typeof message !== 'object' || typeof message.type !== 'string') {
@@ -350,6 +357,16 @@ export function orchestrateLifecycle(): void {
       }
       const handler = runtimeHandlers[message.type as RuntimeMessage['type']];
       if (!handler) return false;
+      const guarded = ['ASK_QUESTION', 'SEARCH_QUERY', 'CANCEL_ASK', 'CANCEL_SEARCH', 'PROVIDER_ACTION', 'SET_APPLE_CLOUD', 'REGENERATE_PAGE_SUMMARY', 'BACKFILL_EMBEDDINGS', 'CANCEL_BACKFILL'];
+      if (guarded.includes(message.type)) {
+        const source = sender as { id?: string; url?: string };
+        let trusted = false;
+        try {
+          const url = new URL(source.url || '');
+          trusted = source.id === chrome.runtime.id && url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && url.pathname.startsWith('/dist/beta/ui/');
+        } catch { trusted = false; }
+        if (!trusted) { sendResponse({ error: 'Only Web Recall extension pages can request model operations.' }); return false; }
+      }
       return (handler as (message: RuntimeMessage & Record<string, unknown>, sendResponse: SendResponse) => boolean)(
         message,
         sendResponse

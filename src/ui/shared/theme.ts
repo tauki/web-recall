@@ -1,6 +1,7 @@
 export type ThemeChoice = 'light' | 'dark' | 'system';
 
 let stopSystemThemeListener: (() => void) | null = null;
+const THEME_CACHE_KEY = 'webRecallTheme';
 
 export function resolveTheme(choice: ThemeChoice): 'light' | 'dark' {
   if (choice === 'system') {
@@ -12,6 +13,16 @@ export function resolveTheme(choice: ThemeChoice): 'light' | 'dark' {
 export function applyTheme(theme: ThemeChoice): void {
   document.documentElement.dataset.themeChoice = theme;
   document.documentElement.dataset.theme = resolveTheme(theme);
+  try { window.localStorage.setItem(THEME_CACHE_KEY, theme); } catch { return; }
+}
+
+export function restoreCachedTheme(): void {
+  let theme: ThemeChoice = 'system';
+  try {
+    const cached = window.localStorage.getItem(THEME_CACHE_KEY);
+    if (cached === 'light' || cached === 'dark' || cached === 'system') theme = cached;
+  } catch { theme = 'system'; }
+  applyTheme(theme);
 }
 
 export function bindSystemThemeListener(): () => void {

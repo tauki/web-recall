@@ -8,6 +8,7 @@ export type BetaSettings = {
   askMaxSources: number;
   theme: 'light' | 'dark' | 'system';
   activeProviderId: string;
+  applePrivateCloud: boolean;
   logLevel: 'off' | 'debug' | 'info' | 'warn' | 'error';
   answerMode: 'concise' | 'detailed';
   queryRewrite: boolean;
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: BetaSettings = {
   askMaxSources: 5,
   theme: 'light',
   activeProviderId: 'ollama',
+  applePrivateCloud: false,
   logLevel: 'info',
   answerMode: 'concise',
   queryRewrite: true,

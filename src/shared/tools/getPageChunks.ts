@@ -1,13 +1,14 @@
 import type { GetPageChunksArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
-function validatePageChunks(args: GetPageChunksArgs | undefined): { ok: boolean; value?: { url: string; limit: number }; errors?: string[] } {
+function validatePageChunks(args: GetPageChunksArgs | undefined): { ok: boolean; value?: { url: string; limit: number; offset: number }; errors?: string[] } {
   if (!args || typeof args.url !== 'string' || args.url.trim().length === 0) {
     return { ok: false, errors: ['url (string) is required'] };
   }
+  if ([args.limit, args.offset].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0))) return { ok: false, errors: ['limit and offset must be non-negative integers'] };
   let limit = typeof args.limit === 'number' ? Math.trunc(args.limit) : 8;
   if (limit < 1) limit = 1;
   if (limit > 20) limit = 20;
-  return { ok: true, value: { url: args.url.trim(), limit } };
+  return { ok: true, value: { url: args.url.trim(), limit, offset: args.offset ?? 0 } };
 }
 
 export async function runGetPageChunks(ctx: ToolsHandlerContext, rawArgs: unknown): Promise<ToolHandlerResult> {
@@ -20,7 +21,7 @@ export async function runGetPageChunks(ctx: ToolsHandlerContext, rawArgs: unknow
     };
   }
 
-  const { url, limit } = validation.value;
+  const { url, limit, offset } = validation.value;
   if (!ctx.allowedUrls.has(url)) {
     return {
       ok: false,
@@ -30,7 +31,8 @@ export async function runGetPageChunks(ctx: ToolsHandlerContext, rawArgs: unknow
   }
 
   const record = ctx.getPage(url);
-  const chunks = ctx.buildChunkRows(url, limit);
+  if (!record) return { ok: false, error: { code: 'not_found', message: 'This saved page is no longer available' }, content: '' };
+  const chunks = ctx.buildChunkRows(url, limit, offset);
   ctx.ensureUrlTracked(url);
   return {
     ok: true,
@@ -43,8 +45,9 @@ export async function runGetPageChunks(ctx: ToolsHandlerContext, rawArgs: unknow
         chunkCount: record?.chunks?.length || 0,
         chunks
       },
-      usedArgs: { url, limit },
-      suggest: 'Use fetch_more({ url, aroundChunkIndex, radius }) or fetch_more({ url, chunkIndex }) to inspect a promising chunk'
+      usedArgs: { url, limit, offset },
+      nextArgs: offset + limit < (record.chunks?.length || 0) ? { url, limit, offset: offset + limit } : null,
+      suggest: 'For a precise missing fact, use search_within_page({ url, query }) and read at its returned chunkIndex and character offset. To read from a listed chunk’s start, use fetch_more({ url, chunkIndex, offset: 0 }).'
     })
   };
 }

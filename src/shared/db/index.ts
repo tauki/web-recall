@@ -1,7 +1,9 @@
 import { normalizeLegacyPage } from './records';
+import { pageContent } from '../pageContent';
+import type { RecentPage, RecentCursor, RecentPageBatch } from '../recents';
 
 const DB_NAME = 'webRecallBeta';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 const MIGRATIONS_STORE = 'migrations';
 const LEGACY_DATABASE = 'webMemoryDB';
 
@@ -42,22 +44,6 @@ export type PageRecord = {
   lastEmbeddedAt?: number;
   summary?: string;
   versions?: Array<{ timestamp: number; text: string; chunks: PageChunkRecord[]; summary?: string }>;
-};
-
-export type HighlightRecord = {
-  date: string;
-  payload: unknown;
-  updatedAt: number;
-};
-
-export type EmbeddingRecord = {
-  key: string;
-  pageUrl: string;
-  chunkIndex: number;
-  text: string;
-  embedding: number[];
-  embeddingKey?: string;
-  createdAt: number;
 };
 
 export type LogRecord = {
@@ -118,6 +104,7 @@ export function openDatabase(): Promise<IDBDatabase> {
         }
       }
       if (oldVersion < 3) db.createObjectStore(MIGRATIONS_STORE, { keyPath: 'key' });
+      if (oldVersion < 4) request.transaction!.objectStore(PAGES_STORE).createIndex('recentMetadata', ['timestamp', 'url', 'title']);
     };
     request.onsuccess = () => {
       const db = request.result;
@@ -168,7 +155,7 @@ async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
       else pages.set(page.url, page);
     }
     await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, MIGRATIONS_STORE], 'readwrite');
+      const tx = db.transaction([PAGES_STORE, MIGRATIONS_STORE], 'readwrite', { durability: 'strict' });
       const markers = tx.objectStore(MIGRATIONS_STORE);
       const check = markers.get(LEGACY_DATABASE);
       check.onsuccess = () => {
@@ -183,16 +170,12 @@ async function migrateLegacyDatabase(db: IDBDatabase): Promise<void> {
               return;
             }
             tx.objectStore(PAGES_STORE).put(page);
-            page.chunks.forEach((chunk, chunkIndex) => tx.objectStore(EMBEDDINGS_STORE).put({
-              key: `${page.url}::${chunkIndex}`, pageUrl: page.url, chunkIndex, ...chunk, createdAt: page.createdAt
-            }));
           };
         }
         markers.put({ key: LEGACY_DATABASE, completedAt: Date.now() });
       };
       tx.oncomplete = () => resolve();
       tx.onabort = () => reject(tx.error || new Error('Legacy library migration aborted'));
-      tx.onerror = () => reject(tx.error);
     });
   } finally {
     legacy?.close();
@@ -240,6 +223,30 @@ export async function listRecentPages(limit = 50): Promise<PageRecord[]> {
   });
 }
 
+export async function listRecentPageSummaries(limit: number, after?: RecentCursor): Promise<RecentPageBatch> {
+  if (!Number.isInteger(limit) || limit < 1) return { pages: [], nextCursor: null };
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(PAGES_STORE, 'readonly');
+    const result: RecentPage[] = [];
+    let last: RecentCursor | null = null, nextCursor: RecentCursor | null = null;
+    const range = after ? IDBKeyRange.upperBound([after.timestamp, after.url, after.title], true) : null;
+    const request = tx.objectStore(PAGES_STORE).index('recentMetadata').openKeyCursor(range, 'prev');
+    request.onsuccess = () => {
+      const cursor = request.result;
+      if (!cursor) return;
+      if (result.length === limit) { nextCursor = last; return; }
+      const [timestamp, url, title] = cursor.key as [number, string, string];
+      result.push({ url, title: title || url, timestamp });
+      last = { timestamp, url, title };
+      cursor.continue();
+    };
+    tx.oncomplete = () => resolve({ pages: result, nextCursor });
+    tx.onabort = () => reject(tx.error || new Error('Unable to read recent pages'));
+    request.onerror = () => reject(request.error);
+  });
+}
+
 export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'updatedAt'> & Partial<Pick<PageRecord, 'createdAt' | 'updatedAt'>>, options: { expectedUpdatedAt?: number; requireProcessing?: boolean; preserveMissingEmbeddings?: boolean; discardProcessing?: boolean; replace?: boolean } = {}): Promise<void> {
   const existing = options.replace ? undefined : await getPageRecord(record.url);
   const now = Date.now();
@@ -260,8 +267,12 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
   };
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, HIGHLIGHTS_STORE, PROCESSING_STORE], 'readwrite');
+    const tx = db.transaction([PAGES_STORE, PROCESSING_STORE], 'readwrite', { durability: 'strict' });
     const write = (current?: PageRecord): void => {
+      const sameContent = current && pageContent(current) === pageContent(normalized);
+      if (options.replace) normalized.summary = record.summary;
+      else if (sameContent) normalized.summary = options.expectedUpdatedAt !== undefined ? current?.summary : record.summary?.trim() ? record.summary : current?.summary;
+      else normalized.summary = record.summary !== current?.summary ? record.summary : undefined;
       if (options.preserveMissingEmbeddings) {
         const savedChunks = new Map<string, PageChunkRecord>();
         for (const chunk of current?.chunks || []) {
@@ -274,26 +285,8 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
       }
       tx.objectStore(PAGES_STORE).put(normalized);
       if (options.discardProcessing) tx.objectStore(PROCESSING_STORE).delete(normalized.url);
-      tx.objectStore(HIGHLIGHTS_STORE).clear();
-      const store = tx.objectStore(EMBEDDINGS_STORE);
-      const cursor = store.index('pageUrl').openCursor(IDBKeyRange.only(normalized.url));
-      cursor.onsuccess = () => {
-        if (cursor.result) {
-          cursor.result.delete();
-          cursor.result.continue();
-          return;
-        }
-        normalized.chunks.forEach((chunk, chunkIndex) => store.put({
-          key: `${normalized.url}::${chunkIndex}`,
-          pageUrl: normalized.url,
-          chunkIndex,
-          ...chunk,
-          createdAt: now
-        }));
-      };
     };
     const writeLatest = (): void => {
-      if (!options.preserveMissingEmbeddings) { write(); return; }
       const latest = tx.objectStore(PAGES_STORE).get(record.url);
       latest.onsuccess = () => write(latest.result as PageRecord | undefined);
     };
@@ -308,28 +301,26 @@ export async function savePageRecord(record: Omit<PageRecord, 'createdAt' | 'upd
       check.onsuccess = () => { if (check.result) writeLatest(); else tx.abort(); };
     } else writeLatest();
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Page update aborted'));
   });
 }
 
-export async function upsertHighlight(record: HighlightRecord): Promise<void> {
+export async function savePageSummary(url: string, expectedText: string, summary: string, signal?: AbortSignal, expectedSummary?: string): Promise<boolean> {
+  signal?.throwIfAborted();
   const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(HIGHLIGHTS_STORE, 'readwrite');
-    tx.objectStore(HIGHLIGHTS_STORE).put(record);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-export async function removeHighlight(date: string): Promise<void> {
-  const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(HIGHLIGHTS_STORE, 'readwrite');
-    tx.objectStore(HIGHLIGHTS_STORE).delete(date);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+  return new Promise((resolve, reject) => {
+    let saved = false;
+    const tx = db.transaction(PAGES_STORE, 'readwrite', { durability: 'strict' });
+    const store = tx.objectStore(PAGES_STORE), request = store.get(url);
+    request.onsuccess = () => {
+      const current = request.result as PageRecord | undefined;
+      if (signal?.aborted) { tx.abort(); return; }
+      if (current && pageContent(current) === expectedText && (expectedSummary === undefined ? !current.summary?.trim() : current.summary === expectedSummary)) {
+        store.put({ ...current, summary }); saved = true;
+      }
+    };
+    tx.oncomplete = () => resolve(saved);
+    tx.onabort = () => reject(signal?.reason || tx.error || new Error('Summary update aborted'));
   });
 }
 
@@ -430,7 +421,7 @@ export async function deletePages(urls: string[]): Promise<number> {
   if (!urls.length) return 0;
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, PROCESSING_STORE, HIGHLIGHTS_STORE], 'readwrite');
+    const tx = db.transaction([PAGES_STORE, EMBEDDINGS_STORE, PROCESSING_STORE, HIGHLIGHTS_STORE], 'readwrite', { durability: 'strict' });
     const store = tx.objectStore(PAGES_STORE);
     tx.objectStore(HIGHLIGHTS_STORE).clear();
     for (const url of urls) {
@@ -444,7 +435,6 @@ export async function deletePages(urls: string[]): Promise<number> {
       };
     }
     tx.oncomplete = () => resolve(urls.length);
-    tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('delete transaction aborted'));
   });
 }
@@ -455,7 +445,7 @@ export async function saveLog(record: LogRecord): Promise<void> {
     const tx = db.transaction(LOGS_STORE, 'readwrite');
     tx.objectStore(LOGS_STORE).put({ ...record, createdAt: record.createdAt || Date.now() });
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Log update aborted'));
   });
 }
 
@@ -485,24 +475,24 @@ export async function clearLogs(): Promise<void> {
     const tx = db.transaction(LOGS_STORE, 'readwrite');
     tx.objectStore(LOGS_STORE).clear();
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Log removal aborted'));
   });
 }
 
 export async function appendProcessing(entry: ProcessingEntry): Promise<void> {
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(PROCESSING_STORE, 'readwrite');
+    const tx = db.transaction(PROCESSING_STORE, 'readwrite', { durability: 'strict' });
     tx.objectStore(PROCESSING_STORE).put(entry);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Capture admission aborted'));
   });
 }
 
 export async function updateProcessingEntry(entry: ProcessingEntry, create = false): Promise<boolean> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
-    const tx = db.transaction(PROCESSING_STORE, 'readwrite');
+    const tx = db.transaction(PROCESSING_STORE, 'readwrite', { durability: 'strict' });
     const store = tx.objectStore(PROCESSING_STORE);
     let updated = false;
     const request = store.get(entry.url);
@@ -513,7 +503,6 @@ export async function updateProcessingEntry(entry: ProcessingEntry, create = fal
       updated = true;
     };
     tx.oncomplete = () => resolve(updated);
-    tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error || new Error('Processing transition aborted'));
   });
 }
@@ -521,10 +510,10 @@ export async function updateProcessingEntry(entry: ProcessingEntry, create = fal
 export async function deleteProcessing(url: string): Promise<void> {
   const db = await openDatabase();
   await new Promise<void>((resolve, reject) => {
-    const tx = db.transaction(PROCESSING_STORE, 'readwrite');
+    const tx = db.transaction(PROCESSING_STORE, 'readwrite', { durability: 'strict' });
     tx.objectStore(PROCESSING_STORE).delete(url);
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('Capture removal aborted'));
   });
 }
 

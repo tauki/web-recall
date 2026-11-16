@@ -5,7 +5,6 @@ import { runGetPageSummary } from './getPageSummary';
 import { runSearchMemory } from './searchMemory';
 import { runSearchWithinPage } from './searchWithinPage';
 import type {
-  ToolHandlerError,
   ToolMetric,
   ToolName,
   ToolRunResult,
@@ -22,31 +21,37 @@ export class ToolsRuntime implements ToolsHandlerContext {
   pages: PageRecord[];
   maxSlice: number;
   searchMemory: (query: string, k: number) => Promise<Awaited<ReturnType<ToolsRuntimeOptions['searchMemory']>>>;
-  quickSearchMemory: (query: string, k: number) => Promise<Awaited<ReturnType<ToolsRuntimeOptions['quickSearchMemory']>>>;
   cache: ToolsCache = {
-    fetchMore: new Map<string, Array<{ s: number; e: number; text: string }>>(),
     summary: new Map<string, string>(),
-    search: new Map<string, string>()
+    search: new Map<string, string>(),
+    searchResults: new Map()
   };
-  calls = new Set<string>();
+  private results = new Map<string, ToolRunResult>();
+  private inFlight = new Map<string, Promise<ToolRunResult>>();
+  private loading = new Map<string, Promise<void>>();
+  private callCount = 0;
+  private progress = 0;
+  private previousOutputs = new Map<string, string>();
+  private repeats = 0;
+  private options: ToolsRuntimeOptions;
   metrics: ToolMetric[] = [];
   usedUrls = new Set<string>();
   usedUrlOrder: string[] = [];
   private recordEvidence?: ToolsRuntimeOptions['recordEvidence'];
 
   constructor(opts: ToolsRuntimeOptions) {
+    this.options = opts;
     this.allowedUrls = opts.allowedUrls || new Set();
     this.pageText = opts.pageText || new Map();
     this.pages = opts.pages || [];
     this.recordEvidence = opts.recordEvidence;
-    this.maxSlice = typeof opts.maxSlice === 'number' ? opts.maxSlice : DEFAULT_MAX_SLICE;
+    this.maxSlice = Number.isSafeInteger(opts.maxSlice) && opts.maxSlice! > 0 ? opts.maxSlice! : DEFAULT_MAX_SLICE;
     this.searchMemory = opts.searchMemory;
-    this.quickSearchMemory = opts.quickSearchMemory;
   }
 
   private signature(name: string, args: unknown): string {
     try {
-      return `${name}:${JSON.stringify(args)}`;
+      return `${name}:${JSON.stringify(args, (_key, value) => value && typeof value === 'object' && !Array.isArray(value) ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)}`;
     } catch {
       return name;
     }
@@ -70,7 +75,23 @@ export class ToolsRuntime implements ToolsHandlerContext {
     return this.pages.find((page) => page.url === url);
   }
 
-  buildChunkRows(url: string, limit = 8): Array<{ chunkIndex: number; preview: string; length: number }> {
+  get remainingCalls(): number { return Math.max(0, (this.options.maxCalls ?? 100) - this.callCount); }
+  get progressCount(): number { return this.progress; }
+
+  private reportProgress(signature: string, output: ToolRunResult, cached: boolean): ToolRunResult {
+    const payload = JSON.parse(output.content);
+    const fresh = this.previousOutputs.get(signature) !== output.content;
+    this.previousOutputs.set(signature, output.content);
+    if (fresh) this.progress++;
+    this.repeats = fresh ? 0 : this.repeats + 1;
+    payload.newInformation = fresh;
+    if (cached) payload.cached = true;
+    if (!fresh) payload.notice = payload.nextArgs ? 'This evidence was already returned. Copy nextArgs exactly to read a different part; identical arguments do not advance.' : 'This result was already returned. Use a different query or search_within_page for the missing fact.';
+    if (!fresh && this.repeats >= 3) payload.control = { noProgress: true };
+    return { content: JSON.stringify(payload) };
+  }
+
+  buildChunkRows(url: string, limit = 8, offset = 0): Array<{ chunkIndex: number; preview: string; length: number }> {
     const page = this.getPage(url);
     const chunks = page?.chunks || [];
     return chunks
@@ -79,15 +100,14 @@ export class ToolsRuntime implements ToolsHandlerContext {
         preview: this.cleanPreview(chunk.text, 180),
         length: (chunk.text || '').length
       }))
-      .filter((chunk) => chunk.preview)
-      .slice(0, Math.max(1, Math.min(limit, 20)));
+      .slice(offset, offset + Math.max(1, Math.min(limit, 20)));
   }
 
   scoreChunkMatch(text: string, query: string): number {
     const haystack = text.toLowerCase();
     const normalizedQuery = query.trim().toLowerCase();
     if (!haystack || !normalizedQuery) return 0;
-    const tokens = normalizedQuery.split(/[^a-z0-9]+/i).filter((token) => token.length >= 2);
+    const tokens = normalizedQuery.split(/[^\p{L}\p{N}]+/u).filter((token) => token.length >= 2);
     if (!tokens.length) return haystack.includes(normalizedQuery) ? 1 : 0;
     let hits = 0;
     for (const token of tokens) {
@@ -97,30 +117,6 @@ export class ToolsRuntime implements ToolsHandlerContext {
     return hits / tokens.length + phraseBonus;
   }
 
-  mergeRange(url: string, start: number, end: number, content: string): string {
-    if (!this.cache.fetchMore.has(url)) {
-      this.cache.fetchMore.set(url, []);
-    }
-    const arr = this.cache.fetchMore.get(url)!;
-    const ns = Math.max(0, start | 0);
-    const ne = Math.max(ns, end | 0);
-    let merged = false;
-    for (const segment of arr) {
-      if (!(ne < segment.s - 50 || ns > segment.e + 50)) {
-        segment.s = Math.min(segment.s, ns);
-        segment.e = Math.max(segment.e, ne);
-        segment.text = content.slice(segment.s, segment.e);
-        merged = true;
-        break;
-      }
-    }
-    if (!merged) {
-      arr.push({ s: ns, e: ne, text: content.slice(ns, ne) });
-    }
-    const target = arr.find((seg) => ns >= seg.s && ne <= seg.e) ?? arr[arr.length - 1]!;
-    return target.text;
-  }
-
   ensureUrlTracked(url: string): void {
     if (!this.usedUrls.has(url)) {
       this.usedUrls.add(url);
@@ -128,19 +124,56 @@ export class ToolsRuntime implements ToolsHandlerContext {
     }
   }
 
-  async runToolCall(name: ToolName, rawArgs: unknown): Promise<ToolRunResult> {
+  async runToolCall(name: ToolName, rawArgs: unknown, callId: string = crypto.randomUUID()): Promise<ToolRunResult> {
+    this.options.signal?.throwIfAborted();
     const started = performance.now();
-    const signature = this.signature(name, rawArgs);
-    if (this.calls.has(signature)) {
-      this.metrics.push({ name, ms: 0, ok: true, deduped: true });
-      return { content: JSON.stringify({ ok: true, data: { deduped: true }, suggest: null }) };
+    this.options.onActivity?.({ callId, tool: name, status: 'started' });
+    const maxCalls = this.options.maxCalls ?? 100;
+    if (this.callCount >= maxCalls) {
+      this.options.onActivity?.({ callId, tool: name, status: 'failed', error: 'tool_budget_exhausted', ms: 0 });
+      return { content: JSON.stringify({ ok: false, error: { code: 'tool_budget_exhausted', message: 'The tool-call allowance is exhausted. Finish from the evidence already read or explain what is missing.' } }) };
     }
-    this.calls.add(signature);
+    this.callCount++;
+    const signature = this.signature(name, rawArgs);
+    const cached = this.results.get(signature);
+    if (cached) {
+      this.metrics.push({ name, ms: 0, ok: true, deduped: true });
+      this.options.onActivity?.({ callId, tool: name, status: 'cached', ms: 0 });
+      return this.reportProgress(signature, cached, true);
+    }
+    const result = this.inFlight.get(signature) ?? this.execute(name, rawArgs);
+    this.inFlight.set(signature, result);
+    try {
+      const output = await result;
+      this.options.signal?.throwIfAborted();
+      const payload = JSON.parse(output.content);
+      if (payload.ok) this.results.set(signature, output);
+      this.options.onActivity?.({ callId, tool: name, status: payload.ok ? 'completed' : 'failed', ms: Math.round(performance.now() - started), error: payload.error?.code });
+      return this.reportProgress(signature, output, false);
+    } catch (error) {
+      this.options.onActivity?.({ callId, tool: name, status: this.options.signal?.aborted ? 'cancelled' : 'failed', ms: Math.round(performance.now() - started) });
+      throw error;
+    } finally {
+      if (this.inFlight.get(signature) === result) this.inFlight.delete(signature);
+    }
+  }
+
+  private async execute(name: ToolName, rawArgs: unknown): Promise<ToolRunResult> {
+    const started = performance.now();
     let ok = false;
     let content = '';
-    let error: ToolHandlerError | null = null;
+    let error: { code: string; message: string; suggest?: string } | null = null;
 
     try {
+      const url = rawArgs && typeof rawArgs === 'object' && 'url' in rawArgs && typeof rawArgs.url === 'string' ? rawArgs.url.trim() : undefined;
+      if (url && this.allowedUrls.has(url) && !this.getPage(url) && this.options.loadPage) {
+        const load = this.loading.get(url) ?? this.options.loadPage(url).then(page => {
+          this.options.signal?.throwIfAborted();
+          if (page && !this.getPage(url)) { this.pages.push(page); this.pageText.set(url, page.text || page.chunks?.map(chunk => chunk.text || '').join('\n') || ''); }
+        });
+        this.loading.set(url, load);
+        try { await load; } finally { if (this.loading.get(url) === load) this.loading.delete(url); }
+      }
       const result =
         name === 'fetch_more'
           ? await runFetchMore(this, rawArgs)
@@ -172,6 +205,7 @@ export class ToolsRuntime implements ToolsHandlerContext {
           suggest: result.error?.suggest || null
         });
     } catch (err) {
+      this.options.signal?.throwIfAborted();
       error = {
         code: 'tool_error',
         message: String((err as Error)?.message || err)
@@ -182,8 +216,15 @@ export class ToolsRuntime implements ToolsHandlerContext {
       this.metrics.push({ name, ms: elapsed, ok, error: error?.code });
     }
 
-    if (ok && this.recordEvidence) {
+    if (ok) {
       const payload = JSON.parse(content);
+      if (name === 'search_memory' && Array.isArray(payload.data)) {
+        payload.data = payload.data.filter((row: { url?: string }) => {
+          if (typeof row?.url !== 'string' || !/^https?:\/\//i.test(row.url)) return false;
+          if (this.options.allowSearchDiscovery) this.allowedUrls.add(row.url);
+          return this.allowedUrls.has(row.url);
+        });
+      }
       const rows = Array.isArray(payload.data) ? payload.data : [payload.data];
       for (const row of rows) {
         if (!row || typeof row !== 'object') continue;
@@ -191,7 +232,7 @@ export class ToolsRuntime implements ToolsHandlerContext {
         if (typeof url !== 'string' || !this.allowedUrls.has(url)) continue;
         const text = row.text || row.summary || row.snippet ||
           (row.matches || row.chunks || []).map((item: { snippet?: string; preview?: string }) => item.snippet || item.preview || '').join('\n');
-        row.sourceIndex = this.recordEvidence(url, String(text || ''));
+        if (this.recordEvidence) row.sourceIndex = this.recordEvidence(url, String(text || ''), { timestamp: row.timestamp ?? this.getPage(url)?.timestamp, title: row.title });
       }
       content = JSON.stringify(payload);
     }

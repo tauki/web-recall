@@ -1,7 +1,6 @@
 import { abortable } from '../../shared/abort';
 import { embeddingSpaceKey } from '../../shared/config/index';
 import { storageManager, type PageRecord } from '../storage/manager';
-import { getCalibrationSnapshot } from '../calibration/index';
 import { computeEmbeddingsForQueries, getEmbeddingConfig } from '../embeddings/index';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import { callChat, callChatJson, getChatConfig } from '../providers/chat';
@@ -92,9 +91,7 @@ function textFallbackScore(page: PageRecord, tokens: string[]): { score: number;
     snippet = page.text?.slice(0, 200) || '';
   }
 
-  const calibration = getCalibrationSnapshot();
-  const simWeight = 0.5 + calibration.wSim;
-  return { score: score * simWeight, snippet };
+  return { score, snippet };
 }
 
 async function fallbackSearch(query: string, limit: number, scopeUrls?: string[]): Promise<SearchResult[]> {
@@ -115,9 +112,7 @@ async function fallbackSearch(query: string, limit: number, scopeUrls?: string[]
     })
     .filter((entry) => entry.score > 0);
   scored.sort((a, b) => b.score - a.score);
-  const calibration = getCalibrationSnapshot();
-  const dynamicLimit = Math.max(1, Math.min(50, Math.round(limit * (1 + calibration.wLLM))));
-  return scored.slice(0, dynamicLimit);
+  return scored.slice(0, limit);
 }
 
 function canonicalizeUrl(url: string): string {
@@ -234,7 +229,7 @@ async function generateQueryVariations(query: string, n = 3, options: SearchOpti
   const rewriteEnabled = typeof options.rewrite === 'boolean' ? options.rewrite : settings.queryRewrite !== false;
   if (!rewriteEnabled) return variations;
   try {
-    const config = { ...await getChatConfig(), signal: options.signal };
+    const config = { ...await getChatConfig(options.signal), signal: options.signal };
     options.signal?.throwIfAborted();
     const body = {
       model: config.model,
@@ -387,7 +382,7 @@ async function rerankWithCrossEncoder(
   if (!rerankEnabled) return pool;
   const limited = pool.slice(0, Math.min(12, pool.length));
   try {
-    const config = { ...await getChatConfig(), signal: options.signal };
+    const config = { ...await getChatConfig(options.signal), signal: options.signal };
     options.signal?.throwIfAborted();
     const enriched = await enrichRerankCandidates(limited);
     const batchScores = await batchScoreCandidatesWithLLM(query, enriched, config);
@@ -460,9 +455,7 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
     });
     const dedupedCandidates = mergeRetrievalResults(dedupeByUrl(candidates), await fallbackSearch(normalized, limit, options.scopeUrls));
     const reranked = await rerankWithCrossEncoder(normalized, dedupedCandidates, options);
-    const calibration = getCalibrationSnapshot();
-    const dynamicLimit = Math.max(1, Math.min(50, Math.round(limit * (1 + calibration.wLLM))));
-    return reranked.slice(0, dynamicLimit).map((cand) => ({
+    return reranked.slice(0, limit).map((cand) => ({
       url: cand.url,
       title: cand.title || cand.url,
       snippet: cand.snippet || '',

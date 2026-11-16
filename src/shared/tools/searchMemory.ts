@@ -1,14 +1,15 @@
 import type { SearchMemoryArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
-function validateSearchMemory(args: SearchMemoryArgs | undefined): { ok: boolean; value?: { query: string; k: number }; errors?: string[] } {
+function validateSearchMemory(args: SearchMemoryArgs | undefined): { ok: boolean; value?: { query: string; k: number; offset: number }; errors?: string[] } {
   const query = typeof args?.query === 'string' ? args.query.trim() : '';
   if (!query) {
     return { ok: false, errors: ['query (string) is required'] };
   }
+  if ([args?.k, args?.offset].some(value => value !== undefined && (!Number.isSafeInteger(value) || value < 0))) return { ok: false, errors: ['k and offset must be non-negative integers'] };
   let k = typeof args?.k === 'number' ? Math.trunc(args.k) : 5;
   if (k < 1) k = 1;
   if (k > 10) k = 10;
-  return { ok: true, value: { query, k } };
+  return { ok: true, value: { query, k, offset: args?.offset ?? 0 } };
 }
 
 function normalizeHits(ctx: ToolsHandlerContext, hits: Awaited<ReturnType<ToolsHandlerContext['searchMemory']>>, partial = false) {
@@ -20,7 +21,8 @@ function normalizeHits(ctx: ToolsHandlerContext, hits: Awaited<ReturnType<ToolsH
     chunkIndex: hit.chunkIndex,
     score: hit.score,
     hitsFromPage: hit.hitsFromPage,
-    partial: partial || hit.partial
+    partial: partial || hit.partial,
+    timestamp: hit.timestamp
   }));
 }
 
@@ -34,33 +36,26 @@ export async function runSearchMemory(ctx: ToolsHandlerContext, rawArgs: unknown
     };
   }
 
-  const { query, k } = validation.value;
-  const cacheKey = `${query}::${k}`;
+  const { query, k, offset } = validation.value;
+  const cacheKey = `${query}::${k}::${offset}`;
   if (ctx.cache.search.has(cacheKey)) {
     return { ok: true, content: ctx.cache.search.get(cacheKey)! };
   }
 
-  try {
-    const hits = await ctx.searchMemory(query, k);
-    const content = JSON.stringify({
-      ok: true,
-      data: normalizeHits(ctx, hits),
-      usedArgs: { query, k },
-      suggest: 'Use get_page_summary or get_page_chunks on the best URL before fetching more text'
-    });
-    hits.forEach((hit) => hit?.url && ctx.ensureUrlTracked(hit.url));
-    ctx.cache.search.set(cacheKey, content);
-    return { ok: true, content };
-  } catch {
-    const partial = await ctx.quickSearchMemory(query, k);
-    const content = JSON.stringify({
-      ok: true,
-      data: normalizeHits(ctx, partial, true),
-      usedArgs: { query, k },
-      suggest: 'Partial search results; consider smaller k'
-    });
-    partial.forEach((hit) => hit?.url && ctx.ensureUrlTracked(hit.url));
-    ctx.cache.search.set(cacheKey, content);
-    return { ok: true, content };
-  }
+  const previous = ctx.cache.searchResults.get(query) || [];
+  const fresh = previous.length >= offset + k + 1 ? [] : await ctx.searchMemory(query, offset + k + 1);
+  const seen = new Set(previous.map(hit => hit.url));
+  const hits = [...previous];
+  for (const hit of fresh) if (!seen.has(hit.url)) { seen.add(hit.url); hits.push(hit); }
+  ctx.cache.searchResults.set(query, hits);
+  const content = JSON.stringify({
+    ok: true,
+    data: normalizeHits(ctx, hits.slice(offset, offset + k)),
+    usedArgs: { query, k, offset },
+    nextArgs: offset + k < hits.length ? { query, k, offset: offset + k } : null,
+    suggest: 'Use search_within_page to locate a precise detail, or summary/chunk listings for a broad overview'
+  });
+  hits.forEach((hit) => hit?.url && ctx.ensureUrlTracked(hit.url));
+  ctx.cache.search.set(cacheKey, content);
+  return { ok: true, content };
 }

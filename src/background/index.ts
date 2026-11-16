@@ -114,8 +114,8 @@ function setupContextMenus(): void {
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     try {
-      chrome.contextMenus.create({ id: 'wr_open_panel', title: 'Open Web Recall', contexts: ['action', 'page'] });
-      chrome.contextMenus.create({ id: 'wr_capture_now', title: 'Capture this page now', contexts: ['page', 'action'] });
+      chrome.contextMenus.create({ id: 'wr_open_panel', title: 'Open Web Recall', contexts: ['all'] });
+      chrome.contextMenus.create({ id: 'wr_capture_now', title: 'Capture this page', contexts: ['all'] });
       chrome.contextMenus.create({ id: 'wr_toggle_pause', title: 'Pause capture', contexts: ['action'] });
     } catch (err) {
       console.warn('[beta-background] context menu creation failed', err);

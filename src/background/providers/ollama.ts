@@ -8,6 +8,7 @@ export type ProviderStatus = {
   online: boolean;
   lastChecked: string;
   lastError?: string;
+  contextTokens?: number;
 };
 
 export type ProviderSetting = {
@@ -72,13 +73,13 @@ export async function getOllamaStatus(baseUrl?: string, testInference = false): 
   }
 }
 
-export async function describeOllamaProvider(): Promise<ProviderDescriptor> {
+export async function describeOllamaProvider(probe = true): Promise<ProviderDescriptor> {
   const baseUrl = await getProviderBaseUrl('ollama');
-  const status = await getOllamaStatus().catch(() => ({
+  const status = probe ? await getOllamaStatus().catch(() => ({
     online: false,
     lastChecked: new Date().toISOString(),
     lastError: 'Unknown error'
-  }));
+  })) : { online: false, lastChecked: '', lastError: 'Inactive provider' };
   const models = status.online ? await listOllamaModels(baseUrl) : [];
   const selectedModel = await resolveOllamaChatModel(baseUrl, models);
   return {

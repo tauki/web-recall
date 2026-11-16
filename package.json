@@ -1,11 +1,16 @@
 {
   "name": "web-recall",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Web Recall 0.2.x workspace tooling",
   "private": true,
   "type": "module",
   "scripts": {
     "build:beta": "node scripts/build-beta.mjs",
+    "apple:build": "swift build --package-path native/apple --configuration release && node scripts/build-apple-app.mjs",
+    "apple:build:debug": "swift build --package-path native/apple && node scripts/build-apple-app.mjs --debug",
+    "apple:test": "swift test --package-path native/apple",
+    "apple:update:keygen": "swift run --package-path native/apple WebRecallUpdater keygen native/apple/update-public-key.txt",
+    "apple:package": "node scripts/package-apple.mjs",
     "typecheck": "tsc --project tsconfig.json --noEmit",
     "lint": "eslint src --ext .ts",
     "test": "node --test --test-timeout=30000 tests/*.test.mjs",

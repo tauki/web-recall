@@ -1,21 +1,25 @@
 import { runInference } from './inference';
 import { ollamaResponseError } from './ollamaErrors';
 import { DEFAULT_SETTINGS } from '../../shared/config/index';
-import { resolveOllamaChatModel } from './ollamaModels';
+import { resolveOllamaChatModel, getOllamaContextTokens } from './ollamaModels';
 import { getSettings } from '../settings/index';
 import { getProviderBaseUrl } from './config';
 import { assertProviderOriginAcknowledged, fetchProvider } from './access';
+import { callApple, getAppleStatus, type AppleMode } from './apple';
 
 export type ChatConfig = {
   signal?: AbortSignal;
   providerId: string;
   baseUrl: string;
   model: string;
+  contextTokens?: number;
+  appleCloudConsent?: boolean;
 };
 
 export type ChatResponse = {
   error?: string;
   message?: {
+    thinking?: string;
     content?: string;
     tool_calls?: Array<{
       type?: string;
@@ -41,7 +45,7 @@ export function normalizeToolArguments(value: unknown): Record<string, unknown> 
 }
 
 function normalizeProviderId(providerId: string | undefined): string {
-  return providerId === 'ollama' ? providerId : DEFAULT_SETTINGS.activeProviderId;
+  return providerId === 'ollama' || providerId === 'apple' ? providerId : DEFAULT_SETTINGS.activeProviderId;
 }
 
 function buildOriginSuggestion(message: string): string | undefined {
@@ -57,15 +61,24 @@ function buildOriginSuggestion(message: string): string | undefined {
   return undefined;
 }
 
-export async function getChatConfig(): Promise<ChatConfig> {
+export async function getChatConfig(signal?: AbortSignal): Promise<ChatConfig> {
   const settings = await getSettings();
+  signal?.throwIfAborted();
   const providerId = normalizeProviderId(settings.activeProviderId);
+  if (providerId === 'apple') {
+    const model: AppleMode = settings.applePrivateCloud ? 'private-cloud' : 'on-device';
+    const status = await getAppleStatus(model, settings.applePrivateCloud, signal);
+    if (!status.libraryTools) throw new Error('Update and restart the Web Recall Mac companion to enable the saved-memory tool bridge.');
+    return { providerId, baseUrl: '', model, contextTokens: status.contextTokens, appleCloudConsent: settings.applePrivateCloud };
+  }
   const baseUrl = await getProviderBaseUrl(providerId);
   await assertProviderOriginAcknowledged(baseUrl);
+  const model = await resolveOllamaChatModel(baseUrl);
   return {
     providerId,
     baseUrl,
-    model: await resolveOllamaChatModel(baseUrl)
+    model,
+    contextTokens: await getOllamaContextTokens(baseUrl, model, signal)
   };
 }
 
@@ -77,6 +90,10 @@ export async function ensureChatReady(config: ChatConfig): Promise<void> {
 }
 
 export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
+  if (config.providerId === 'apple') {
+    try { await getAppleStatus(config.model as AppleMode, config.appleCloudConsent, config.signal); return { ok: true }; }
+    catch (error) { return { ok: false, lastError: error instanceof Error ? error.message : String(error) }; }
+  }
   return runInference(async () => {
     try {
       config.signal?.throwIfAborted();
@@ -120,6 +137,7 @@ export async function probeChat(config: ChatConfig): Promise<ChatProbeResult> {
 
 export async function callChat(config: ChatConfig, body: Record<string, unknown>): Promise<ChatResponse> {
   config.signal?.throwIfAborted();
+  if (config.providerId === 'apple') return { message: { content: await appleChat(config, body) } };
   return runInference(async () => {
     const resp = await fetchProvider(`${config.baseUrl}/api/chat`, {
       method: 'POST',
@@ -132,6 +150,17 @@ export async function callChat(config: ChatConfig, body: Record<string, unknown>
     }
     return (await resp.json()) as ChatResponse;
   });
+}
+
+async function appleChat(config: ChatConfig, body: Record<string, unknown>, onChunk?: (text: string) => void): Promise<string> {
+  if (body.tools) throw new Error('Use the Apple saved-passage tools for native Ask.');
+  const messages = Array.isArray(body.messages) ? body.messages as Array<{ role: string; content: string }> : [];
+  return await callApple({
+    action: 'generate', mode: config.model as AppleMode, cloudConsent: config.appleCloudConsent === true,
+    instructions: messages.filter(message => message.role === 'system').map(message => message.content).join('\n'),
+    prompt: messages.filter(message => message.role !== 'system').map(message => `${message.role}: ${message.content}`).join('\n\n'),
+    maxOutputTokens: (body.options as { num_predict?: number } | undefined)?.num_predict
+  }, { signal: config.signal, onChunk }) as string;
 }
 
 export function stripJsonFences(content: string): string {
@@ -161,6 +190,7 @@ export async function streamChat(
   onChunk: (chunk: string) => void
 ): Promise<string> {
   config.signal?.throwIfAborted();
+  if (config.providerId === 'apple') return appleChat(config, body, onChunk);
   return runInference(async () => {
     const textDecoder = new TextDecoder();
     let assembled = '';

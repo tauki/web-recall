@@ -63,6 +63,19 @@ test('upgrade preserves legacy pause and domain rules before capture can resume'
   assert.deepEqual(plain((await allow.mod.getSettings()).denylist), ['blocked.test']);
 });
 
+test('partial saved preferences do not authorize capture or change omitted retrieval defaults', async () => {
+  const fresh = await settingsFixture();
+  const upgraded = await settingsFixture({ betaSettings: { theme: 'dark' } });
+  const expected = await fresh.mod.getSettings(), actual = await upgraded.mod.getSettings();
+  assert.equal(await upgraded.mod.shouldCaptureUrl('https://example.test'), false, 'Appearance preferences are not capture consent');
+  assert.equal(actual.captureSetupComplete, false);
+  for (const key of ['contextWindowChars', 'askMaxSources', 'maxToolSteps']) assert.equal(actual[key], expected[key], `${key} must behave consistently across fresh and partial saved preferences`);
+  const chosen = await settingsFixture({ betaSettings: { paused: false, maxToolSteps: 0, askMaxSources: 1 } });
+  assert.equal(await chosen.mod.shouldCaptureUrl('https://example.test'), true);
+  assert.equal((await chosen.mod.getSettings()).maxToolSteps, 0);
+  assert.equal((await chosen.mod.getSettings()).askMaxSources, 1);
+});
+
 test('existing beta settings and later user choices take precedence over legacy keys', async () => {
   const f = await settingsFixture({ paused: true, blacklistDomains: ['old.test'], betaSettings: { ...plain(DEFAULT_SETTINGS), paused: false, denylist: [], theme: 'dark' } });
   assert.equal((await f.mod.getSettings()).theme, 'dark');
@@ -202,6 +215,7 @@ async function captureFixture(embeddingResult) {
   await db.updateProcessingEntry({ url: payload.url, title: payload.title, status: 'queued', attempts: 0, lastAttemptAt: 1, createdAt: 1, updatedAt: 1, payload }, true);
   let invalidations = 0;
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../summaries/index': { queuePageSummary: async () => false },
     '../embeddings/index': { getEmbeddingConfig: () => config, embedPayloadChunks: async () => embeddingResult({ db, config, old, payload }) },
     '../storage/index': { whenStorageReady: async () => {} },
     '../storage/manager': { storageManager: db },
@@ -210,7 +224,7 @@ async function captureFixture(embeddingResult) {
   return { db, config, payload, old, processor, invalidations: () => invalidations };
 }
 
-test('failed recapture preserves exact matching vectors and their model identity in both stores', async () => {
+test('failed recapture preserves exact matching vectors and their model identity in the saved page', async () => {
   const f = await captureFixture(async () => { throw Error('Provider offline'); });
   // Reordered chunks must retain the vector belonging to their text, not their index.
   f.payload.chunks = ['Changed passage', 'Same passage', 'Old passage'];
@@ -225,8 +239,6 @@ test('failed recapture preserves exact matching vectors and their model identity
   assert.equal(saved.title, 'Updated title');
   assert.equal(saved.lastEmbeddedAt, 5, 'retaining vectors is not a new embedding run');
   const db = await f.db.openDatabase();
-  const vectors = await new Promise(resolve => { const r = db.transaction('embeddings').objectStore('embeddings').getAll(); r.onsuccess = () => resolve(r.result); });
-  assert.deepEqual(vectors.map(({ text, embedding, embeddingKey }) => plain({ text, embedding, embeddingKey })), plain(saved.chunks));
   assert.equal(f.invalidations(), 1);
   db.close();
 });

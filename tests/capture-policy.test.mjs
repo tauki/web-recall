@@ -4,7 +4,7 @@ import { loadSource, plain } from './helpers.mjs';
 
 async function captureEntryFixture() {
   let command, menu, listener;
-  const sent = [], injected = [], jobs = [];
+  const sent = [], injected = [], jobs = [], menus = [];
   const stored = { betaSettings: { paused: true, captureSetupComplete: true, allowlist: [], denylist: ['private.test'] } };
   let tab = { id: 7, url: 'https://public.test/article' }, missingReceiver = false;
   const chrome = {
@@ -23,7 +23,7 @@ async function captureEntryFixture() {
     scripting: { executeScript: async request => { injected.push(request.target.tabId); } },
     sidePanel: { setPanelBehavior: async () => {} }, windows: { WINDOW_ID_CURRENT: -2 },
     commands: { onCommand: { addListener(value) { command = value; } } },
-    contextMenus: { removeAll(done) { done(); }, create() {}, onClicked: { addListener(value) { menu = value; } } }
+    contextMenus: { removeAll(done) { menus.length = 0; done(); }, create(item) { menus.push(plain(item)); }, onClicked: { addListener(value) { menu = value; } } }
   };
   const settings = await loadSource('src/background/settings/index.ts', '', { '../../shared/logger/index': { setLogLevel() {} } }, { chrome });
   const context = { chrome, self: { addEventListener() {} }, console: { info() {}, warn() {}, error() {} } };
@@ -45,6 +45,11 @@ async function captureEntryFixture() {
     noReceiver: () => { missingReceiver = true; },
     keyboard: () => command('capture-this-page'),
     menu: () => menu({ menuItemId: 'wr_capture_now' }, tab),
+    contextMenu: (contextType, info = {}) => {
+      const item = menus.find(candidate => candidate.contexts.some(context => context === 'all' || context === contextType) && /capture.*page/i.test(candidate.title));
+      assert.ok(item, `Page capture must be offered in Chrome's ${contextType} context`);
+      return menu({ ...info, menuItemId: item.id }, tab);
+    },
     save: payload => new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(Error('SAVE_PAGE did not respond')), 5000);
       listener({ type: 'SAVE_PAGE', ...payload }, { tab }, response => { clearTimeout(timer); resolve(response); });
@@ -72,6 +77,20 @@ test('keyboard and context-menu capture obey domain rules while allowing capture
   assert.deepEqual(fixture.injected, [7]);
   assert.deepEqual(plain(fixture.sent), [{ id: 7, message: { type: 'FORCE_CAPTURE' } }, { id: 7, message: { type: 'FORCE_CAPTURE' } }]);
   assert.equal((await fixture.settings.getSettings()).paused, true);
+});
+
+test('right-click capture is available on selected text, links and media and always captures the current page', async () => {
+  const fixture = await captureEntryFixture();
+  for (const contextType of ['page', 'selection', 'link', 'image', 'video', 'audio', 'editable', 'frame', 'action']) {
+    await fixture.contextMenu(contextType, {
+      pageUrl: 'https://public.test/article', selectionText: 'Only a selected excerpt',
+      linkUrl: 'https://private.test/linked-secret', srcUrl: 'https://private.test/image.png',
+      frameUrl: 'https://private.test/embedded-frame'
+    });
+    assert.deepEqual(plain(fixture.sent.at(-1)), { id: 7, message: { type: 'FORCE_CAPTURE' } }, `${contextType} capture must use the current tab rather than the selected text, link, media or frame`);
+  }
+  assert.equal(fixture.sent.length, 9);
+  assert.equal((await fixture.settings.getSettings()).paused, true, 'Explicit capture must not resume automatic capture');
 });
 
 test('SAVE_PAGE checks current capture policy before accepting durable work', async () => {

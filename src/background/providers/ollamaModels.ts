@@ -26,3 +26,17 @@ export async function resolveOllamaChatModel(baseUrl: string, installed?: string
   const models = installed ?? await listOllamaModels(baseUrl);
   return models[0] || 'llama3.1';
 }
+
+export async function getOllamaContextTokens(baseUrl: string, model: string, signal?: AbortSignal): Promise<number | undefined> {
+  try {
+    const response = await fetchProvider(`${baseUrl}/api/ps`, { signal });
+    if (!response.ok) return undefined;
+    const payload = await response.json() as { models?: Array<{ name?: string; model?: string; context_length?: number }> };
+    const active = payload.models?.find(entry => [model, `${model}:latest`].includes(entry.name || entry.model || ''));
+    return Number.isSafeInteger(active?.context_length) && active!.context_length! >= 1024 ? active!.context_length! : undefined;
+  } catch (error) {
+    signal?.throwIfAborted();
+    console.warn('[beta-background:providers] active context size unavailable; using a conservative planning budget', error);
+    return undefined;
+  }
+}

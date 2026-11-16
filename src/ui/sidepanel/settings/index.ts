@@ -167,6 +167,11 @@ export function renderSettingsPanel(target: HTMLElement): void {
         <p id="beta-provider-status" class="beta-help"></p>
         <p id="beta-provider-security" class="beta-help"></p>
         <p id="beta-provider-notes" class="beta-help"></p>
+        <div id="beta-apple-options" hidden>
+          <p class="beta-help">Open the Web Recall companion from Applications. Its menu bar shows status and controls native work. Inference stays on this Mac unless you enable Private Cloud Compute below. Model context size is detected at runtime; embeddings are unchanged.</p>
+          <label class="beta-toggle"><span>Use Apple Private Cloud Compute (optional)</span><input type="checkbox" id="beta-apple-cloud" /></label>
+          <p class="beta-help">PCC sends prompts and selected saved passages to Apple's servers. Requires macOS 27, network access, eligibility and a companion signed with Apple's managed PCC entitlement. It never activates automatically.</p>
+        </div>
       </section>
 
       <section class="beta-card" aria-labelledby="ask-heading">
@@ -177,7 +182,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
         </div>
         <div class="beta-field">
           <label for="settings-ask-sources">Initial sources for Auto</label>
-          <input id="settings-ask-sources" type="number" min="1" max="10" aria-describedby="settings-source-help" /><p id="settings-source-help" class="beta-help">Starting point for Ask’s Auto mode, adjusted by retrieval settings. An explicit number in Ask overrides this; tools can retrieve more.</p>
+          <input id="settings-ask-sources" type="number" min="1" max="10" aria-describedby="settings-source-help" /><p id="settings-source-help" class="beta-help">Starting point for Ask’s Auto mode. An explicit number in Ask overrides this; tools can retrieve more.</p>
         </div>
         <div class="beta-field">
           <label for="beta-answer-mode">Answer mode</label>
@@ -201,24 +206,11 @@ export function renderSettingsPanel(target: HTMLElement): void {
         <label class="beta-toggle"><input type="checkbox" id="beta-ask-rerank" /> Enable reranking for Ask retrieval</label>
         <label class="beta-toggle"><input type="checkbox" id="beta-enable-tools" /> Allow Ask to call tools</label>
         <div class="beta-field">
-          <label for="beta-max-tool-steps">Max tool steps</label>
+          <label for="beta-max-tool-steps">Max tool calls</label>
           <input id="beta-max-tool-steps" type="number" min="0" />
         </div>
         <label class="beta-toggle"><input type="checkbox" id="beta-log-full" /> Log full capture payloads</label>
-        <p class="beta-help">These settings control query rewriting, Search reranking, and how Ask builds answers from captured pages. Max tool steps uses 0 as no user limit. Model inference has no automatic timeout; use Stop in Ask, Search or embedding backfill to cancel.</p>
-      </section>
-
-      <section class="beta-card" aria-labelledby="calibration-heading">
-        <h2 id="calibration-heading">Calibration</h2>
-        <div class="beta-field">
-          <label for="beta-calib-sim">Similarity weight</label>
-          <input id="beta-calib-sim" type="number" min="0" max="1" step="0.05" />
-        </div>
-        <div class="beta-field">
-          <label for="beta-calib-llm">LLM weight</label>
-          <input id="beta-calib-llm" type="number" min="0" max="1" step="0.05" />
-        </div>
-        <p class="beta-help">Adjust how much traditional similarity vs. LLM synthesis influence results.</p>
+        <p class="beta-help">These settings control query rewriting, Search reranking, and how Ask builds answers from captured pages. Max tool calls uses 0 as no user limit; a 100-call safety allowance still applies. Model inference has no automatic timeout; use Stop in Ask, Search or embedding backfill to cancel.</p>
       </section>
 
       <section class="beta-card" aria-labelledby="tools-heading">
@@ -260,7 +252,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
     ['capture', 'Capture', ['capture-heading', 'domain-heading', 'capture-setup-heading']],
     ['models', 'Models', ['embed-heading', 'provider-heading', 'downloaded-models-heading']],
     ['appearance', 'Appearance', ['theme-heading']],
-    ['advanced', 'Advanced', ['calibration-heading', 'tools-heading']]
+    ['advanced', 'Advanced', ['tools-heading']]
   ] as const;
   for (const [id, label, headings] of groups) {
     const details = document.createElement('details'); details.id = `settings-${id}`; details.className = 'settings-group'; details.name = 'settings-groups';
@@ -322,12 +314,11 @@ function attachBehavior(root: HTMLElement): void {
   const providerRefreshBtn = root.querySelector<HTMLButtonElement>('#beta-provider-refresh');
   const providerStatus = root.querySelector<HTMLParagraphElement>('#beta-provider-status');
   const providerSecurity = root.querySelector<HTMLParagraphElement>('#beta-provider-security');
+  const appleCloud = root.querySelector<HTMLInputElement>('#beta-apple-cloud')!;
   const providerNotes = root.querySelector<HTMLParagraphElement>('#beta-provider-notes');
   const openManageBtn = root.querySelector<HTMLButtonElement>('#beta-open-manage');
   const openLogsBtn = root.querySelector<HTMLButtonElement>('#beta-open-logs');
   const openHighlightsBtn = root.querySelector<HTMLButtonElement>('#beta-open-highlights');
-  const calibSimInput = root.querySelector<HTMLInputElement>('#beta-calib-sim');
-  const calibLLMInput = root.querySelector<HTMLInputElement>('#beta-calib-llm');
   const statusLine = root.querySelector<HTMLParagraphElement>('#beta-settings-status');
   const downloads = root.querySelector<HTMLDetailsElement>('#settings-downloads')!;
   const downloadsList = root.querySelector<HTMLElement>('#beta-browser-models-list')!;
@@ -492,6 +483,13 @@ function attachBehavior(root: HTMLElement): void {
   }
 
   function applyProvider(provider: ProviderView): void {
+    const apple = provider.id === 'apple';
+    root.querySelector<HTMLElement>('#beta-apple-options')!.hidden = !apple;
+    providerBaseInput!.closest<HTMLElement>('.beta-field')!.hidden = apple;
+    if (providerSaveBtn) providerSaveBtn.hidden = apple;
+    if (providerRefreshBtn) providerRefreshBtn.hidden = apple;
+    if (providerSecurity) providerSecurity.hidden = apple;
+    appleCloud.checked = currentSettings.applePrivateCloud === true;
     if (providerSelect) {
       providerSelect.value = provider.id;
     }
@@ -514,8 +512,13 @@ function attachBehavior(root: HTMLElement): void {
       );
       const toSelect = models.includes(provider.selectedModel) ? provider.selectedModel : models[0] || '';
       chatModelSelect.value = toSelect || current;
-      chatModelSelect.disabled = models.length === 0;
+      chatModelSelect.disabled = apple || models.length === 0;
     }
+    if (providerStatus) {
+      providerStatus.textContent = provider.status?.online ? `${provider.name} online` : `Offline: ${provider.status?.lastError || 'unknown error'}`;
+      providerStatus.style.color = provider.status?.online ? 'var(--text)' : 'var(--error)';
+    }
+    syncSummaries();
   }
 
   async function refreshProvider(): Promise<void> {
@@ -533,10 +536,6 @@ function attachBehavior(root: HTMLElement): void {
       const active = providers.find((provider) => provider.id === activeId) || providers[0];
       if (active) {
         applyProvider(active);
-    if (providerStatus) {
-          providerStatus.textContent = active.status?.online ? `${active.name} online` : `Offline: ${active.status?.lastError || 'unknown error'}`;
-          providerStatus.style.color = active.status?.online ? 'var(--text)' : 'var(--error)';
-        }
       }
     } catch (err) {
       if (providerStatus) {
@@ -547,16 +546,19 @@ function attachBehavior(root: HTMLElement): void {
   }
 
   function syncSummaries(): void {
+    const chatProvider = providerCache.find((provider) => provider.id === currentSettings.activeProviderId);
     const descriptions: Record<string, string> = {
       capture: `${currentSettings.paused ? 'Paused' : 'Automatic'} · ${currentSettings.allowlist.length ? `${currentSettings.allowlist.length} allowed domains` : 'All sites'}`,
-      models: `${embeddingProviderSelect?.value === 'browser' ? 'In-browser' : 'Ollama'} embeddings · ${providerSelect?.selectedOptions[0]?.textContent || 'Ollama'} chat`,
+      models: `${embeddingProviderSelect?.value === 'browser' ? 'In-browser' : 'Ollama'} embeddings · ${chatProvider ? `${chatProvider.name} chat` : 'Chat provider not loaded'}`,
       appearance: themeSelect?.selectedOptions[0]?.textContent || 'Light', advanced: 'Retrieval, answers & tools'
     };
     for (const [id, text] of Object.entries(descriptions)) { const line = root.querySelector('#settings-' + id + '-summary'); if (line) line.textContent = text; }
   }
 
   function applySettings(settings: BetaSettings): void {
+    const previousProviderId = currentSettings.activeProviderId;
     currentSettings = settings;
+    appleCloud.checked = settings.applePrivateCloud === true;
     const captureNote = root.querySelector('#beta-capture-policy-note');
     if (captureNote) captureNote.textContent = settings.paused ? 'Automatic capture is paused. Manual capture still follows your domain rules.' : 'Automatic capture is on and follows your domain rules.';
     if (captureSetupCard) {
@@ -604,6 +606,10 @@ function attachBehavior(root: HTMLElement): void {
     }
     if (providerBaseInput) {
       renderProviderSecurityNotice(providerBaseInput.value);
+    }
+    if (previousProviderId !== settings.activeProviderId) {
+      const provider = providerCache.find((entry) => entry.id === settings.activeProviderId);
+      if (provider) applyProvider(provider);
     }
   }
 
@@ -901,7 +907,7 @@ function attachBehavior(root: HTMLElement): void {
     providerStatus.textContent = 'Testing connection...';
     providerStatus.style.color = '#374151';
     try {
-      const response = await runtimeMessage<{ status?: { online?: boolean; lastError?: string } }>({
+      const response = await runtimeMessage<{ status?: { online?: boolean; lastError?: string; contextTokens?: number } }>({
         type: 'PROVIDER_ACTION',
         providerId: providerSelect?.value || 'ollama',
         action: 'test',
@@ -909,7 +915,7 @@ function attachBehavior(root: HTMLElement): void {
       });
       const status = response.status;
       if (status?.online) {
-        providerStatus.textContent = 'Ollama online';
+        providerStatus.textContent = `${providerSelect?.selectedOptions[0]?.textContent || 'Provider'} online${status.contextTokens ? ` · ${status.contextTokens.toLocaleString()}-token context` : ''}`;
         providerStatus.style.color = 'var(--text)';
       } else {
         providerStatus.textContent = `Offline: ${status?.lastError || 'unknown error'}`;
@@ -928,16 +934,37 @@ function attachBehavior(root: HTMLElement): void {
   providerSelect?.addEventListener('change', async () => {
     const selectedId = providerSelect.value || 'ollama';
     try {
+      if (selectedId === 'apple' && !(await chrome.permissions.request({ permissions: ['nativeMessaging'] }))) {
+        providerSelect.value = currentSettings.activeProviderId;
+        setStatus('Apple helper access was not granted. Your previous provider is unchanged.'); return;
+      }
       const response = await runtimeMessage<{ settings: BetaSettings }>({
         type: 'SET_SETTINGS',
         payload: { activeProviderId: selectedId }
       });
       applySettings(response.settings || { ...currentSettings, activeProviderId: selectedId });
     } catch {
-      applySettings({ ...currentSettings, activeProviderId: selectedId });
+      providerSelect.value = currentSettings.activeProviderId;
+      setStatus('Unable to change provider. Your previous provider is still selected.');
+      return;
     }
     const selected = providerCache.find((provider) => provider.id === selectedId);
     if (selected) applyProvider(selected);
+    await refreshProvider();
+  });
+
+  appleCloud.addEventListener('change', async () => {
+    const enabled = appleCloud.checked;
+    if (enabled && !window.confirm('Enable Apple Private Cloud Compute? Your prompts and selected saved passages will be sent to Apple servers. This needs an eligible Mac and an entitled companion; it will not silently fall back to another provider.')) {
+      appleCloud.checked = currentSettings.applePrivateCloud; return;
+    }
+    appleCloud.disabled = true;
+    try {
+      const response = await runtimeMessage<{ settings: BetaSettings }>({ type: 'SET_APPLE_CLOUD', enabled, acknowledgeCloud: enabled });
+      applySettings(response.settings); await refreshProvider();
+      setStatus(enabled ? 'Apple Private Cloud Compute selected. Test the helper before asking.' : 'Apple on-device inference selected.');
+    } catch (error) { appleCloud.checked = currentSettings.applePrivateCloud; setStatus(`Unable to change Apple mode: ${String(error)}`, true); }
+    finally { appleCloud.disabled = false; }
   });
 
   providerBaseInput?.addEventListener('input', () => {
@@ -1091,32 +1118,6 @@ function attachBehavior(root: HTMLElement): void {
     }
   });
 
-  calibSimInput?.addEventListener('change', async () => {
-    const value = Number(calibSimInput.value);
-    try {
-      await runtimeMessage<{ calibration: { wSim: number; wLLM: number } }>({
-        type: 'SET_CALIBRATION',
-        payload: { wSim: value }
-      });
-      setStatus('Similarity weight saved');
-    } catch (err) {
-      setStatus(`Unable to update similarity weight: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  });
-
-  calibLLMInput?.addEventListener('change', async () => {
-    const value = Number(calibLLMInput.value);
-    try {
-      await runtimeMessage<{ calibration: { wSim: number; wLLM: number } }>({
-        type: 'SET_CALIBRATION',
-        payload: { wLLM: value }
-      });
-      setStatus('LLM weight saved');
-    } catch (err) {
-      setStatus(`Unable to update LLM weight: ${err instanceof Error ? err.message : String(err)}`, true);
-    }
-  });
-
   answerModeSelect?.addEventListener('change', async () => {
     const value = answerModeSelect.value === 'detailed' ? 'detailed' : 'concise';
     try {
@@ -1170,16 +1171,4 @@ function attachBehavior(root: HTMLElement): void {
 
   void refreshData();
   void refreshProvider();
-  async function refreshCalibration(): Promise<void> {
-    try {
-      const response = await runtimeMessage<{ calibration: { wSim: number; wLLM: number } }>({ type: 'GET_CALIBRATION' });
-      if (calibSimInput) calibSimInput.value = String(response.calibration?.wSim ?? 0.6);
-      if (calibLLMInput) calibLLMInput.value = String(response.calibration?.wLLM ?? 0.4);
-    } catch {
-      if (calibSimInput) calibSimInput.value = '0.6';
-      if (calibLLMInput) calibLLMInput.value = '0.4';
-    }
-  }
-
-  void refreshCalibration();
 }

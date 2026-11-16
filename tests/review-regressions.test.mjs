@@ -36,7 +36,6 @@ test('opening storage migrates the 0.1 library and versions once, without restor
   assert.equal(record.chunks[0].embeddingKey, undefined);
   assert.equal(record.versions[0].chunks[0].text, 'earlier passage');
   const db = await mod.openDatabase();
-  assert.equal(await new Promise(resolve => { const r = db.transaction('embeddings').objectStore('embeddings').count(); r.onsuccess = () => resolve(r.result); }), 1);
   await mod.deletePages([url]);
   db.close();
   const restarted = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB, IDBKeyRange });
@@ -84,8 +83,6 @@ test('empty legacy captures do not block migration or discard metadata and older
   assert.equal(history.versions[0].text, 'Previous captured passage');
   assert.deepEqual(plain(history.versions[0].chunks[0].embedding), [0, 1]);
   const db = await mod.openDatabase();
-  const count = await new Promise(resolve => { const r = db.transaction('embeddings').objectStore('embeddings').count(); r.onsuccess = () => resolve(r.result); });
-  assert.equal(count, 1, 'empty captures must not manufacture vectors or reuse older versions as current');
   await mod.deletePages([empty.url]);
   db.close();
   const restarted = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB, IDBKeyRange });
@@ -223,7 +220,6 @@ test('provider health reads are cheap and explicit connection tests still probe 
 
 const searchMocks = (pages = [], candidates = []) => ({
   '../storage/manager': { storageManager: { listAllPages: async () => pages, listRecentPages: async () => pages, getPageRecord: async target => pages.find(p => p.url === target) } },
-  '../calibration/index': { getCalibrationSnapshot: () => ({ wSim: .6, wLLM: 0 }) },
   '../embeddings/index': { computeEmbeddingsForQueries: async () => [[1, 0]], getEmbeddingConfig: () => ({ provider: 'browser', browserModel: 'new', browserRevision: 'pin' }) },
   '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async message => message.type === 'OFFSCREEN_TOP_PAGES' ? { pages: candidates.map(c => ({ url: c.url })) } : { candidates } },
   '../providers/chat': { callChat: async () => ({}), callChatJson: async () => ({}), getChatConfig: async () => ({}) },
@@ -248,13 +244,29 @@ test('mixed model search keeps exact text matches and semantic hits without dupl
   assert.equal(new Set(results.map(result => result.url)).size, results.length);
 });
 
-test('Ask uses the matched text snippet when retrieval has no chunk index', async () => {
+test('saved preview omission markers stay within the response bound for spaced and unbroken captures', async () => {
+  let text = 'Saved complete sentence.';
+  const mod = await loadSource('src/background/manage/index.ts', '', {
+    '../storage/manager': { storageManager: { getPageRecord: async () => page({ text }) } }
+  }, { chrome: chromeFixture });
+  assert.equal((await mod.getPagePreview(url)).snippet, text);
+  text = 'Saved words with complete boundaries. '.repeat(100);
+  const preview = await mod.getPagePreview(url);
+  assert.ok(preview.snippet.length <= 1200);
+  assert.ok(text.startsWith(preview.snippet.slice(0, -1)));
+  assert.ok(preview.snippet.endsWith('…'));
+  text = 'x'.repeat(2000);
+  assert.ok((await mod.getPagePreview(url)).snippet.length <= 1200, 'unbroken text must also leave room for the omission marker');
+});
+
+test('Ask preserves complete short passages while using matched snippets instead of unrelated chunks on longer pages', async () => {
   const mod = await loadSource('src/background/ask/index.ts', 'selectContextExcerpt', {
     '../storage/manager': { storageManager: {} }, '../search/index': { searchStoredPages: async () => [] },
-    '../../shared/tools/index': { ToolsRuntime: class {} },
     '../providers/chat': { callChat: async () => ({}), callChatJson: async () => null, getChatConfig: async () => ({}), normalizeToolArguments: value => value, streamChat: async () => '' },
-    '../settings/index': { getSettings: async () => ({}) }, '../calibration/index': { getCalibrationSnapshot: () => ({ wLLM: 0 }) }
   }, { chrome: chromeFixture });
   const excerpt = mod.selectContextExcerpt(page({ chunks: [{ text: 'UNRELATED INTRODUCTION' }, { text: 'MATCHED ANSWER' }] }), { url, snippet: 'MATCHED ANSWER' }, 1000);
   assert.equal(excerpt, 'MATCHED ANSWER');
+  const text = 'The launch date is May 19. Preparations include a staging rehearsal, backup verification and final approval.';
+  const short = mod.selectContextExcerpt(page({ text, chunks: [{ text }] }), { url, snippet: 'backup verification and final approval.' }, 1000);
+  assert.equal(short, text, 'a retrieval snippet must not hide a short saved passage that fits in full');
 });
