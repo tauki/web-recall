@@ -135,7 +135,7 @@ public final class CompanionServer: @unchecked Sendable {
       ownsSocket = result == 0
       guard result == 0, chmod(file.path, 0o600) == 0, listen(listener, 8) == 0 else { throw CompanionError.unavailable }
       let descriptor = listener
-      Task.detached { [self] in
+      DispatchQueue.global(qos: .utility).async { [self] in
         while true {
           let peer = accept(descriptor, nil, nil)
           if peer < 0 { return }
@@ -144,17 +144,17 @@ public final class CompanionServer: @unchecked Sendable {
           let connection = LocalConnection(peer)
           let id = UUID()
           guard add(connection, id: id) else { connection.close(); return }
-          Task.detached { [self] in
-            await controller.connect(id)
+          DispatchQueue.global(qos: .utility).async { [self] in
+            DispatchQueue.main.sync { controller.connect(id) }
             do {
               while let body = try connection.read(maximumBytes: NativeFraming.maximumRequestBytes) {
                 let request = try JSONDecoder().decode(HostRequest.self, from: body)
-                await controller.receive(request, client: id, writer: NativeWriter(writeFrame: { try connection.writeFrame($0) }))
+                DispatchQueue.main.sync { controller.receive(request, client: id, writer: NativeWriter(writeFrame: { try connection.writeFrame($0) })) }
               }
             } catch { }
             remove(id)
             connection.close()
-            await controller.disconnect(id)
+            DispatchQueue.main.sync { controller.disconnect(id) }
           }
         }
       }

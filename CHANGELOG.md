@@ -6,6 +6,7 @@ This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may 
 
 0.2.3 - Unreleased
 ------------------
+- Keep blocking companion socket accept/read loops off Swift's cooperative task pool while preserving ordered MainActor request handling. Exercise idle and concurrent clients with single-worker scheduling in CI, and bound only the CI test step to ten minutes; model inference still has no automatic deadline.
 - Restrict embedding/summary backfill and cancellation to trusted extension UI senders, including individual summary jobs sharing the backfill registry.
 - Recheck Private Cloud Compute consent after saved-memory tools finish, withholding newly retrieved text if consent was revoked while a tool was running.
 - Preserve literal backslashes and incomplete Unicode escape boundaries in streamed Ask drafts without clearing already decoded text.

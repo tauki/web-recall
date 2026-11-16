@@ -9,6 +9,12 @@ private func temporaryDirectory() throws -> URL {
   return directory
 }
 
+private func withBlockingClientIO<Value: Sendable>(_ operation: @escaping @Sendable () throws -> Value) async throws -> Value {
+  try await withCheckedThrowingContinuation { continuation in
+    DispatchQueue.global().async { continuation.resume(with: Result(catching: operation)) }
+  }
+}
+
 @Test @MainActor func localBridgeStreamsResponsesAndQuitLeavesNoListeningEndpoint() async throws {
   let directory = try temporaryDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }
@@ -20,7 +26,7 @@ private func temporaryDirectory() throws -> URL {
   let server = CompanionServer(directory: directory, expectedExecutable: executable, controller: controller)
   try server.start()
   defer { server.stop() }
-  let exchange = Task.detached {
+  let events = try await withBlockingClientIO {
     let connection = try LocalConnection.connect(directory: directory, expectedExecutable: executable)
     defer { connection.close() }
     try connection.send(Data(#"{"id":"sample","action":"generate","prompt":"Read saved evidence"}"#.utf8))
@@ -33,7 +39,6 @@ private func temporaryDirectory() throws -> URL {
     }
     return events
   }
-  let events = try await exchange.value
   #expect(events.map { $0["type"] } == ["chunk", "done"])
   #expect(events.last?["text"] == "Saved fact [1]")
   controller.quit(); server.stop()
@@ -81,14 +86,64 @@ private func temporaryDirectory() throws -> URL {
   let server = CompanionServer(directory: directory, expectedExecutable: URL(fileURLWithPath: "/different-bridge"), controller: controller)
   try server.start()
   defer { server.stop() }
-  let refused = await Task.detached {
+  let refused = try await withBlockingClientIO {
     do {
       let connection = try LocalConnection.connect(directory: directory, expectedExecutable: executable)
       defer { connection.close() }
       try connection.send(Data(#"{"id":"untrusted","action":"generate","prompt":"Do not execute"}"#.utf8))
       return try connection.read() == nil
     } catch { return true }
-  }.value
+  }
   #expect(refused)
   #expect(executions == 0)
+}
+
+@Test @MainActor func idleConnectionsCannotStarveConcurrentClientRequests() async throws {
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+  let controller = CompanionController { request, writer, _ in
+    try writer.send(HostEvent(id: request.id, type: "chunk", text: "Reading"))
+    return HostEvent(id: request.id, type: "done", text: request.prompt)
+  }
+  let server = CompanionServer(directory: directory, expectedExecutable: executable, controller: controller)
+  try server.start()
+  defer { server.stop() }
+  let watchdog = DispatchWorkItem { @Sendable in
+    Issue.record("Socket handling failed to make progress with an idle connection and concurrent clients.")
+    server.stop()
+  }
+  DispatchQueue.global().asyncAfter(deadline: .now() + 10, execute: watchdog)
+  defer { watchdog.cancel() }
+  let idle = try await withBlockingClientIO { try LocalConnection.connect(directory: directory, expectedExecutable: executable) }
+  defer { idle.close() }
+  let answers = try await withThrowingTaskGroup(of: String.self) { group in
+    for index in 0..<4 {
+      group.addTask {
+        try await withBlockingClientIO {
+          let connection = try LocalConnection.connect(directory: directory, expectedExecutable: executable)
+          defer { connection.close() }
+          let id = "client-\(index)", prompt = "Saved evidence \(index)"
+          try connection.send(Data("{\"id\":\"\(id)\",\"action\":\"generate\",\"prompt\":\"\(prompt)\"}".utf8))
+          var last = ""
+          for expectedType in ["chunk", "done"] {
+            let received = try connection.read()
+            let data = try #require(received)
+            let object = try JSONSerialization.jsonObject(with: data)
+            let event = try #require(object as? [String: String])
+            #expect(event["id"] == id)
+            #expect(event["type"] == expectedType)
+            last = try #require(event["text"])
+          }
+          return last
+        }
+      }
+    }
+    var received: [String] = []
+    for try await answer in group { received.append(answer) }
+    return received
+  }
+  #expect(answers.sorted() == (0..<4).map { "Saved evidence \($0)" })
+  controller.quit(); server.stop()
+  #expect(try await withBlockingClientIO { try idle.read() } == nil)
 }
