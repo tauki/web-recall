@@ -19,6 +19,9 @@ Shown with sample pages.
 
 ![Web Recall's native Chrome sidepanel showing saved pages beside an MDN article](.github/assets/screenshots/readme-browser-sidepanel-0.2.3.jpg)
 
+<details>
+<summary>More screenshots: Search, Ask, Settings, Memory, Highlights and Logs</summary>
+
 **Search and preview saved pages.**
 
 ![Search results with an expanded saved-page preview](.github/assets/screenshots/readme-search-0.2.3.png)
@@ -26,9 +29,6 @@ Shown with sample pages.
 **Ask about an individual page or your search results.**
 
 ![A question composed inside an individual saved-page preview](.github/assets/screenshots/readme-ask-0.2.3.png)
-
-<details>
-<summary>Settings, Memory Manager, Highlights and Logs</summary>
 
 **Settings reveal capture, model, appearance and advanced controls on demand.**
 
