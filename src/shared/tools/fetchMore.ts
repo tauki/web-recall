@@ -1,125 +1,39 @@
 import type { FetchMoreArgs, ToolHandlerResult, ToolsHandlerContext } from './types';
 
-function validateFetchMore(args: FetchMoreArgs | undefined, maxSlice: number): { ok: boolean; value?: FetchMoreArgs; errors?: string[] } {
-  const errors: string[] = [];
-  const url = typeof args?.url === 'string' ? args.url.trim() : '';
-  if (!url) {
-    errors.push('url (string) is required');
-  }
-  const chunkValue = typeof args?.chunkIndex === 'number' ? args.chunkIndex : undefined;
-  const aroundValue = typeof args?.aroundChunkIndex === 'number' ? args.aroundChunkIndex : undefined;
-  const radiusValue = typeof args?.radius === 'number' ? args.radius : undefined;
-  const startValue = typeof args?.start === 'number' ? args.start : undefined;
-  const endValue = typeof args?.end === 'number' ? args.end : undefined;
-  const hasChunk = typeof chunkValue === 'number';
-  const hasAround = typeof aroundValue === 'number';
-  const hasRange = typeof startValue === 'number' || typeof endValue === 'number';
-  if (!hasChunk && !hasAround && !hasRange) {
-    errors.push('provide chunkIndex, aroundChunkIndex, or start/end');
-  }
-  if (errors.length > 0) {
-    return { ok: false, errors };
-  }
-  const value: FetchMoreArgs = { url };
-  if (hasChunk) {
-    value.chunkIndex = Math.max(0, Math.trunc(chunkValue ?? 0));
-  } else if (hasAround) {
-    value.aroundChunkIndex = Math.max(0, Math.trunc(aroundValue ?? 0));
-    value.radius = Math.max(0, Math.min(3, Math.trunc(radiusValue ?? 1)));
-  } else {
-    let start = typeof startValue === 'number' ? startValue : 0;
-    let end = typeof endValue === 'number' ? endValue : start + maxSlice;
-    if (start < 0) start = 0;
-    if (end < start) end = start + maxSlice;
-    value.start = start;
-    value.end = end;
-  }
-  return { ok: true, value };
-}
-
 export async function runFetchMore(ctx: ToolsHandlerContext, rawArgs: unknown): Promise<ToolHandlerResult> {
-  const validation = validateFetchMore(rawArgs as FetchMoreArgs | undefined, ctx.maxSlice);
-  if (!validation.ok || !validation.value) {
-    return {
-      ok: false,
-      error: {
-        code: 'invalid_args',
-        message: (validation.errors || []).join('; '),
-        suggest: 'Provide { url, chunkIndex }, { url, aroundChunkIndex, radius }, or { url, start, end }'
-      },
-      content: ''
-    };
+  const args = rawArgs as FetchMoreArgs | undefined;
+  const fail = (code: string, message: string): ToolHandlerResult => ({ ok: false, error: { code, message }, content: '' });
+  if (!args || typeof args.url !== 'string' || !args.url.trim()) return fail('invalid_args', 'url (string) is required');
+  for (const key of ['chunkIndex', 'aroundChunkIndex', 'radius', 'start', 'end', 'offset', 'limit'] as const) {
+    if (args[key] !== undefined && (!Number.isSafeInteger(args[key]) || args[key]! < 0)) return fail('invalid_args', `${key} must be a non-negative integer`);
   }
-
-  const { url, chunkIndex, aroundChunkIndex, start, end } = validation.value;
-  if (!ctx.allowedUrls.has(url)) {
-    return {
-      ok: false,
-      error: { code: 'disallowed', message: 'url not in memory', suggest: 'Use a URL returned by search_memory' },
-      content: ''
-    };
-  }
-
+  const url = args.url.trim();
+  if (!ctx.allowedUrls.has(url)) return fail('disallowed', 'Use a URL returned by scoped search_memory');
   const page = ctx.getPage(url);
-  const fullText = ctx.pageText.get(url) || page?.text || '';
-  const response: Record<string, unknown> = { url };
-
-  if (typeof chunkIndex === 'number') {
-    const chunkText = page?.chunks?.[chunkIndex]?.text ?? '';
-    response.chunkIndex = chunkIndex;
-    ctx.ensureUrlTracked(url);
-    return {
-      ok: true,
-      content: JSON.stringify({
-        ok: true,
-        data: { text: chunkText, chunkIndex, title: page?.title || url, domain: ctx.extractDomain(url) },
-        usedArgs: response,
-        suggest: 'Use aroundChunkIndex to expand neighboring chunks when you need more context'
-      })
-    };
+  if (!page) return fail('not_found', 'This saved page is no longer available');
+  const offset = args.offset ?? 0;
+  const limit = Math.max(1, Math.min(args.limit ?? ctx.maxSlice, ctx.maxSlice));
+  let text: string, nextArgs: FetchMoreArgs | null = null;
+  const usedArgs: FetchMoreArgs = { ...args, url };
+  if (args.chunkIndex !== undefined || args.aroundChunkIndex !== undefined) {
+    const index = args.chunkIndex ?? args.aroundChunkIndex!;
+    if (!page.chunks?.[index]) return fail('not_found', 'No such saved passage. Use get_page_chunks to find valid chunk indices.');
+    const radius = args.chunkIndex !== undefined ? 0 : Math.min(3, args.radius ?? 1);
+    const from = Math.max(0, index - radius), to = Math.min(page.chunks.length - 1, index + radius);
+    const full = page.chunks.slice(from, to + 1).map(chunk => chunk.text || '').filter(Boolean).join('\n\n');
+    if (offset >= full.length) return fail('not_found', 'No saved text at this offset');
+    text = full.slice(offset, offset + limit);
+    if (offset + text.length < full.length) nextArgs = { ...usedArgs, offset: offset + text.length, limit };
+  } else {
+    if (args.start === undefined && args.end === undefined) return fail('invalid_args', 'Provide chunkIndex, aroundChunkIndex, or start/end');
+    const full = ctx.pageText.get(url) || page.text || '';
+    const start = args.start ?? 0, requestedEnd = Math.min(args.end ?? full.length, full.length);
+    if (requestedEnd <= start) return fail('invalid_args', 'end must be greater than start within the saved text');
+    const end = Math.min(start + limit, requestedEnd);
+    text = full.slice(start, end);
+    usedArgs.start = start; usedArgs.end = end;
+    if (end < requestedEnd) nextArgs = { url, start: end, end: requestedEnd, limit };
   }
-
-  if (typeof aroundChunkIndex === 'number') {
-    const radius = validation.value.radius ?? 1;
-    const chunks = page?.chunks || [];
-    const from = Math.max(0, aroundChunkIndex - radius);
-    const to = Math.min(chunks.length - 1, aroundChunkIndex + radius);
-    const selected = chunks.slice(from, to + 1).map((chunk) => chunk.text || '').filter(Boolean);
-    response.aroundChunkIndex = aroundChunkIndex;
-    response.radius = radius;
-    ctx.ensureUrlTracked(url);
-    return {
-      ok: true,
-      content: JSON.stringify({
-        ok: true,
-        data: {
-          text: selected.join('\n\n'),
-          fromChunkIndex: from,
-          toChunkIndex: to,
-          title: page?.title || url,
-          domain: ctx.extractDomain(url)
-        },
-        usedArgs: response,
-        suggest: 'Use get_page_chunks({ url }) first when you need to pick the best chunk neighborhood'
-      })
-    };
-  }
-
-  const safeStart = Math.max(0, (start ?? 0) | 0);
-  let safeEnd = Math.max(safeStart, (end ?? safeStart + ctx.maxSlice) | 0);
-  safeEnd = Math.min(fullText.length, safeEnd);
-  if (safeEnd - safeStart > ctx.maxSlice) safeEnd = safeStart + ctx.maxSlice;
-  const slice = ctx.mergeRange(url, safeStart, safeEnd, fullText);
-  response.start = safeStart;
-  response.end = safeEnd;
   ctx.ensureUrlTracked(url);
-  return {
-    ok: true,
-    content: JSON.stringify({
-      ok: true,
-      data: { text: slice, title: page?.title || url, domain: ctx.extractDomain(url) },
-      usedArgs: response,
-      suggest: 'Prefer chunkIndex or aroundChunkIndex over raw start/end slices'
-    })
-  };
+  return { ok: true, content: JSON.stringify({ ok: true, nextArgs, truncated: nextArgs !== null, suggest: nextArgs ? 'Copy nextArgs exactly to continue; repeating this call reads the same characters again' : null, usedArgs, data: { url, text, chunkIndex: args.chunkIndex, offset, title: page.title || url, domain: ctx.extractDomain(url), timestamp: page.timestamp } }) };
 }

@@ -3,23 +3,21 @@ import { migrateLegacySnapshotIfNeeded, openDatabase } from '../../shared/db/ind
 let readyPromise: Promise<void> | null = null;
 
 export function initStorage(): void {
-  if (readyPromise) return;
-  readyPromise = (async () => {
-    try {
+  void whenStorageReady().catch((err) => {
+    console.error('[beta-background:storage] failed to initialise IndexedDB', err);
+  });
+}
+
+export function whenStorageReady(): Promise<void> {
+  if (!readyPromise) {
+    readyPromise = (async () => {
       await openDatabase();
       await migrateLegacySnapshotIfNeeded();
       console.info('[beta-background:storage] IndexedDB ready');
-    } catch (err) {
-      console.error('[beta-background:storage] failed to initialise IndexedDB', err);
-    }
-  })();
-}
-
-export async function whenStorageReady(): Promise<void> {
-  if (!readyPromise) {
-    initStorage();
+    })().catch((err) => {
+      readyPromise = null;
+      throw err;
+    });
   }
-  if (readyPromise) {
-    await readyPromise;
-  }
+  return readyPromise;
 }

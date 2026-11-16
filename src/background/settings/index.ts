@@ -58,7 +58,7 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
   const normalizedTheme: BetaSettings['theme'] = theme === 'dark' || theme === 'system' ? theme : 'light';
   const activeProviderId = typeof payload.activeProviderId === 'string' && payload.activeProviderId ? payload.activeProviderId : DEFAULT_SETTINGS.activeProviderId;
   return {
-    paused: Boolean(payload.paused),
+    paused: typeof payload.paused === 'boolean' ? payload.paused : DEFAULT_SETTINGS.paused,
     captureSetupComplete:
       typeof payload.captureSetupComplete === 'boolean'
         ? payload.captureSetupComplete
@@ -66,17 +66,18 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
     acknowledgedRemoteProviderOrigins: normalizeOrigins(payload.acknowledgedRemoteProviderOrigins),
     allowlist: normalizeDomains(payload.allowlist),
     denylist: normalizeDomains(payload.denylist),
-    contextWindowChars: clampNumber(payload.contextWindowChars, 400, 6000),
-    askMaxSources: clampNumber(payload.askMaxSources, 1, 10),
+    contextWindowChars: clampNumber(payload.contextWindowChars ?? DEFAULT_SETTINGS.contextWindowChars, 400, 6000),
+    askMaxSources: clampNumber(payload.askMaxSources ?? DEFAULT_SETTINGS.askMaxSources, 1, 10),
     theme: normalizedTheme,
     activeProviderId,
+    applePrivateCloud: payload.applePrivateCloud === true,
     logLevel: normalizeLogLevel(payload.logLevel),
     answerMode: payload.answerMode === 'detailed' ? 'detailed' : 'concise',
     queryRewrite: typeof payload.queryRewrite === 'boolean' ? payload.queryRewrite : DEFAULT_SETTINGS.queryRewrite,
     searchRerank: typeof payload.searchRerank === 'boolean' ? payload.searchRerank : DEFAULT_SETTINGS.searchRerank,
     askRerank: typeof payload.askRerank === 'boolean' ? payload.askRerank : DEFAULT_SETTINGS.askRerank,
     enableTools: typeof payload.enableTools === 'boolean' ? payload.enableTools : DEFAULT_SETTINGS.enableTools,
-    maxToolSteps: clampNumber(payload.maxToolSteps, 0, 100),
+    maxToolSteps: clampNumber(payload.maxToolSteps ?? DEFAULT_SETTINGS.maxToolSteps, 0, 100),
     logFullBodies: typeof payload.logFullBodies === 'boolean' ? payload.logFullBodies : DEFAULT_SETTINGS.logFullBodies
   };
 }
@@ -184,6 +185,7 @@ async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<Bet
     askMaxSources: typeof partial.askMaxSources === 'number' ? clampNumber(partial.askMaxSources, 1, 10) : current.askMaxSources,
     theme: partial.theme === 'dark' || partial.theme === 'system' || partial.theme === 'light' ? partial.theme : current.theme,
     activeProviderId: typeof partial.activeProviderId === 'string' && partial.activeProviderId ? partial.activeProviderId : current.activeProviderId,
+    applePrivateCloud: typeof partial.applePrivateCloud === 'boolean' ? partial.applePrivateCloud : current.applePrivateCloud,
     logLevel: normalizeLogLevel(partial.logLevel ?? current.logLevel),
     answerMode: partial.answerMode || current.answerMode,
     queryRewrite: typeof partial.queryRewrite === 'boolean' ? partial.queryRewrite : current.queryRewrite,

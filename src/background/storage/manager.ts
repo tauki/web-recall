@@ -11,13 +11,12 @@ import {
   listLogs,
   listProcessing,
   listRecentPages,
-  removeHighlight,
+  listRecentPageSummaries,
   savePageRecord,
-  upsertHighlight
+  savePageSummary
 } from '../../shared/db/index';
 
 export type {
-  HighlightRecord,
   LogRecord,
   PageChunkRecord,
   PageRecord,
@@ -27,9 +26,11 @@ export type {
 export type StorageBackend = {
   listAllPages: () => ReturnType<typeof listAllPages>;
   listRecentPages: (limit?: number) => ReturnType<typeof listRecentPages>;
+  listRecentPageSummaries: typeof listRecentPageSummaries;
   getPageRecord: (url: string) => ReturnType<typeof getPageRecord>;
   getNextPageRecord: typeof getNextPageRecord;
   savePageRecord: typeof savePageRecord;
+  savePageSummary: typeof savePageSummary;
   deletePages: (urls: string[]) => Promise<number>;
   listLogs: (limit?: number) => ReturnType<typeof listLogs>;
   clearLogs: () => Promise<void>;
@@ -38,16 +39,16 @@ export type StorageBackend = {
   updateProcessingEntry: typeof updateProcessingEntry;
   deleteProcessing: (url: string) => Promise<void>;
   getProcessingEntry: (url: string) => ReturnType<typeof getProcessingEntry>;
-  upsertHighlight: (record: Parameters<typeof upsertHighlight>[0]) => Promise<void>;
-  removeHighlight: (date: string) => Promise<void>;
 };
 
 export const storageManager: StorageBackend = {
   listAllPages,
   listRecentPages,
+  listRecentPageSummaries,
   getPageRecord,
   getNextPageRecord,
   savePageRecord,
+  savePageSummary,
   deletePages,
   listLogs,
   clearLogs,
@@ -55,7 +56,5 @@ export const storageManager: StorageBackend = {
   appendProcessing,
   updateProcessingEntry,
   deleteProcessing,
-  getProcessingEntry,
-  upsertHighlight,
-  removeHighlight
+  getProcessingEntry
 };

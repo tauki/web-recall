@@ -2,6 +2,7 @@ import { installSharedStyles, createToolNavigation, createBackLink, iconMarkup, 
 import { sendRuntimeMessage } from '../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 import { BACKUP_HEADER, readBackupPages } from '../../shared/backup';
+import type { BackfillFailure, BackfillResult } from '../../background/embeddings/backfill';
 
 const root = document.querySelector<HTMLElement>('#app-root');
 
@@ -11,6 +12,7 @@ type ManagePage = {
   timestamp: number;
   manual: boolean;
   hasEmbeddings?: boolean;
+  hasSummary?: boolean;
   embeddingStatus?: string;
   chunkCount?: number;
   lastEmbeddedAt?: number;
@@ -43,7 +45,14 @@ const state: ManageState = {
 };
 
 let backfillRequestId: string | null = null;
-const rowProgress = new Map<string, { text: string; error?: boolean }>();
+let regeneratingSummaryUrl: string | null = null;
+let pageLoadGeneration = 0;
+const rowProgress = new Map<string, { text: string; error?: boolean; failures?: Partial<Record<BackfillFailure['phase'], string>> }>();
+
+function recordBackfillFailure(failure: BackfillFailure): void {
+  const previous = rowProgress.get(failure.url);
+  rowProgress.set(failure.url, { text: '', ...previous, failures: { ...previous?.failures, [failure.phase]: failure.error } });
+}
 
 const MAX_IMPORT_FILE_BYTES = 10 * 1024 * 1024;
 let transferInProgress = false;
@@ -143,19 +152,30 @@ function renderRows(rows: ManagePage[]): void {
     const facts = document.createElement('dl'); facts.className = 'memory-facts';
     const rawStatus = page.embeddingStatus || (page.hasEmbeddings ? 'Present' : 'Missing');
     const embedStatus = rawStatus.startsWith('Different or unknown') ? 'Needs re-embed' : rawStatus;
-    for (const [name, value] of [['Captured', formatDate(page.timestamp)], ['Capture', page.manual ? 'Manual' : 'Automatic'], ['Embeddings', `${embedStatus} · ${page.chunkCount || 0} ${page.chunkCount === 1 ? 'chunk' : 'chunks'}`], ['Last embedded', page.lastEmbeddedAt ? formatDate(page.lastEmbeddedAt) : 'Not embedded'], ['URL', page.url]]) {
+    const summaryStatus = page.hasSummary === true ? 'Ready' : page.hasSummary === false ? 'Not saved yet' : 'Unavailable — reload extension';
+    for (const [name, value] of [['Captured', formatDate(page.timestamp)], ['Capture', page.manual ? 'Manual' : 'Automatic'], ['Embeddings', `${embedStatus} · ${page.chunkCount || 0} ${page.chunkCount === 1 ? 'chunk' : 'chunks'}`], ['Last embedded', page.lastEmbeddedAt ? formatDate(page.lastEmbeddedAt) : 'Not embedded'], ['Summary', summaryStatus], ['URL', page.url]]) {
       const row = document.createElement('div'); const dt = document.createElement('dt'); dt.textContent = name || ''; const dd = document.createElement('dd'); dd.textContent = value || ''; row.append(dt, dd); facts.append(row);
     }
     body.append(facts);
     const progress = rowProgress.get(page.url);
-    if (progress) { const line = document.createElement('span'); line.className = 'wr-row-progress'; line.textContent = progress.text; if (progress.error) line.dataset.variant = 'error'; body.append(line); }
+    if (progress?.text) { const line = document.createElement('span'); line.className = 'wr-row-progress'; line.textContent = progress.text; if (progress.error) line.dataset.variant = 'error'; body.append(line); }
+    for (const [phase, error] of Object.entries(progress?.failures || {})) {
+      const line = document.createElement('p'); line.className = 'wr-row-progress'; line.dataset.variant = 'error';
+      line.textContent = `${phase === 'summaries' ? 'Summary' : 'Embeddings'} failed: ${error}`; body.append(line);
+    }
     const actions = document.createElement('div'); actions.className = 'content-entry-actions';
     const preview = document.createElement('a'); preview.href = appUrl('sidepanel') + '#page=' + encodeURIComponent(page.url); preview.className = 'primary-button'; preview.textContent = 'Preview & ask';
     preview.addEventListener('click', event => { if (navigateTo('sidepanel', page.url)) event.preventDefault(); });
     const original = document.createElement('a'); original.href = page.url; original.target = '_blank'; original.rel = 'noreferrer'; original.className = 'text-button'; original.textContent = 'Open page';
-    const reembed = document.createElement('button'); reembed.className = 'text-button'; reembed.textContent = 'Re-embed'; reembed.setAttribute('aria-label', `Re-embed ${page.title || page.url}`); reembed.disabled = Boolean(backfillRequestId); reembed.addEventListener('click', () => { void runBackfill(1, true, [page.url]); });
+    const reembed = document.createElement('button'); reembed.className = 'text-button'; reembed.textContent = 'Re-embed'; reembed.setAttribute('aria-label', `Re-embed ${page.title || page.url}`); reembed.disabled = Boolean(backfillRequestId); reembed.addEventListener('click', () => { void runBackfill(1, true, [page.url], true); });
     const del = document.createElement('button'); del.className = 'text-button danger-text'; del.textContent = 'Delete'; del.disabled = Boolean(backfillRequestId); del.setAttribute('aria-label', `Delete ${page.title || page.url}`); del.addEventListener('click', () => { void deletePages([page.url]); });
-    actions.append(preview, original, reembed, del); body.append(actions); list.append(article);
+    const summarizing = Boolean(backfillRequestId && regeneratingSummaryUrl === page.url);
+    const summary = document.createElement('button'); summary.className = 'text-button'; summary.textContent = summarizing ? 'Stop summary' : 'Regenerate summary'; summary.setAttribute('aria-label', `${summary.textContent} ${page.title || page.url}`); summary.disabled = Boolean(backfillRequestId) && !summarizing;
+    summary.addEventListener('click', () => {
+      if (summarizing && backfillRequestId) void sendRuntimeMessage({ type: 'CANCEL_BACKFILL', requestId: backfillRequestId }).catch(error => updateStatus(`Unable to stop summary: ${String(error)}`, true));
+      else void regenerateSummary(page.url);
+    });
+    actions.append(preview, original, reembed, summary, del); body.append(actions); list.append(article);
   }
   if (!rows.length) { const p = document.createElement('p'); p.className = 'empty-tool-state'; p.textContent = state.pages.length ? 'No pages match. Try another search or clear your filters.' : 'No saved pages yet. Capture a page or import a backup from Tools.'; list.append(p); }
   const count = document.querySelector('#manage-count'); if (count) count.textContent = `${rows.length} ${rows.length === 1 ? 'page' : 'pages'}`;
@@ -182,16 +202,21 @@ function updateDeleteButton(): void {
   }
 }
 
-async function fetchPages(): Promise<void> {
+async function fetchPages(): Promise<string | undefined> {
+  const generation = ++pageLoadGeneration;
   try {
     updateStatus('Loading pages…');
     const response = await sendRuntimeMessage<{ pages: ManagePage[] }>({ type: 'GET_PAGE_LIST' });
+    if (generation !== pageLoadGeneration) return;
     state.pages = response.pages || [];
     state.selected = new Set([...state.selected].filter(url => state.pages.some(page => page.url === url)));
     applyFilters();
     updateStatus('');
   } catch (err) {
-    updateStatus(`Failed to load pages: ${err instanceof Error ? err.message : String(err)}`, true);
+    if (generation !== pageLoadGeneration) return;
+    const error = err instanceof Error ? err.message : String(err);
+    updateStatus(`Failed to load pages: ${error}`, true);
+    return error;
   }
 }
 
@@ -309,7 +334,31 @@ async function handleImport(file: File): Promise<void> {
   }
 }
 
-async function runBackfill(limit: number, force: boolean, urls?: string[]): Promise<boolean> {
+async function regenerateSummary(url: string): Promise<void> {
+  if (backfillRequestId) return;
+  const requestId = crypto.randomUUID(); backfillRequestId = requestId; regeneratingSummaryUrl = url;
+  rowProgress.clear(); rowProgress.set(url, { text: 'Summarizing…' });
+  syncBackfillControls(); sortAndRender(); updateStatus('Regenerating summary… Existing summary stays until a replacement succeeds.');
+  let resultText = '', resultError = false;
+  try {
+    const response = await sendRuntimeMessage<{ updated: boolean }>({ type: 'REGENERATE_PAGE_SUMMARY', requestId, url });
+    const text = response.updated ? 'Summary regenerated.' : 'Page changed or has no saved text; no summary replaced.';
+    resultText = text; rowProgress.set(url, { text });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const stopped = message === 'Stopped by user';
+    const text = stopped ? 'Stopped. Saved summaries are preserved.' : `Summary regeneration failed: ${message}. Existing summary is kept.`;
+    resultText = text; resultError = !stopped; rowProgress.set(url, { text, error: !stopped });
+  } finally {
+    backfillRequestId = null; regeneratingSummaryUrl = null;
+    syncBackfillControls();
+    const refreshError = await fetchPages();
+    if (refreshError) { resultText += ` Unable to refresh Memory: ${refreshError}`; resultError = true; }
+    sortAndRender(); updateStatus(resultText, resultError);
+  }
+}
+
+async function runBackfill(limit: number, force: boolean, urls?: string[], createSummaries = false, regenerateSummaries = false): Promise<boolean> {
   if (backfillRequestId) return false;
   const requestId = crypto.randomUUID(); backfillRequestId = requestId;
   rowProgress.clear();
@@ -322,28 +371,31 @@ async function runBackfill(limit: number, force: boolean, urls?: string[]): Prom
   try {
     showStatus(force ? 'Re-embedding… Existing vectors stay until a replacement succeeds.' : 'Filling missing embeddings…');
     const response = await sendRuntimeMessage<{
-      result?: { processed: number; updated: number; failed?: number; updatedUrls?: string[] };
+      result?: Partial<BackfillResult>;
       error?: string;
     }>({
       type: 'BACKFILL_EMBEDDINGS',
       requestId,
       limit,
       force,
-      urls
+      urls,
+      createSummaries,
+      regenerateSummaries
     });
     if ((response as { error?: string }).error) {
       throw new Error((response as { error?: string }).error || 'Backfill failed');
     }
-    const result =
-      (response as { result?: { processed: number; updated: number; failed?: number; updatedUrls?: string[] } }).result || {
+    const result = response.result || {
         processed: 0,
         updated: 0,
         updatedUrls: []
       };
+    for (const failure of result.failures || []) recordBackfillFailure(failure);
     const updatedUrls = Array.isArray(result.updatedUrls) ? result.updatedUrls : [];
     const suffix = updatedUrls.length ? ` (${updatedUrls.length} page(s))` : '';
     await fetchPages();
-    showStatus(`Backfill complete: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}`, Boolean(result.failed));
+    const summaries = createSummaries ? ` · Summaries: ${result.summariesUpdated || 0} ${regenerateSummaries ? 'updated' : 'created'}, ${result.summariesFailed || 0} failed` : '';
+    showStatus(`Embeddings: processed ${result.processed}, updated ${result.updated}, failed ${result.failed || 0}${suffix}${summaries}`, Boolean(result.failed || result.summariesFailed));
     return true;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -362,8 +414,12 @@ function syncBackfillControls(): void {
   const limit = document.querySelector<HTMLInputElement>('#manage-backfill-limit');
   if (!run || !force || !limit) return;
   const count = Math.max(1, Math.min(500, Number(limit.value) || 50));
-  run.textContent = backfillRequestId ? 'Working…' : `${force.checked ? 'Re-embed' : 'Fill missing'} (up to ${count} pages)`;
+  const regenerate = document.querySelector<HTMLInputElement>('#manage-backfill-regenerate-summaries');
+  run.textContent = backfillRequestId ? 'Working…' : `${regenerate?.checked ? 'Backfill' : force.checked ? 'Re-embed' : 'Fill missing'} (up to ${count} pages)`;
   run.disabled = force.disabled = limit.disabled = Boolean(backfillRequestId);
+  const summaries = document.querySelector<HTMLInputElement>('#manage-backfill-summaries');
+  if (summaries) summaries.disabled = Boolean(backfillRequestId);
+  if (regenerate) regenerate.disabled = Boolean(backfillRequestId);
 }
 
 function renderApp(rootEl: HTMLElement): void {
@@ -385,6 +441,8 @@ function renderApp(rootEl: HTMLElement): void {
           <details class="tool-disclosure"><summary>Embeddings${iconMarkup('caret-down')}</summary><div class="embedding-tools">
             <label class="compact-setting"><span>Max pages</span><input id="manage-backfill-limit" type="number" min="1" max="500" value="50" /></label>
             <label class="check-setting"><span>Replace existing embeddings</span><input id="manage-backfill-force" type="checkbox" /></label>
+            <label class="check-setting"><span>Create missing summaries after embeddings</span><input id="manage-backfill-summaries" type="checkbox" /></label>
+            <label class="check-setting"><span>Regenerate existing summaries too</span><input id="manage-backfill-regenerate-summaries" type="checkbox" /></label>
             <p class="field-note">Applies to the whole library, up to the page limit. Fill missing preserves existing vectors. Re-embed replaces vectors only after a successful result.</p>
             <button type="button" id="manage-backfill-run" class="primary-button">Fill missing</button><button type="button" id="manage-backfill-stop" class="text-button" hidden>Stop</button>
             <p id="manage-backfill-status" class="status-line" role="status"></p>
@@ -419,6 +477,7 @@ function renderApp(rootEl: HTMLElement): void {
   });
   rootEl.querySelector('#manage-backfill-limit')?.addEventListener('input', syncBackfillControls);
   rootEl.querySelector('#manage-backfill-force')?.addEventListener('change', syncBackfillControls);
+  rootEl.querySelector('#manage-backfill-regenerate-summaries')?.addEventListener('change', syncBackfillControls);
 
   document.getElementById('manage-refresh')?.addEventListener('click', () => fetchPages());
   document.getElementById('manage-search')?.addEventListener('input', () => applyFilters());
@@ -450,7 +509,9 @@ function renderApp(rootEl: HTMLElement): void {
     const limit = limitInput ? Number(limitInput.value) : 50;
     const force = Boolean(forceToggle?.checked);
     if (status) status.textContent = 'Backfill running…';
-    void runBackfill(Number.isFinite(limit) && limit > 0 ? limit : 50, force);
+    const summaries = rootEl.querySelector<HTMLInputElement>('#manage-backfill-summaries')?.checked === true;
+    const regenerate = rootEl.querySelector<HTMLInputElement>('#manage-backfill-regenerate-summaries')?.checked === true;
+    void runBackfill(Number.isFinite(limit) && limit > 0 ? limit : 50, force, undefined, summaries || regenerate, regenerate);
   });
 }
 
@@ -464,11 +525,17 @@ export function mountManage(target: HTMLElement): void {
   void fetchPages();
   void fetchQueue();
   chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+    if (message?.type === 'SUMMARY_UPDATED' && state.pages.some(page => page.url === message.url)) {
+      void fetchPages();
+    }
     if (message?.type === 'BACKFILL_PROGRESS' && message.requestId === backfillRequestId) {
-      const text = message.status === 'running' ? 'Embedding…' : message.status === 'complete' ? 'Updated' : `Failed: ${String(message.error || 'Try again')}`;
-      rowProgress.set(String(message.url), { text, error: message.status === 'error' });
+      const url = String(message.url);
+      const phase = message.phase === 'summaries' ? 'summaries' : 'embeddings';
+      if (message.status === 'error') recordBackfillFailure({ url, phase, error: String(message.error || 'Try again') });
+      const text = message.status === 'running' ? (phase === 'summaries' ? 'Summarizing…' : 'Embedding…') : message.status === 'complete' ? (phase === 'summaries' ? 'Summary ready' : 'Embeddings updated') : '';
+      rowProgress.set(url, { ...rowProgress.get(url), text });
       const progress = document.querySelector<HTMLElement>('#manage-backfill-status');
-      if (progress) progress.textContent = `${Number(message.completed)} of ${Number(message.total)} pages finished`;
+      if (progress) progress.textContent = `${Number(message.completed)} of ${Number(message.total)} ${message.phase === 'summaries' ? 'summaries' : 'pages'} finished`;
       sortAndRender();
     }
     if (message?.type === 'CAPTURE_QUEUE_UPDATED') {

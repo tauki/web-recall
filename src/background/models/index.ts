@@ -2,12 +2,10 @@ const MODEL_SETTINGS_KEY = 'betaModelSettings';
 
 export type ModelSettings = {
   chatModel: string | null;
-  summaryModel: string | null;
 };
 
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
-  chatModel: null,
-  summaryModel: null
+  chatModel: null
 };
 
 function readModelSettings(): Promise<ModelSettings> {
@@ -16,8 +14,8 @@ function readModelSettings(): Promise<ModelSettings> {
       const payload = result?.[MODEL_SETTINGS_KEY];
       if (payload && typeof payload === 'object') {
         resolve({
-          chatModel: typeof (payload as ModelSettings).chatModel === 'string' ? (payload as ModelSettings).chatModel : null,
-          summaryModel: typeof (payload as ModelSettings).summaryModel === 'string' ? (payload as ModelSettings).summaryModel : null
+          ...(payload as Record<string, unknown>),
+          chatModel: typeof (payload as ModelSettings).chatModel === 'string' ? (payload as ModelSettings).chatModel : null
         });
         return;
       }
@@ -41,8 +39,8 @@ export async function getModelSettings(): Promise<ModelSettings> {
 export async function updateModelSettings(partial: Partial<ModelSettings>): Promise<ModelSettings> {
   const current = await readModelSettings();
   const next: ModelSettings = {
-    chatModel: typeof partial.chatModel === 'string' && partial.chatModel.trim() ? partial.chatModel.trim() : current.chatModel,
-    summaryModel: typeof partial.summaryModel === 'string' && partial.summaryModel.trim() ? partial.summaryModel.trim() : current.summaryModel
+    ...current,
+    chatModel: typeof partial.chatModel === 'string' && partial.chatModel.trim() ? partial.chatModel.trim() : current.chatModel
   };
   await new Promise<void>((resolve, reject) => {
     chrome.storage.local.set({ [MODEL_SETTINGS_KEY]: next }, () => {

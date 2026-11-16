@@ -72,8 +72,9 @@ test('backfill exposes the Ollama rejection and preserves saved vectors', async 
   const page = {url:'https://example.test', title:'Article', updatedAt:123, chunks:[{text:'saved',embedding:[9,9]},{text:'missing',embedding:[]}]};
   const progress = []; let saves = 0;
   const mod = await loadSource('src/background/embeddings/backfill.ts', '', {
+    '../summaries/index': { queuePageSummary: async () => false },
     './index': {getEmbeddingConfig:embeddings.getEmbeddingConfig, computeEmbeddingsForChunks:embeddings.computeEmbeddingsForChunks},
-    '../storage/manager': {storageManager:{listAllPages:async () => [page], savePageRecord:async () => {saves++;}}},
+    '../storage/manager': {storageManager:{getPageRecord:async url => url === page.url ? page : undefined, savePageRecord:async () => {saves++;}}},
     '../offscreen/index': {invalidateOffscreenIndex:async () => {}},
     '../../shared/logger/index': {log:async () => {}}
   }, {Error});

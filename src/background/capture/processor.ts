@@ -4,6 +4,8 @@ import { embedPayloadChunks, getEmbeddingConfig } from '../embeddings/index';
 import { whenStorageReady } from '../storage/index';
 import { storageManager, type PageChunkRecord } from '../storage/manager';
 import { invalidateOffscreenIndex } from '../offscreen/index';
+import { queuePageSummary } from '../summaries/index';
+import { log } from '../../shared/logger/index';
 
 function normalizeChunk(text: string | undefined): string {
   if (typeof text === 'string') return text;
@@ -15,11 +17,13 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
   await whenStorageReady();
   const key = embeddingSpaceKey(getEmbeddingConfig());
   let embeddings: number[][] = [];
+  let embeddingError: string | undefined;
   try {
     embeddings = await embedPayloadChunks(payload);
     if (key !== embeddingSpaceKey(getEmbeddingConfig())) throw new Error('Embedding settings changed during capture');
   } catch (err) {
     console.warn('[beta-background:capture] embedding request failed; retaining matching saved vectors', err);
+    embeddingError = err instanceof Error ? err.message : String(err);
     embeddings = [];
   }
   if (!shouldContinue()) return;
@@ -43,4 +47,13 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
     chunkCount: items.length
   });
   invalidateOffscreenIndex().catch((err) => console.warn('[beta-background:capture] offscreen invalidate failed', err));
+  if (embeddingError) void log('warn', 'capture embeddings unavailable', { url: payload.url, phase: 'embeddings', error: embeddingError }).catch(() => {});
+  void log('info', 'capture summary queued', { url: payload.url, phase: 'summary' }).catch(() => {});
+  void queuePageSummary(payload.url).then(
+    updated => { void log('info', 'capture summary finished', { url: payload.url, phase: 'summary', updated }).catch(() => {}); },
+    error => {
+      console.warn('[beta-background:capture] summary unavailable; saved text and vectors are retained', error);
+      void log('warn', 'capture summary failed', { url: payload.url, phase: 'summary', error: error instanceof Error ? error.message : String(error) }).catch(() => {});
+    }
+  );
 }

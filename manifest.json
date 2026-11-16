@@ -2,17 +2,19 @@
   "manifest_version": 3,
   "minimum_chrome_version": "142",
   "name": "Web Recall",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "A privacy-preserving extension for semantic browsing history",
   "permissions": [
     "sidePanel",
     "activeTab",
     "storage",
+    "unlimitedStorage",
     "tabs",
     "offscreen",
     "contextMenus",
     "scripting"
   ],
+  "optional_permissions": ["nativeMessaging"],
   "host_permissions": [
     "http://localhost:11434/*",
     "http://127.0.0.1:11434/*",

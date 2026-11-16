@@ -28,7 +28,8 @@ export async function runGetPageSummary(ctx: ToolsHandlerContext, rawArgs: unkno
 
   if (!ctx.cache.summary.has(url)) {
     const record = ctx.getPage(url);
-    ctx.cache.summary.set(url, record?.summary || '');
+    if (!record) return { ok: false, error: { code: 'not_found', message: 'This saved page is no longer available' }, content: '' };
+    ctx.cache.summary.set(url, (record.summary || '').slice(0, ctx.maxSlice));
   }
   const summary = ctx.cache.summary.get(url) || '';
   const record = ctx.getPage(url);
@@ -46,7 +47,7 @@ export async function runGetPageSummary(ctx: ToolsHandlerContext, rawArgs: unkno
         snippet: ctx.cleanPreview(record?.text || '')
       },
       usedArgs: { url },
-      suggest: record?.chunks?.length ? 'Use get_page_chunks({ url }) if you need to inspect specific sections' : null
+      suggest: record?.chunks?.length ? 'For a specific missing fact, use search_within_page({ url, query }). Use get_page_chunks({ url }) only for a broad overview.' : null
     })
   };
 }

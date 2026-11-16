@@ -4,6 +4,40 @@ Changelog
 All notable changes to this project are documented in this file.
 This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may include breaking changes.
 
+0.2.3 - Unreleased
+------------------
+- Show session-cached recents while refreshing immediately when the sidepanel becomes visible. Read bounded metadata-only index pages instead of the whole library, lazy-load older recents while scrolling, and invalidate cached snapshots after deletion or restore without changing saved content or vectors.
+- Keep updater controls only in the companion dashboard, show them inline without a Details disclosure, and use a stable update-check button and status area without a Cancel check control. Clarify Refresh model status separately from app updates.
+- Keep Web Recall's right-click menu available on selections, links, media, editable fields and frames. Capture this page saves the current tab, even when automatic capture is paused, while respecting domain rules.
+- Simplify the companion menu: keep model and version details in the dashboard, shorten its tooltip to status, and label its entry Open dashboard.
+- Add dependency-free companion updates from signed GitHub releases: pinned Ed25519 metadata, archive and app verification, atomic replacement, startup confirmation, rollback and relaunch. Keep automatic updates opt-in, drain existing inference without a deadline, and sign companion release assets in CI with a dedicated updater key.
+- Preserve capture opt-in and declared defaults when loading partial saved settings. Retire misleading calibration weights in favor of the explicit source and context budgets, and preserve fused retrieval ranking when Ask combines searches.
+- Give explicit summary requests priority over automatic work, cancel superseded inference without deadlines, and settle cancelled queued jobs promptly. Summarize pages that fit in one pass; retain whole-page section reduction for longer pages and atomic stale-content checks without rereading vectors every pass.
+- Dispose invalidated per-page Ask subscriptions while retaining ongoing conversations during normal navigation. Preserve Memory refresh errors after successful summary regeneration and clear stale companion readiness after failed availability checks.
+- Stop writing duplicate embedding/highlight caches; preserve existing legacy stores until explicit deletion. Fetch only selected records for individual backfill and shortlisted chunk scoring, and remove unused summary-model settings, provider stubs and the placeholder WASM seam.
+- Remove the superseded native passage-tool stack; Apple Ask uses only the canonical browser-owned tool bridge. Version the cleaned native protocol as 2 and prompt users to update older companions before generation. Add a macOS companion build/test gate before extension packaging.
+- Identify Apple Foundation Models safety blocks explicitly in Ask and its activity log instead of suggesting a generic failure or Settings fix. Keep other provider errors and explicit cancellation unchanged.
+- Do not report a missing summary when an older background response omits summary metadata. Refresh Memory after summary completion and ignore stale page-list responses that arrive after a newer refresh.
+- Keep per-page embedding failure reasons visible when later summary work succeeds, including when progress events are missed. Show summary availability in Memory and record automatic capture embedding/summary outcomes separately in Logs.
+- Keep the Models summary, provider fields and status aligned with the saved chat provider regardless of whether settings or provider details load first; do not mislabel Apple chat as Ollama while provider metadata is pending.
+- Exempt local library and browser-model storage from Chrome eviction with `unlimitedStorage`. Request strict durability for saved pages, summaries, migrations and capture jobs; report aborted writes and initialization failures instead of silently continuing or leaving operations pending.
+- Add Regenerate summary to individual Memory items. It replaces only that page's summary, never runs embedding backfill, exposes Stop summary while working, and retains saved data on failure or cancellation.
+- Build whole-page summaries from independent section notes, balanced bounded reductions and a final overview anchored to the title and opening context. Add explicit summary regeneration in Memory backfill; defaults still reuse existing summaries, and failed or stale replacements leave saved data intact.
+- Individual Memory Re-embed also creates that page's summary if missing after the embedding update, independently of the bulk backfill checkbox. Existing summaries remain unchanged.
+- Generate compact background summaries after capture using the selected chat provider, reuse them for unchanged content, and invalidate them when saved text changes. Prefer saved summaries in previews, retaining raw text when inference is unavailable. Add opt-in missing-summary creation after embedding backfill, including already-embedded pages, with progress and cancellation.
+- Keep individual-page Ask requests running when browsing another item, with independent streaming, Stop controls and Answering/Answer ready indicators. Show compact saved-text previews with Show more/Show less instead of a long clipped paragraph.
+- Keep earlier Ask turns visible during follow-ups, clear the composer immediately on send, and compact longer conversations without deleting their visible history. Preserve source IDs across turns and keep each page selection's context separate.
+- Preserve complete short saved passages instead of clipping them to a retrieval snippet, and focus conversation compaction on the current follow-up so relevant earlier facts remain available.
+- Share browser-owned, scoped saved-memory tools between Ollama and Apple. Load pages on demand, bound passage reads, return continuation arguments, expose correlated tool activity and run states, and enforce the same per-call allowance.
+- Preserve actual cached tool results, allow failed calls to retry, retain Ollama continuation fields, and distinguish insufficient evidence from failed generation. Render Apple citations from structured source IDs rather than relying on citation punctuation in generated prose.
+- Compact research context and continue with saved evidence when needed; finalize without tools when the call allowance is exhausted or recovery remains stalled. Detect repeated reads across different tools, retain explicit Stop, and do not add an inference deadline or automatically re-embed saved pages.
+- Reuse the extension mark in the Mac menu bar, show the reported Apple model and companion version, and provide actionable Chrome native-host setup errors.
+- Finish Apple answers from already-read saved evidence when a native tool reaches its context or reading budget, preserving citations and Stop instead of aborting the whole answer.
+- Add a Mac menu-bar companion with live status and hover text, a small operational dashboard, Pause/Resume, Stop, Quit, and opt-in launch at login. Keep browser data in Chrome and communicate through a private local socket; quitting never silently restarts the app.
+- Add an optional Apple Foundation Models Mac proof of concept: Swift Native Messaging helper, streamed page-scoped Ask, saved-source citations, explicit Stop, and bounded read-only passage tools.
+- Detect model context size at runtime, keep browser embeddings and saved vectors unchanged, and make Private Cloud Compute an explicit off-by-default choice requiring an eligible, entitled helper.
+- Restrict model-operation messages to extension UI pages; native-app access is an optional permission requested when selecting Apple.
+
 0.2.2 - Unreleased
 ------------------
 - Keep first-run capture choices visible independently of the idle queue, and preserve keyboard focus and expanded metadata when new log entries arrive.

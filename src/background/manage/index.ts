@@ -5,6 +5,7 @@ import { embeddingSpaceKey } from '../../shared/config/index';
 import { getEmbeddingConfig } from '../embeddings/index';
 import { storageManager, type PageRecord } from '../storage/manager';
 import { invalidateOffscreenIndex } from '../offscreen/index';
+import { invalidateRecentPages } from './recents';
 
 export type ManagePageSummary = {
   url: string;
@@ -12,6 +13,7 @@ export type ManagePageSummary = {
   timestamp: number;
   manual: boolean;
   hasEmbeddings: boolean;
+  hasSummary: boolean;
   embeddingStatus: string;
   chunkCount: number;
   lastEmbeddedAt?: number;
@@ -31,6 +33,7 @@ export async function getManagePages(): Promise<ManagePageSummary[]> {
     title: page.title || page.url,
     timestamp: page.timestamp,
     manual: Boolean(page.manual),
+    hasSummary: Boolean(page.summary?.trim()),
     hasEmbeddings: Array.isArray(page.chunks) && page.chunks.length > 0 && page.chunks.every((chunk) => Array.isArray(chunk.embedding) && chunk.embedding.length > 0 && chunk.embeddingKey === embeddingSpaceKey(getEmbeddingConfig())),
     embeddingStatus: page.chunks?.some((chunk) => chunk.embedding?.length && chunk.embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) ? 'Different or unknown model — use Re-embed' : '',
     chunkCount: Array.isArray(page.chunks) ? page.chunks.length : 0,
@@ -43,6 +46,7 @@ export async function deleteManagePages(urls: string[]): Promise<number> {
   await cancelCaptureJobs(urls);
   const deleted = await storageManager.deletePages(urls);
   if (deleted > 0) {
+    await invalidateRecentPages();
     await invalidateOffscreenIndex();
   }
   return deleted;
@@ -66,6 +70,7 @@ export async function importBackupPage(line: string): Promise<{ imported: number
 async function restorePage(record: PageRecord): Promise<void> {
   await cancelCaptureJobs([record.url]);
   await storageManager.savePageRecord(record, { discardProcessing: true, replace: true });
+  await invalidateRecentPages();
 }
 
 export async function importManagePages(payload: ImportPayload): Promise<{ imported: number }> {
@@ -97,7 +102,12 @@ export async function importManagePages(payload: ImportPayload): Promise<{ impor
 }
 
 /** Read only a short saved passage for the inline preview; vectors stay in storage. */
-export async function getPagePreview(url: string): Promise<{ url: string; title: string; snippet: string; timestamp: number } | null> {
+export async function getPagePreview(url: string): Promise<{ url: string; title: string; snippet: string; timestamp: number; previewKind: 'summary' | 'excerpt' } | null> {
   const page = await storageManager.getPageRecord(url);
-  return page ? { url: page.url, title: page.title || page.url, snippet: (page.text || page.chunks?.map(chunk => chunk.text).join('\n') || page.summary || '').slice(0, 1200), timestamp: page.timestamp } : null;
+  if (!page) return null;
+  const text = page.summary?.trim() || page.text || page.chunks?.map(chunk => chunk.text).join('\n') || '';
+  const prefix = text.slice(0, text.length > 1200 ? 1199 : 1200);
+  const boundary = prefix.search(/\s+\S*$/);
+  const snippet = text.length > 1200 ? `${prefix.slice(0, boundary > 0 ? boundary : prefix.length).trimEnd()}…` : text;
+  return { url: page.url, title: page.title || page.url, snippet, timestamp: page.timestamp, previewKind: page.summary?.trim() ? 'summary' : 'excerpt' };
 }

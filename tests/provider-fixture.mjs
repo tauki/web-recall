@@ -10,7 +10,7 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
   const requests = [], listeners = [];
   const failingWrites = new Set();
   const chrome = {
-    runtime: { sendMessage() {}, getURL: path => path, onMessage: { addListener: listener => listeners.push(listener) } },
+    runtime: { id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', sendMessage() {}, getURL: path => `chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/${path}`, onMessage: { addListener: listener => listeners.push(listener) } },
     storage: {
       onChanged: { addListener() {} },
       local: {
@@ -49,17 +49,17 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
     }
   };
   const load = (source, overrides = {}) => loadSource(source, '', mocks, { TextEncoder, ...context, ...overrides });
-  const send = message => new Promise((resolve, reject) => {
+  const send = (message, sender = { id: chrome.runtime.id, url: chrome.runtime.getURL('dist/beta/ui/sidepanel/index.html') }) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(Error(`No response to ${message.type}`)), 5000);
     const respond = value => { clearTimeout(timer); resolve(value); };
     try {
       for (const listener of listeners) {
         let answered = false;
-        const pending = listener(message, {}, value => { answered = true; respond(value); });
+        const pending = listener(message, sender, value => { answered = true; respond(value); });
         if (answered || pending === true) return;
       }
       throw Error(`No listener handles ${message.type}`);
     } catch (error) { clearTimeout(timer); reject(error); }
   });
-  return { stored, requests, load, send, failNextWrite: key => failingWrites.add(key), connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
+  return { stored, requests, load, send, runtime: chrome.runtime, failNextWrite: key => failingWrites.add(key), connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
 }

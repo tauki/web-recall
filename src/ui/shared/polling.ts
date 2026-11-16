@@ -24,5 +24,10 @@ export function startPolling(
   }
 
   const timer = window.setInterval(tick, intervalMs);
-  return () => window.clearInterval(timer);
+  const onVisible = (): void => { if (document.visibilityState === 'visible') tick(); };
+  if (!runWhenHidden) document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    window.clearInterval(timer);
+    document.removeEventListener('visibilitychange', onVisible);
+  };
 }

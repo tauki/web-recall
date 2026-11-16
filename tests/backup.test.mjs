@@ -13,6 +13,7 @@ async function captureRestoreFixture(t, { beforeQueue = async () => {}, afterLoo
   const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   t.after(async () => (await source.openDatabase()).close());
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../summaries/index': { queuePageSummary: async () => false },
     '../storage/manager': { storageManager: source }, '../storage/index': { whenStorageReady: async () => {} },
     '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: embed },
     '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
@@ -136,7 +137,7 @@ test('backup restore replaces destination metadata, clearing omitted fields whil
   }
   await source.savePageRecord({ ...page, text: 'Ordinary capture update' });
   const captured = await source.getPageRecord(page.url);
-  assert.equal(captured.summary, explicit.summary);
+  assert.equal(captured.summary, undefined, 'a changed capture invalidates the restored summary, not the preserved backup metadata');
   assert.equal(captured.lastEmbeddedAt, explicit.lastEmbeddedAt);
   assert.deepEqual(plain(captured.versions), explicit.versions);
 });

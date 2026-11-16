@@ -21,15 +21,16 @@ async function ui(view, overrides = {}, backend) {
     GET_PROVIDERS: () => ({ providers: [] }),
     GET_PROVIDER_CONFIG: () => ({ baseUrl: 'http://localhost:11434' }),
     GET_BROWSER_EMBED_STATUS: () => ({ status: { ready: false, state: 'idle', runtimeAvailable: true } }),
-    GET_CALIBRATION: () => ({ calibration: { wSim: .6, wLLM: .4 } }),
     GET_PROCESSING: () => ({ queue: [] }),
     GET_PAGE_LIST: () => ({ pages }),
+    GET_RECENT_PAGES: () => ({ ...responses.GET_PAGE_LIST(), nextCursor: null }),
     ...overrides
   };
   const chrome = {
+    permissions: { allowed: true, requests: [], async request(request) { this.requests.push(request); return this.allowed; } },
     runtime: {
       getURL: path => 'https://extension.test/' + path,
-      onMessage: { addListener: listener => listeners.push(listener) },
+      onMessage: { addListener: listener => listeners.push(listener), removeListener: listener => { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); } },
       sendMessage(message, callback) {
         requests.push(message);
         pendingMessages++;
@@ -54,7 +55,7 @@ async function ui(view, overrides = {}, backend) {
   await tick(); await tick();
   const q = selector => window.document.querySelector(selector);
   const change = (selector, value) => { q(selector).value = value; q(selector).dispatchEvent(new window.Event('change', { bubbles: true })); };
-  return { window, q, change, requests, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
+  return { window, q, change, requests, listenerCount: () => listeners.length, permissions: chrome.permissions, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
     settle: () => waitFor(() => pendingMessages === 0, 'UI requests to finish'),
     submit: selector => q(selector).dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })) };
 }
@@ -427,6 +428,8 @@ test('Memory targets one page, reports progress there, and makes replacement opt
   f.q('[aria-label="Re-embed Cats"]').click();
   const request = f.requests.find(m => m.type === 'BACKFILL_EMBEDDINGS');
   assert.deepEqual([...request.urls], [pages[0].url]); assert.equal(request.limit, 1); assert.equal(request.force, true);
+  assert.equal(request.createSummaries, true, 'individual Re-embed must also fill a missing summary without relying on the bulk checkbox');
+  assert.equal(request.regenerateSummaries, false, 'individual Re-embed must continue preserving saved summaries');
   assert.equal(f.q('#manage-backfill-run').disabled, true);
   f.emit({ type: 'BACKFILL_PROGRESS', requestId: 'other', url: pages[0].url, status: 'error', completed: 0, total: 1 });
   assert.equal(f.q('.wr-row-progress'), null);
@@ -437,6 +440,135 @@ test('Memory targets one page, reports progress there, and makes replacement opt
   assert.match(f.q('#manage-backfill-status').textContent, /updated 1/);
   f.q('#manage-backfill-force').click();
   assert.match(f.q('#manage-backfill-run').textContent, /Re-embed/);
+});
+
+const memorySummaryStatus = fixture => Array.from(fixture.window.document.querySelectorAll('.memory-facts dt')).find(label => label.textContent === 'Summary')?.nextElementSibling?.textContent;
+
+for (const hasSummary of [undefined, false, true]) test(`Memory distinguishes ${String(hasSummary)} summary metadata without inventing a missing summary`, async t => {
+  const fixture = await ui('manage', { GET_PAGE_LIST: () => ({ pages: [{ ...pages[0], hasSummary }] }) });
+  t.after(fixture.close);
+  assert.equal(memorySummaryStatus(fixture), hasSummary === true ? 'Ready' : hasSummary === false ? 'Not saved yet' : 'Unavailable — reload extension');
+});
+
+test('Memory refreshes a completed background summary without starting another generation', async t => {
+  let hasSummary = false;
+  const fixture = await ui('manage', { GET_PAGE_LIST: () => ({ pages: [{ ...pages[0], hasSummary }] }) });
+  t.after(fixture.close);
+  hasSummary = true;
+  fixture.emit({ type: 'SUMMARY_UPDATED', url: pages[0].url });
+  await fixture.settle();
+  assert.equal(memorySummaryStatus(fixture), 'Ready');
+  assert.ok(!fixture.requests.some(message => message.type === 'REGENERATE_PAGE_SUMMARY' || message.type === 'BACKFILL_EMBEDDINGS'));
+});
+
+test('an older Memory refresh cannot replace newer saved-summary metadata', async t => {
+  const stale = deferred();
+  let loads = 0;
+  const fixture = await ui('manage', {
+    GET_PAGE_LIST: () => ++loads === 2 ? stale.promise : { pages: [{ ...pages[0], hasSummary: loads >= 3 }] }
+  });
+  t.after(fixture.close);
+  fixture.q('#app-root').dispatchEvent(new fixture.window.Event('wr-refresh'));
+  fixture.emit({ type: 'SUMMARY_UPDATED', url: pages[0].url });
+  await waitFor(() => memorySummaryStatus(fixture) === 'Ready', 'the completed summary metadata');
+  stale.resolve({ pages: [{ ...pages[0], hasSummary: false }] });
+  await fixture.settle();
+  assert.equal(memorySummaryStatus(fixture), 'Ready');
+});
+
+test('Memory regenerates exactly one summary without bulk backfill or embedding work', async t => {
+  const pending = deferred();
+  const other = { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs' };
+  const fixture = await ui('manage', { GET_PAGE_LIST: () => ({ pages: [pages[0], other] }), REGENERATE_PAGE_SUMMARY: () => pending.promise }); t.after(fixture.close);
+  fixture.q('[aria-label="Regenerate summary Cats"]').click();
+  const request = fixture.requests.find(message => message.type === 'REGENERATE_PAGE_SUMMARY');
+  assert.equal(request.url, pages[0].url);
+  assert.equal(fixture.requests.some(message => message.type === 'BACKFILL_EMBEDDINGS'), false);
+  assert.equal(fixture.q('[aria-label="Regenerate summary Dogs"]').disabled, true);
+  assert.equal(fixture.q('[aria-label="Re-embed Cats"]').disabled, true);
+  assert.match(fixture.q('.wr-row-progress').textContent, /Summarizing/);
+  pending.resolve({ updated: true });
+  await waitFor(() => Boolean(fixture.q('[aria-label="Regenerate summary Cats"]')), 'summary controls to recover');
+  assert.match(fixture.q('#manage-status').textContent, /Summary regenerated/);
+  assert.equal(fixture.q('[aria-label="Regenerate summary Dogs"]').disabled, false);
+  assert.equal(fixture.q('#manage-backfill-regenerate-summaries').checked, false);
+});
+
+test('successful summary regeneration preserves a subsequent Memory refresh failure', async t => {
+  let regenerated = false;
+  const fixture = await ui('manage', {
+    GET_PAGE_LIST: () => regenerated ? { error: 'Library read failed' } : { pages },
+    REGENERATE_PAGE_SUMMARY: () => { regenerated = true; return { updated: true }; }
+  }); t.after(fixture.close);
+  fixture.q('[aria-label="Regenerate summary Cats"]').click(); await fixture.settle();
+  assert.match(fixture.q('#manage-status').textContent, /Summary regenerated/);
+  assert.match(fixture.q('#manage-status').textContent, /refresh Memory.*Library read failed/i);
+  assert.equal(fixture.q('#manage-status').classList.contains('danger'), true);
+  assert.equal(fixture.requests.filter(request => request.type === 'REGENERATE_PAGE_SUMMARY').length, 1);
+  assert.ok(fixture.q('[aria-label="Regenerate summary Cats"]'), 'The previous page view remains available');
+});
+
+test('invalidated per-page conversations release runtime subscriptions and stop active work exactly once', async t => {
+  const pending = deferred();
+  const fixture = await ui('sidepanel', { GET_PAGE_PREVIEW: () => ({ page: { snippet: 'Saved content.' } }), ASK_QUESTION: () => pending.promise }); t.after(fixture.close);
+  await fixture.settle();
+  const initialListeners = fixture.listenerCount();
+  for (let cycle = 0; cycle < 5; cycle++) {
+    fixture.q('#beta-recents-list .ask-this-page').click();
+    assert.equal(fixture.listenerCount(), initialListeners + 1);
+    fixture.window.dispatchEvent(new fixture.window.Event('wr-memory-changed')); await fixture.settle();
+    assert.equal(fixture.listenerCount(), initialListeners, 'Discarded page conversations must release their event subscriptions');
+  }
+  fixture.q('#beta-recents-list .ask-this-page').click();
+  fixture.q('#beta-ask-input').value = 'Question'; fixture.submit('#beta-ask-form');
+  const request = fixture.requests.find(message => message.type === 'ASK_QUESTION');
+  fixture.window.dispatchEvent(new fixture.window.Event('wr-memory-changed')); await tick();
+  assert.equal(fixture.listenerCount(), initialListeners);
+  assert.deepEqual(fixture.requests.filter(message => message.type === 'CANCEL_ASK').map(message => message.requestId), [request.options.requestId]);
+  pending.resolve({ answer: 'Stale answer', sources: [] }); await fixture.settle();
+  fixture.q('#beta-recents-list .ask-this-page').click();
+  assert.doesNotMatch(fixture.q('#beta-ask-answer').textContent, /Stale answer/);
+});
+
+for (const progressDelivered of [true, false]) test(`Memory retains embedding failure details after a successful summary, with progress ${progressDelivered ? 'delivered' : 'missed'}`, async t => {
+  const pending = deferred();
+  let hasSummary = false;
+  const fixture = await ui('manage', {
+    GET_PAGE_LIST: () => ({ pages: [{ ...pages[0], embeddingStatus: '', hasEmbeddings: false, hasSummary }] }),
+    BACKFILL_EMBEDDINGS: () => pending.promise
+  });
+  t.after(fixture.close);
+  const reason = 'This browser model is not downloaded. Open Settings to download it.';
+  fixture.q('[aria-label="Re-embed Cats"]').click();
+  const request = fixture.requests.find(message => message.type === 'BACKFILL_EMBEDDINGS');
+  if (progressDelivered) {
+    fixture.emit({ type: 'BACKFILL_PROGRESS', requestId: request.requestId, url: pages[0].url, status: 'error', completed: 1, total: 1, error: reason });
+    fixture.emit({ type: 'BACKFILL_PROGRESS', requestId: request.requestId, url: pages[0].url, phase: 'summaries', status: 'running', completed: 0, total: 1 });
+    fixture.emit({ type: 'BACKFILL_PROGRESS', requestId: request.requestId, url: pages[0].url, phase: 'summaries', status: 'complete', completed: 1, total: 1 });
+    assert.match(fixture.q('#manage-rows').textContent, /Embeddings failed: This browser model is not downloaded/);
+  }
+  hasSummary = true;
+  pending.resolve({ result: { processed: 1, updated: 0, failed: 1, summariesUpdated: 1, summariesFailed: 0, failures: [{ url: pages[0].url, phase: 'embeddings', error: reason }] } });
+  await fixture.settle();
+  const text = fixture.q('#manage-rows').textContent;
+  assert.match(text, /Embeddings failed: This browser model is not downloaded/);
+  assert.match(text, /SummaryReady/);
+  assert.match(fixture.q('#manage-status').textContent, /Embeddings:.*failed 1.*Summaries: 1 created, 0 failed/);
+});
+
+for (const failure of ['cancel', 'provider']) test(`individual summary ${failure} restores controls and reports that saved summaries are preserved`, async t => {
+  const pending = deferred();
+  const fixture = await ui('manage', { REGENERATE_PAGE_SUMMARY: () => pending.promise }); t.after(fixture.close);
+  fixture.q('[aria-label="Regenerate summary Cats"]').click();
+  const request = fixture.requests.find(message => message.type === 'REGENERATE_PAGE_SUMMARY');
+  if (failure === 'cancel') {
+    fixture.q('[aria-label="Stop summary Cats"]').click();
+    assert.equal(fixture.requests.find(message => message.type === 'CANCEL_BACKFILL').requestId, request.requestId);
+  }
+  pending.reject(new Error(failure === 'cancel' ? 'Stopped by user' : 'Model unavailable'));
+  await waitFor(() => Boolean(fixture.q('[aria-label="Regenerate summary Cats"]')), 'summary controls to recover');
+  assert.match(fixture.q('#manage-status').textContent, failure === 'cancel' ? /Stopped.*preserved/ : /Model unavailable.*kept/);
+  assert.equal(fixture.q('[aria-label="Regenerate summary Cats"]').disabled, false);
 });
 
 test('Search Stop cancels the request and discards late results; Clear also cancels', async t => {
@@ -501,6 +633,93 @@ test('inline preview and source chooser send exact saved-page scopes and preserv
   assert.match(f.q('#beta-ask-answer').textContent, /Supported fact/);
 });
 
+test('item chats continue across navigation and isolate streaming, completion and Stop', async t => {
+  const first = deferred(), second = deferred();
+  const dog = { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs' };
+  const fixture = await ui('sidepanel', {
+    GET_PAGE_LIST: () => ({ pages: [pages[0], dog] }),
+    GET_PAGE_PREVIEW: () => ({ page: { snippet: 'Saved content.' } }),
+    ASK_QUESTION: message => message.options.scopeUrls[0] === dog.url ? second.promise : first.promise
+  }); t.after(fixture.close);
+  const rows = [...fixture.window.document.querySelectorAll('#beta-recents-list > article')];
+  rows[0].querySelector('details').open = true;
+  rows[0].querySelector('.ask-this-page').click();
+  fixture.q('#beta-ask-input').value = 'Question for cats'; fixture.submit('#beta-ask-form');
+  const catId = fixture.requests.find(message => message.type === 'ASK_QUESTION').options.requestId;
+  rows[0].querySelector('details').open = false; await tick();
+  rows[1].querySelector('details').open = true;
+  rows[1].querySelector('.ask-this-page').click();
+  fixture.q('#beta-ask-input').value = 'Question for dogs'; fixture.submit('#beta-ask-form');
+  const dogId = fixture.requests.filter(message => message.type === 'ASK_QUESTION').at(-1).options.requestId;
+  assert.equal(fixture.requests.filter(message => message.type === 'CANCEL_ASK').length, 0);
+  assert.match(rows[0].querySelector('.wr-item-ask-state').textContent, /Answering/);
+  fixture.emit({ type: 'ASK_ANSWER_UPDATE', requestId: catId, chunk: 'Cat draft' });
+  fixture.emit({ type: 'ASK_ANSWER_UPDATE', requestId: dogId, chunk: 'Dog draft' });
+  assert.equal(fixture.q('#beta-ask-answer').textContent, 'Dog draft');
+  rows[0].querySelector('details').open = true;
+  rows[0].querySelector('.ask-this-page').click();
+  assert.equal(fixture.q('#beta-ask-answer').textContent, 'Cat draft');
+  assert.equal(fixture.q('#beta-ask-stop').hidden, false);
+  rows[1].querySelector('details').open = true;
+  rows[1].querySelector('.ask-this-page').click();
+  first.resolve({ answer: 'Cats final [1]', sources: [{ ...pages[0], index: 1 }], outcome: 'answered' }); await tick();
+  assert.equal(fixture.q('#beta-ask-answer').textContent, 'Dog draft');
+  assert.equal(rows[0].querySelector('.wr-item-ask-state').textContent, 'Answer ready');
+  fixture.q('#beta-ask-stop').click();
+  assert.deepEqual(fixture.requests.filter(message => message.type === 'CANCEL_ASK').map(message => message.requestId), [dogId]);
+  second.resolve({ answer: 'Late dog answer', sources: [] }); await tick();
+  rows[0].querySelector('details').open = true;
+  rows[0].querySelector('.ask-this-page').click();
+  assert.match(fixture.q('#beta-ask-answer').textContent, /Cats final/);
+  assert.equal(fixture.window.document.querySelectorAll('#beta-ask-host').length, 1);
+});
+
+test('saved previews start compact and Show more reveals the same saved text without inference', async t => {
+  const text = 'A complete opening sentence. ' + 'More saved details about the article. '.repeat(28);
+  const fixture = await ui('sidepanel', { GET_PAGE_PREVIEW: () => ({ page: { snippet: text } }) }); t.after(fixture.close);
+  const row = fixture.q('#beta-recents-list > article'); row.querySelector('details').open = true; await tick();
+  const toggle = row.querySelector('.preview-toggle'), passage = row.querySelector('.content-entry-body > p');
+  await waitFor(() => !toggle.hidden, 'the saved preview to load');
+  assert.ok(passage.textContent.length < 265);
+  assert.match(passage.textContent, /[.!?…]$/);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  toggle.click(); assert.equal(passage.textContent, text.trim());
+  assert.equal(toggle.textContent, 'Show less'); assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  toggle.click(); assert.ok(passage.textContent.length < 265);
+  assert.equal(fixture.requests.filter(message => message.type === 'ASK_QUESTION').length, 0);
+});
+
+test('open previews update when background summaries finish and backfill summaries require an explicit choice', async t => {
+  let ready = false;
+  const fixture = await ui('sidepanel', {
+    GET_PAGE_PREVIEW: () => ({ page: { snippet: ready ? 'New saved summary.' : 'Original saved text.', previewKind: ready ? 'summary' : 'excerpt' } }),
+    BACKFILL_EMBEDDINGS: () => ({ result: { processed: 0, updated: 0, summariesUpdated: 1 } })
+  }); t.after(fixture.close);
+  fixture.q('#beta-recents-list details').open = true;
+  await waitFor(() => fixture.q('#beta-recents-list .content-entry-body > p').textContent === 'Original saved text.', 'raw saved preview');
+  ready = true; fixture.emit({ type: 'SUMMARY_UPDATED', url: pages[0].url });
+  await waitFor(() => fixture.q('#beta-recents-list .content-entry-body > p').textContent === 'New saved summary.', 'summary preview');
+  assert.equal(fixture.q('#beta-recents-list .content-entry-body > span').hidden, false);
+  fixture.q('a[data-view="manage"]').click(); await tick();
+  const choice = fixture.q('#manage-backfill-summaries'); assert.equal(choice.checked, false);
+  assert.equal(fixture.q('#manage-backfill-regenerate-summaries').checked, false);
+  choice.checked = true; fixture.q('#manage-backfill-run').click(); await tick();
+  assert.equal(fixture.requests.find(message => message.type === 'BACKFILL_EMBEDDINGS').createSummaries, true);
+  assert.match(fixture.q('#manage-backfill-status').textContent, /Summaries: 1 created/);
+});
+
+test('regenerating summaries is an explicit bulk choice and does not force replacement embeddings', async t => {
+  const fixture = await ui('manage', { BACKFILL_EMBEDDINGS: () => ({ result: { processed: 0, updated: 0, summariesUpdated: 1 } }) }); t.after(fixture.close);
+  const regenerate = fixture.q('#manage-backfill-regenerate-summaries');
+  assert.equal(regenerate.checked, false);
+  regenerate.checked = true;
+  fixture.q('#manage-backfill-run').click(); await tick();
+  const request = fixture.requests.find(message => message.type === 'BACKFILL_EMBEDDINGS');
+  assert.equal(request.regenerateSummaries, true);
+  assert.equal(request.createSummaries, true);
+  assert.equal(request.force, false);
+});
+
 test('changing the selected pages cancels Ask before accepting a late stream or answer', async t => {
   const pending = deferred();
   const f = await ui('sidepanel', { GET_PAGE_LIST: () => ({ pages: [pages[0], { ...pages[0], url: 'https://example.test/dogs', title: 'Dogs' }] }), ASK_QUESTION: () => pending.promise }); t.after(f.close);
@@ -511,7 +730,7 @@ test('changing the selected pages cancels Ask before accepting a late stream or 
   f.emit({ type: 'ASK_ANSWER_UPDATE', requestId: request.options.requestId, chunk: 'Stale scope' });
   pending.resolve({ answer: 'Stale final', sources: [] }); await tick();
   assert.equal(f.q('#beta-ask-answer').hidden, true);
-  assert.equal(f.q('#beta-ask-input').value, 'Compare');
+  assert.equal(f.q('#beta-ask-input').value, '', 'sending consumes the draft even when the source selection later changes');
 });
 
 test('menu mounts each real tool once and Memory reads the same backend library', async t => {
@@ -561,6 +780,105 @@ test('follow-up questions keep history and older citations have unique targets',
   assert.equal(ids.length, new Set(ids).size);
 });
 
+test('Enter clears the composer immediately while prior answers remain visible during a follow-up', async t => {
+  const pending = deferred(); let count = 0;
+  const f = await ui('sidepanel', { ASK_QUESTION: () => ++count === 1 ? { answer: 'Earlier evidence [1]', sources: [{ ...pages[0], snippet: 'Evidence', index: 1, domain: 'example.test' }] } : pending.promise }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'First question'; f.submit('#beta-ask-form'); await tick();
+  f.q('#beta-ask-input').value = 'Explain the earlier answer';
+  f.q('#beta-ask-form').requestSubmit = () => f.submit('#beta-ask-form');
+  f.q('#beta-ask-input').dispatchEvent(new f.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  assert.equal(f.q('#beta-ask-input').value, '');
+  assert.match(f.q('#beta-ask-question').textContent, /Explain the earlier answer/);
+  assert.match(f.q('#beta-ask-history').textContent, /First question/);
+  assert.match(f.q('#beta-ask-history').textContent, /Earlier evidence/);
+  assert.equal(f.q('#beta-ask-history > details').open, true);
+  pending.resolve({ answer: 'More detail [1]', sources: [{ ...pages[0], index: 1 }] }); await tick();
+  assert.match(f.q('#beta-ask-history').textContent, /Earlier evidence/);
+});
+
+test('parallel calls to the same tool keep separate activity rows and retain completion after rendering the answer', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { ASK_QUESTION: () => pending.promise }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'Compare two passages'; f.submit('#beta-ask-form');
+  const requestId = f.requests.find(message => message.type === 'ASK_QUESTION').options.requestId;
+  for (const callId of ['one', 'two']) f.emit({ type: 'ASK_TOOL_ACTIVITY', requestId, event: { callId, tool: 'fetch_more', status: 'started' } });
+  assert.equal(f.q('#beta-ask-log').children.length, 2, 'identical labels are different invocations');
+  for (const callId of ['one', 'two']) f.emit({ type: 'ASK_TOOL_ACTIVITY', requestId, event: { callId, tool: 'fetch_more', status: 'completed', ms: 1 } });
+  assert.match(f.q('[data-call-id="one"]').textContent, /completed/);
+  assert.match(f.q('[data-call-id="two"]').textContent, /completed/);
+  pending.resolve({ answer: 'Both passages agree [1]', sources: [{ ...pages[0], index: 1 }] }); await tick();
+  assert.equal(f.q('#beta-ask-log').children.length, 2);
+  assert.doesNotMatch(f.q('#beta-ask-log').textContent, /started/);
+});
+
+test('follow-ups round-trip the compact checkpoint while Clear discards its model context and visible history', async t => {
+  const checkpoint = { schemaVersion: 1, scope: 'null', summary: 'We discussed Cedar.', turns: [], references: [{ index: 7, url: pages[0].url, title: 'Cedar' }] };
+  const f = await ui('sidepanel', { ASK_QUESTION: () => ({ answer: 'Cedar [7]', sources: [{ ...pages[0], index: 7 }], conversation: checkpoint }) }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'First'; f.submit('#beta-ask-form'); await tick();
+  f.q('#beta-ask-input').value = 'Explain that'; f.submit('#beta-ask-form'); await tick();
+  assert.deepEqual(f.requests.filter(message => message.type === 'ASK_QUESTION')[1].options.conversation, checkpoint);
+  assert.match(f.q('#beta-ask-history').textContent, /First/);
+  f.q('#beta-ask-clear').click();
+  assert.equal(f.q('#beta-ask-history').children.length, 0);
+  f.q('#beta-ask-input').value = 'New chat'; f.submit('#beta-ask-form'); await tick();
+  assert.equal(f.requests.filter(message => message.type === 'ASK_QUESTION')[2].options.conversation, undefined);
+  assert.equal(f.requests.filter(message => message.type === 'ASK_QUESTION')[2].options.history.length, 0);
+});
+
+test('an honest insufficient answer finishes without an error and a failed answer exposes retrieved pages for recovery', async t => {
+  const f = await ui('sidepanel', { ASK_QUESTION: message => message.question === 'Missing budget?' ? { outcome: 'insufficient_evidence', answer: 'The saved plan has no budget.', sources: [] } : { outcome: 'failed', answer: 'The model could not finish.', sources: [{ ...pages[0], index: 1 }] } }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'Missing budget?'; f.submit('#beta-ask-form'); await tick();
+  assert.equal(f.q('#beta-ask-status').dataset.state, 'insufficient_evidence');
+  assert.equal(f.q('#beta-ask-status').dataset.variant, 'info');
+  f.q('#beta-ask-input').value = 'Try another question'; f.submit('#beta-ask-form'); await tick();
+  assert.equal(f.q('#beta-ask-status').dataset.state, 'failed');
+  assert.equal(f.q('#beta-ask-sources article').hidden, false);
+  assert.match(f.q('#beta-ask-sources').textContent, /Retrieved pages/);
+  assert.equal(f.q('#beta-ask-input').value, 'Try another question');
+});
+
+test('an Apple safety block survives Ask and runtime messaging with actionable provider-specific UI', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  Object.assign(backend.stored.betaSettings, { activeProviderId: 'apple', queryRewrite: false, askRerank: false, enableTools: false });
+  const nativeRequests = [];
+  backend.runtime.connectNative = () => {
+    const listeners = [];
+    return {
+      onMessage: { addListener: listener => listeners.push(listener) },
+      onDisconnect: { addListener() {} }, disconnect() {},
+      postMessage(request) {
+        nativeRequests.push(request);
+        const event = request.action === 'status'
+          ? { id: request.id, type: 'status', status: { protocolVersion: 2, available: true, contextTokens: 8192, mode: 'on-device', libraryTools: true } }
+          : { id: request.id, type: 'error', text: 'Response may contain sensitive or unsafe content.' };
+        queueMicrotask(() => listeners.forEach(listener => listener(event)));
+      }
+    };
+  };
+  const db = await backend.load('src/shared/db/index.ts');
+  t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ ...pages[0], text: 'A saved page about cats.', chunks: [{ text: 'A saved page about cats.' }] });
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  f.q('#beta-ask-memory').click();
+  f.q('#beta-ask-input').value = 'A question about cats'; f.submit('#beta-ask-form'); await f.settle();
+  assert.match(f.q('#beta-ask-status').textContent, /Apple.*blocked.*safety/i);
+  assert.doesNotMatch(f.q('#beta-ask-status').textContent, /Try again or check Settings|Ask failed:/);
+  assert.match(f.q('#beta-ask-log').textContent, /Apple.*blocked.*safety/i);
+  assert.equal(f.q('#beta-ask-input').value, 'A question about cats');
+  assert.equal(f.q('#beta-ask-input').readOnly, false);
+  assert.equal(f.q('#beta-ask-stop').hidden, true);
+  assert.equal(nativeRequests.filter(request => request.action === 'generate').length, 1);
+  assert.equal(backend.requests.some(request => new URL(request.url).pathname.endsWith('/api/chat')), false, 'A safety block must not fall back to HTTP chat');
+});
+
+test('unclassified failures retain generic guidance rather than falsely blaming Apple', async t => {
+  const f = await ui('sidepanel', { ASK_QUESTION: () => ({ error: 'Response may contain sensitive or unsafe content.' }) }); t.after(f.close);
+  f.q('#beta-ask-memory').click(); f.q('#beta-ask-input').value = 'A question'; f.submit('#beta-ask-form'); await f.settle();
+  assert.match(f.q('#beta-ask-status').textContent, /Ask failed:.*Try again or check Settings/);
+  assert.doesNotMatch(f.q('#beta-ask-status').textContent, /Apple/);
+});
+
 test('panel uses one contextual menu without a duplicate title across every real page', async t => {
   const f = await ui('sidepanel', { GET_LOGS: () => ({ logs: [] }), LIST_HIGHLIGHT_DATES: () => ({ dates: [], total: 0 }) }); t.after(f.close);
   assert.equal(f.q('.browser-header'), null);
@@ -592,6 +910,71 @@ test('capture queue hides when idle, opens from Menu and follows active and fail
   f.q('#beta-capture-status button').click(); await f.settle();
   assert.equal(f.requests.find(message => message.type === 'RETRY_PROCESSING').url, pages[0].url);
   queue = []; await f.poll(); assert.equal(details.hidden, true);
+});
+
+for (const delayed of ['providers', 'settings']) test(`Models summary reflects the saved Apple provider when ${delayed} loads last`, async t => {
+  const pending = deferred();
+  const settings = { ...DEFAULT_SETTINGS, activeProviderId: 'apple', captureSetupComplete: true };
+  const providers = [
+    { id: 'ollama', name: 'Ollama', settings: [], models: [], actions: [], status: { online: false } },
+    { id: 'apple', name: 'Apple Foundation Models', settings: [], models: [], actions: [], status: { online: true } }
+  ];
+  const fixture = await ui('sidepanel', {
+    GET_SETTINGS: () => delayed === 'settings' ? pending.promise : { settings },
+    GET_PROVIDERS: () => delayed === 'providers' ? pending.promise : { providers },
+    GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG, provider: 'browser' } })
+  });
+  t.after(fixture.close);
+  if (delayed === 'providers') assert.doesNotMatch(fixture.q('#settings-models-summary').textContent, /Ollama chat/, 'Pending provider metadata must not claim a different active provider');
+  pending.resolve(delayed === 'providers' ? { providers } : { settings });
+  await fixture.settle();
+  assert.equal(fixture.q('#beta-provider-select').value, 'apple');
+  assert.equal(fixture.q('#settings-models-summary').textContent, 'In-browser embeddings · Apple Foundation Models chat');
+  assert.equal(fixture.q('#beta-apple-options').hidden, false, 'The provider fields must agree with the saved selection');
+  assert.match(fixture.q('#beta-provider-status').textContent, /Apple Foundation Models online/);
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: { ...settings, activeProviderId: 'ollama' } });
+  assert.equal(fixture.q('#settings-models-summary').textContent, 'In-browser embeddings · Ollama chat');
+  assert.equal(fixture.q('#beta-apple-options').hidden, true);
+});
+
+test('Apple provider selection requests native access, keeps embeddings and requires explicit cloud confirmation', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const fixture = await ui('sidepanel', {}, backend); t.after(fixture.close); await fixture.settle();
+  const previousEmbedding = JSON.stringify(backend.stored.betaEmbeddingConfig);
+  fixture.permissions.allowed = false;
+  fixture.change('#beta-provider-select', 'apple'); await fixture.settle(); await tick();
+  assert.equal(backend.stored.betaSettings.activeProviderId || 'ollama', 'ollama');
+  assert.equal(fixture.q('#beta-provider-select').value, 'ollama');
+  assert.match(fixture.q('#settings-models-summary').textContent, /Ollama chat/);
+  fixture.permissions.allowed = true;
+  backend.failNextWrite('betaSettings');
+  fixture.change('#beta-provider-select', 'apple'); await fixture.settle();
+  assert.match(fixture.q('#settings-models-summary').textContent, /Ollama chat/, 'A failed provider save must retain the persisted provider label');
+  fixture.change('#beta-provider-select', 'apple'); await fixture.settle(); await tick();
+  assert.equal(backend.stored.betaSettings.activeProviderId, 'apple');
+  assert.match(fixture.q('#settings-models-summary').textContent, /Apple Foundation Models chat/);
+  assert.equal(fixture.permissions.requests.at(-1).permissions[0], 'nativeMessaging');
+  assert.equal(fixture.q('#beta-apple-options').hidden, false);
+  assert.equal(fixture.q('#beta-provider-base').closest('.beta-field').hidden, true);
+  assert.equal(fixture.q('#beta-chat-model').disabled, true);
+  assert.equal(fixture.q('#beta-apple-cloud').checked, false);
+  fixture.window.confirm = () => false;
+  fixture.q('#beta-apple-cloud').checked = true; fixture.change('#beta-apple-cloud', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.applePrivateCloud, false);
+  assert.equal(fixture.q('#beta-apple-cloud').checked, false);
+  fixture.window.confirm = () => true;
+  fixture.q('#beta-apple-cloud').checked = true; fixture.change('#beta-apple-cloud', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.applePrivateCloud, true);
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: backend.stored.betaSettings });
+  await fixture.settle();
+  assert.match(fixture.q('#beta-remote-provider-banner').textContent, /Apple servers/);
+  fixture.q('#beta-apple-cloud').checked = false; fixture.change('#beta-apple-cloud', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.applePrivateCloud, false);
+  fixture.change('#beta-provider-select', 'ollama'); await fixture.settle();
+  assert.match(fixture.q('#settings-models-summary').textContent, /Ollama chat/);
+  assert.equal(fixture.q('#beta-provider-base').value, 'http://localhost:11434');
+  assert.equal(JSON.stringify(backend.stored.betaEmbeddingConfig), previousEmbedding);
+  assert.ok(!fixture.requests.some(request => request.type === 'SET_EMBEDDING_CONFIG' || request.type === 'BACKFILL_EMBEDDINGS'));
 });
 
 test('incomplete capture setup remains visible with no jobs and disappears after an explicit policy choice', async t => {
@@ -645,7 +1028,7 @@ test('empty memory provides capture and setup actions without an empty queue or 
   assert.ok(!f.requests.some(message => message.type === 'ASK_QUESTION'));
 });
 
-test('capture policy, theme, logging and calibration save through their real handlers', async t => {
+test('capture policy, theme, logging and retrieval budgets save through their real handlers', async t => {
   const backend = providerFixture('http://localhost:11434'); await backend.connect();
   const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
   f.q('a[data-view="settings"]').click();
@@ -661,8 +1044,10 @@ test('capture policy, theme, logging and calibration save through their real han
   assert.equal(backend.stored.betaSettings.theme, 'dark'); assert.equal(f.window.document.documentElement.dataset.theme, 'dark');
   f.change('#beta-log-level', 'off'); await f.settle();
   assert.equal(backend.stored.betaSettings.logLevel, 'off');
-  f.change('#beta-calib-sim', '.75'); await f.settle();
-  assert.equal((await backend.send({ type: 'GET_CALIBRATION' })).calibration.wSim, .75);
+  f.change('#settings-ask-sources', '3'); await f.settle();
+  assert.equal(backend.stored.betaSettings.askMaxSources, 3);
+  assert.equal(f.q('#beta-calib-sim'), null);
+  assert.equal(f.requests.some(message => /CALIBRATION/.test(message.type)), false);
   assert.ok(!f.requests.some(message => message.type === 'ASK_QUESTION'));
 });
 

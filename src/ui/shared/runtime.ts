@@ -1,4 +1,6 @@
-export type RuntimeResponse<T> = T & { error?: string };
+import { AppleSafetyBlockError } from '../../shared/providerErrors';
+
+export type RuntimeResponse<T> = T & { error?: string; errorCode?: string };
 
 export function sendRuntimeMessage<T>(payload: Record<string, unknown>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -9,7 +11,7 @@ export function sendRuntimeMessage<T>(payload: Record<string, unknown>): Promise
         return;
       }
       if (response && response.error) {
-        reject(new Error(response.error));
+        reject(response.errorCode === 'apple_safety_block' ? new AppleSafetyBlockError() : new Error(response.error));
         return;
       }
       resolve((response || {}) as T);

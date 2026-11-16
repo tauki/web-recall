@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource, chromeFixture, plain } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, waitFor } from './helpers.mjs';
 
 const selected = { url: 'https://inside.test/a#saved', title: 'Selected', text: 'Selected evidence', timestamp: 1, chunks: [{ text: 'Selected evidence', embedding: [] }] };
 const other = { ...selected, url: 'https://outside.test/private', title: 'Unselected', text: 'OUTSIDE SECRET' };
@@ -9,7 +9,6 @@ function mocks(extra = {}) {
     '../storage/manager': { storageManager: { getPageRecord: async url => url === selected.url ? selected : url === other.url ? other : undefined, listAllPages: async () => [selected, other], listRecentPages: async () => [other] } },
     '../search/index': { searchStoredPages: async (_query, _limit, options) => [selected, other].filter(page => !options?.scopeUrls || options.scopeUrls.includes(page.url)).map(page => ({ ...page, snippet: page.text, score: 1 })) },
     '../settings/index': { getSettings: async () => ({ queryRewrite: false, askRerank: false, enableTools: false }) },
-    '../calibration/index': { getCalibrationSnapshot: () => ({ wLLM: 0 }) },
     '../providers/chat': { getChatConfig: async () => ({}), callChat: async () => ({}), callChatJson: async () => null, streamChat: async () => 'Selected fact [1]', normalizeToolArguments: value => value },
     ...extra
   };
@@ -52,6 +51,74 @@ test('scoped Ask retrieves later matching chunks with tools disabled and falls b
   assert.match(noSearch.sources[0].evidence, /Selected evidence/);
 });
 
+test('Apple Ask streams the native answer, retains tool-read evidence and returns only cited selected sources', async () => {
+  const later = 'The launch date is May 19.';
+  const page = { ...selected, chunks: [...selected.chunks, { text: later, embedding: [] }] };
+  const base = mocks();
+  const requests = [], updates = [];
+  const mod = await loadSource('src/background/ask/index.ts', '', mocks({
+    '../storage/manager': { storageManager: { ...base['../storage/manager'].storageManager, getPageRecord: async url => url === selected.url ? page : other } },
+    '../settings/index': { getSettings: async () => ({ enableTools: true, maxToolSteps: 3, queryRewrite: false, askRerank: false }) },
+    '../providers/chat': { ...base['../providers/chat'], getChatConfig: async () => ({ providerId: 'apple', model: 'on-device', contextTokens: 8192, appleCloudConsent: false }) },
+    '../providers/apple': { callApple: async (request, callbacks) => {
+      requests.push(plain(request));
+      callbacks.onChunk('The launch date is May');
+      const read = JSON.parse((await callbacks.onToolCall('fetch_more', { url: selected.url, chunkIndex: 1 }, 'native-read')).content);
+      assert.equal(read.data.text, later);
+      const outside = JSON.parse((await callbacks.onToolCall('fetch_more', { url: other.url, chunkIndex: 0 }, 'outside-read')).content);
+      assert.equal(outside.ok, false);
+      return 'The launch date is May 19 [1].';
+    } }
+  }), { chrome: { runtime: { sendMessage: message => updates.push(message) } } });
+  const result = await mod.handleAskQuestion('When is the launch?', { scopeUrls: [selected.url] });
+  assert.doesNotMatch(JSON.stringify(requests[0]), /The launch date is May 19|OUTSIDE SECRET/, 'Native requests carry previews, not whole page catalogs');
+  assert.equal(requests[0].mode, 'on-device');
+  assert.equal(requests[0].cloudConsent, false);
+  assert.equal(requests[0].toolLimit, 3);
+  assert.ok(updates.some(update => update.type === 'ASK_ANSWER_UPDATE' && update.chunk === 'The launch date is May'));
+  assert.equal(result.answer, 'The launch date is May 19 [1].');
+  assert.deepEqual(plain(result.sources).map(source => source.url), [selected.url]);
+  assert.ok(result.sources[0].excerpts.includes(later));
+  assert.doesNotMatch(JSON.stringify(result), /OUTSIDE SECRET|Invented evidence/);
+});
+
+test('Apple Ask keeps tools available with no user limit and disables them only when requested', async () => {
+  const base = mocks();
+  const settings = { enableTools: true, maxToolSteps: 0, queryRewrite: false, askRerank: false };
+  const requests = [];
+  const mod = await loadSource('src/background/ask/index.ts', '', mocks({
+    '../settings/index': { getSettings: async () => settings },
+    '../providers/chat': { ...base['../providers/chat'], getChatConfig: async () => ({ providerId: 'apple', model: 'on-device', contextTokens: 4096 }) },
+    '../providers/apple': { callApple: async request => { requests.push(plain(request)); return 'Selected fact [1]'; } }
+  }), { chrome: chromeFixture });
+  await mod.handleAskQuestion('Read this page', { scopeUrls: [selected.url] });
+  assert.ok(requests[0].toolLimit > 0, 'zero means no user limit, not disabled native tools');
+  settings.enableTools = false;
+  await mod.handleAskQuestion('Read this page', { scopeUrls: [selected.url] });
+  assert.equal(requests[1].toolLimit, 0, 'the tools toggle must still prevent native tool use');
+});
+
+test('Apple Ask cannot approve invented citations and Stop reaches the native generation signal', async () => {
+  const base = mocks();
+  let generation;
+  const mod = await loadSource('src/background/ask/index.ts', '', mocks({
+    '../providers/chat': { ...base['../providers/chat'], getChatConfig: async () => ({ providerId: 'apple', model: 'on-device', contextTokens: 4096 }) },
+    '../providers/apple': { callApple: async (_request, options) => {
+      if (!generation) return 'Unsupported claim [99]';
+      generation.signal = options.signal;
+      await new Promise((resolve, reject) => options.signal.addEventListener('abort', () => reject(Error('Native task stopped')), { once: true }));
+      return 'Must not be accepted [1]';
+    } }
+  }), { chrome: chromeFixture });
+  await assert.rejects(mod.handleAskQuestion('Question', { scopeUrls: [selected.url] }), /unverified/);
+  generation = {};
+  const pending = mod.handleAskQuestion('Question', { scopeUrls: [selected.url], requestId: 'native-stop' });
+  await waitFor(() => generation.signal, 'native generation to start');
+  assert.equal(mod.cancelAskQuestion('native-stop'), true);
+  await assert.rejects(pending, /stopped/);
+  assert.equal(generation.signal.aborted, true);
+});
+
 test('scoped tools reject outside reads and filter memory-search results before exposing them', async () => {
   const mod = await loadSource('src/background/ask/index.ts', 'createToolsRuntime', mocks(), { chrome: chromeFixture });
   const sources = [];
@@ -72,7 +139,6 @@ test('scoped text fallback searches the selection before applying the result lim
     '../settings/index': { getSettings: async () => ({ queryRewrite: false }) },
     '../providers/chat': mocks()['../providers/chat'],
     '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}) },
-    '../calibration/index': { getCalibrationSnapshot: () => ({ wSim: .6, wLLM: .4 }) }
   }, { chrome: chromeFixture });
   const results = await mod.searchStoredPages('evidence', 1, { scopeUrls: [selected.url] });
   assert.deepEqual(plain(results).map(hit => hit.url), [selected.url]);

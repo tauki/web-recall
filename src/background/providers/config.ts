@@ -108,6 +108,7 @@ async function saveProviderSettings(providerId: string, partial: Record<string, 
 }
 
 export async function getProviderBaseUrl(providerId: string): Promise<string> {
+  if (providerId === 'apple') return '';
   const settings = await getProviderSettings(providerId);
   return sanitizeBaseUrl(settings.baseUrl) || DEFAULT_EMBEDDING_CONFIG.baseUrl;
 }

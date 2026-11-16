@@ -6,16 +6,19 @@ import { mountHighlights } from '../highlights/index';
 import { mountLogs } from '../logs/index';
 import { startPolling } from '../shared/polling';
 import { sendRuntimeMessage } from '../shared/runtime';
-import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
+import { applyTheme, restoreCachedTheme, bindSystemThemeListener, type ThemeChoice } from '../shared/theme';
 import { DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
 import { getProviderOriginInfo } from '../../shared/providerOrigin';
+import type { ConversationState } from '../../shared/ask';
+import { AppleSafetyBlockError } from '../../shared/providerErrors';
+import { RECENTS_CACHE_KEY, readRecentPages, readRecentCursor, type RecentCursor, type RecentPageBatch } from '../../shared/recents';
 
 type SearchResult = { url: string; title: string; snippet: string; timestamp: number; score: number; hitsFromPage?: number; crossScore?: number; textMatch?: boolean };
-type SavedPage = { url: string; title: string; timestamp?: number; snippet?: string };
+type SavedPage = { url: string; title: string; timestamp?: number; snippet?: string; previewKind?: 'summary' | 'excerpt' };
 type AskSource = { index: number; title: string; url: string; snippet: string; domain: string; evidence?: string; excerpts?: string[] };
-type AskTurn = { question: string; answer: string; sources: AskSource[] };
-type AskSession = { draft: string; turns: AskTurn[]; activity: string[] };
-type AskController = { open: (target: HTMLElement, pages: SavedPage[] | null, title: string) => void; close: () => void; invalidate: () => void };
+type AskTurn = { question: string; answer: string; sources: AskSource[]; outcome?: 'answered' | 'insufficient_evidence' | 'failed' };
+type AskSession = { draft: string; turns: AskTurn[]; activity: string[]; conversation?: ConversationState };
+type AskController = { open: (target: HTMLElement, pages: SavedPage[] | null, title: string) => void; close: () => void; invalidate: () => void; dispose: () => void };
 
 function formatDate(timestamp: number): string {
   try {
@@ -50,7 +53,7 @@ async function initTheme(): Promise<void> {
     const theme = response.settings?.theme ?? 'light';
     applyTheme(theme);
   } catch {
-    applyTheme('light');
+    restoreCachedTheme();
   }
   bindSystemThemeListener();
 }
@@ -65,6 +68,11 @@ async function refreshRemoteProviderBanner(
       settingsOverride ||
       (await sendRuntimeMessage<{ settings?: BetaSettings }>({ type: 'GET_SETTINGS' })).settings ||
       DEFAULT_SETTINGS;
+    if (settings.activeProviderId === 'apple' && settings.applePrivateCloud) {
+      banner.hidden = false;
+      banner.textContent = 'Apple Private Cloud Compute is selected. Prompts and selected saved passages are sent to Apple servers.';
+      return;
+    }
     const { baseUrl = '' } = await sendRuntimeMessage<{ baseUrl?: string }>({ type: 'GET_PROVIDER_CONFIG', providerId: settings.activeProviderId });
     const info = getProviderOriginInfo(baseUrl);
     if (info.isValid && info.isRemote) {
@@ -86,7 +94,7 @@ function replaceWithMessage(container: HTMLElement, message: string, tagName = '
 }
 
 
-function createAskView(container: HTMLElement): AskController {
+function createAskView(container: HTMLElement, onState?: (state: string) => void): AskController {
   container.id = 'beta-ask-host'; container.hidden = true;
   container.innerHTML = `
     <div class="wr-ask-header"><span id="beta-ask-title">Ask your memory</span><button id="beta-ask-close" type="button" class="icon-button" aria-label="Back to preview">${iconMarkup('arrow-u-up-left')}</button></div>
@@ -114,51 +122,56 @@ function createAskView(container: HTMLElement): AskController {
   let activeRequestId: string | null = null, generation = 0, entries = 0, lastLog = '';
 
   function setRunning(running: boolean): void {
+    if (running) onState?.('Answering…');
     submit.disabled = running || !input.value.trim() || selected?.length === 0; stop.hidden = !running; input.readOnly = running;
     useSearch.disabled = Boolean(selected) || running; maxResults.disabled = running;
     form.setAttribute('aria-busy', String(running));
   }
-  function setStatus(text: string, error = false): void { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; status.dataset.state = text.startsWith('Answer ready') ? 'ready' : 'active'; }
+  function setStatus(text: string, error = false, state = error ? 'failed' : 'active'): void { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; status.dataset.state = state; if (state !== 'active') onState?.(state === 'ready' ? 'Answer ready' : state === 'insufficient_evidence' ? 'Not enough evidence' : state === 'cancelled' ? 'Stopped' : 'Ask failed'); }
   function resetOutput(clearActivity = true): void {
     if (clearActivity) session.activity = [];
     entries = 0; lastLog = ''; log.replaceChildren(); activity.hidden = true; activity.open = false;
     answerView.replaceChildren(); answerView.hidden = true; delete answerView.dataset.streaming;
     sourcesView.replaceChildren(); questionView.hidden = true;
   }
-  function appendLogRow(text: string): void {
-    if (!text || text === lastLog) return;
+  function appendLogRow(text: string, force = false): void {
+    if (!text || (!force && text === lastLog)) return;
     const row = document.createElement('div'); row.textContent = text; log.append(row); entries++; lastLog = text;
     q('#beta-ask-activity-count').textContent = `(${entries})`; activity.hidden = false;
   }
-  function appendLog(text: string): void {
-    if (!text || text === lastLog) return;
+  function appendLog(text: string, force = false): void {
+    if (!text || (!force && text === lastLog)) return;
     session.activity.push(text);
-    appendLogRow(text);
+    appendLogRow(text, force);
   }
-  function renderSources(sources: AskSource[], target = sourcesView, prefix = 'ask-source-'): void {
+  function renderSources(sources: AskSource[], target = sourcesView, prefix = 'ask-source-', retrievedOnly = false): void {
     target.replaceChildren(...sources.map(source => {
       const row = createPageEntry({ url: source.url, title: `[${source.index}] ${source.title}`, snippet: source.excerpts?.join('\n\n') || source.evidence || source.snippet });
-      row.article.classList.add('beta-result-card'); row.article.hidden = true; row.article.id = `${prefix}${source.index}`; row.article.tabIndex = -1;
+      row.article.classList.add('beta-result-card'); row.article.hidden = !retrievedOnly; row.article.id = `${prefix}${source.index}`; row.article.tabIndex = -1;
       const link = document.createElement('a'); link.href = source.url; link.target = '_blank'; link.rel = 'noreferrer'; link.className = 'original-link'; link.textContent = 'Open page'; row.body.append(link);
       return row.article;
     }));
+    if (retrievedOnly && sources.length) { const label = document.createElement('p'); label.className = 'wr-help'; label.textContent = 'Retrieved pages · not a verified answer'; target.prepend(label); }
+  }
+  function renderHistory(turns: AskTurn[]): void {
+    const history = q('#beta-ask-history'); history.replaceChildren();
+    for (const [index, turn] of turns.entries()) {
+      const details = document.createElement('details'); details.className = 'wr-ask-turn'; details.open = true;
+      const summary = document.createElement('summary'); summary.className = 'wr-ask-question'; summary.textContent = turn.question;
+      const answer = document.createElement('div'); answer.className = 'beta-ask-answer'; const prefix = `ask-history-${index}-source-`; renderAnswer(answer, turn.answer, turn.sources.map(source => source.index), prefix); const references = document.createElement('div'); references.className = 'beta-ask-sources'; renderSources(turn.sources, references, prefix, turn.outcome === 'failed'); details.append(summary, answer, references); history.append(details);
+    }
   }
   function showSession(): void {
-    resetOutput(false); session.activity.forEach(appendLogRow); setStatus(''); input.value = session.draft;
-    const history = q('#beta-ask-history'); history.replaceChildren();
-    for (const [index, turn] of session.turns.slice(0, -1).entries()) {
-      const details = document.createElement('details'); details.className = 'wr-ask-options';
-      const summary = document.createElement('summary'); summary.textContent = turn.question;
-      const answer = document.createElement('div'); answer.className = 'beta-ask-answer'; const prefix = `ask-history-${index}-source-`; renderAnswer(answer, turn.answer, turn.sources.map(source => source.index), prefix); const references = document.createElement('div'); references.className = 'beta-ask-sources'; renderSources(turn.sources, references, prefix); details.append(summary, answer, references); history.append(details);
-    }
+    resetOutput(false); session.activity.forEach(text => appendLogRow(text, true)); setStatus(''); input.value = session.draft;
+    renderHistory(session.turns.slice(0, -1));
     const latest = session.turns.at(-1);
-    if (latest) { questionView.textContent = latest.question; questionView.hidden = false; renderSources(latest.sources); renderAnswer(answerView, latest.answer, latest.sources.map(source => source.index)); answerView.hidden = false; }
+    if (latest) { questionView.textContent = latest.question; questionView.hidden = false; renderSources(latest.sources, sourcesView, 'ask-source-', latest.outcome === 'failed'); renderAnswer(answerView, latest.answer, latest.sources.map(source => source.index)); answerView.hidden = false; }
   }
   async function stopRequest(): Promise<void> {
     const requestId = activeRequestId;
     if (!requestId) return;
     const stoppedGeneration = generation; activeRequestId = null; setRunning(false); sourcesView.replaceChildren();
-    setStatus('Stopped. Any partial answer has not been verified.'); appendLog('Answer stopped');
+    setStatus('Stopped. Any partial answer has not been verified.', false, 'cancelled'); appendLog('Answer stopped');
     try { await sendRuntimeMessage({ type: 'CANCEL_ASK', requestId }); }
     catch { if (!activeRequestId && generation === stoppedGeneration) setStatus('Stopped showing updates. The background connection was lost; the request may still finish.', true); }
   }
@@ -172,10 +185,10 @@ function createAskView(container: HTMLElement): AskController {
     q('#beta-source-label').textContent = selected ? `Using ${selected.length} ${selected.length === 1 ? 'page' : 'pages'}` : 'All saved pages';
     submit.disabled = !input.value.trim() || selected?.length === 0;
   }
-  function close(): void { session.draft = input.value; void stopRequest(); container.hidden = true; window.dispatchEvent(new window.Event('wr-ask-closed')); }
+  function close(): void { session.draft = input.value; container.hidden = true; container.remove(); window.dispatchEvent(new window.Event('wr-ask-closed')); }
   q('#beta-ask-close').addEventListener('click', close);
   stop.addEventListener('click', () => { void stopRequest(); input.focus(); });
-  q('#beta-ask-clear').addEventListener('click', () => { void stopRequest(); generation++; session.turns = []; session.activity = []; session.draft = ''; input.value = ''; showSession(); setRunning(false); input.focus(); });
+  q('#beta-ask-clear').addEventListener('click', () => { void stopRequest(); generation++; session.turns = []; session.activity = []; session.draft = ''; session.conversation = undefined; input.value = ''; showSession(); setRunning(false); input.focus(); });
   input.addEventListener('input', () => { session.draft = input.value; if (!activeRequestId) submit.disabled = !input.value.trim() || selected?.length === 0; input.style.height = '28px'; input.style.height = `${Math.max(28, Math.min(160, input.scrollHeight))}px`; });
   input.addEventListener('keydown', event => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); form.requestSubmit(); } });
   form.addEventListener('submit', async event => {
@@ -183,18 +196,22 @@ function createAskView(container: HTMLElement): AskController {
     const question = input.value.trim();
     if (!question) { setStatus('Enter a question to begin.'); input.focus(); return; }
     if (selected?.length === 0) { setStatus('Choose at least one page.'); return; }
-    const requestId = `ask-${crypto.randomUUID()}`; generation++; activeRequestId = requestId; resetOutput(); setRunning(true); setStatus('Gathering sources…');
+    const requestId = `ask-${crypto.randomUUID()}`; generation++; activeRequestId = requestId;
+    renderHistory(session.turns); resetOutput(); input.value = ''; session.draft = ''; input.style.height = '28px';
+    setRunning(true); setStatus('Gathering sources…');
     questionView.textContent = question; questionView.hidden = false;
     try {
       const raw = maxResults.value.trim();
-      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[] }>({ type: 'ASK_QUESTION', question, options: { useSearch: useSearch.checked, maxResults: raw ? Number(raw) : undefined, requestId, scopeUrls: selected, history: session.turns.map(turn => ({ question: turn.question, answer: turn.answer })) } });
+      const response = await sendRuntimeMessage<{ answer: string; sources: AskSource[]; outcome?: AskTurn['outcome']; conversation?: ConversationState }>({ type: 'ASK_QUESTION', question, options: { useSearch: useSearch.checked, maxResults: raw ? Number(raw) : undefined, requestId, scopeUrls: selected, conversation: session.conversation, history: session.conversation ? undefined : session.turns.filter(turn => turn.outcome !== 'failed').map(turn => ({ question: turn.question, answer: turn.answer })) } });
       if (activeRequestId !== requestId) return;
-      const turn = { question, answer: response.answer || 'No answer returned.', sources: response.sources || [] };
-      session.turns.push(turn); session.draft = ''; showSession();
-      setStatus(turn.sources.length ? `Answer ready · ${turn.sources.length} source${turn.sources.length === 1 ? '' : 's'}` : 'Answer ready · No cited sources');
+      session.conversation = response.conversation;
+      const turn = { question, answer: response.answer || 'No answer returned.', sources: response.sources || [], outcome: response.outcome };
+      session.turns.push(turn); session.draft = turn.outcome === 'failed' ? question : ''; showSession();
+      setStatus(turn.outcome === 'failed' ? 'Answer could not be verified. Retrieved sources remain available.' : turn.outcome === 'insufficient_evidence' ? 'Not enough saved evidence.' : turn.sources.length ? `Answer ready · ${turn.sources.length} source${turn.sources.length === 1 ? '' : 's'}` : 'Answer ready · No cited sources', turn.outcome === 'failed', turn.outcome === 'failed' || turn.outcome === 'insufficient_evidence' ? turn.outcome : 'ready');
     } catch (error) {
       if (activeRequestId !== requestId) return;
-      const message = `Ask failed: ${error instanceof Error ? error.message : String(error)}. Try again or check Settings.`;
+      const message = error instanceof AppleSafetyBlockError ? error.message : `Ask failed: ${error instanceof Error ? error.message : String(error)}. Try again or check Settings.`;
+      session.draft = question; input.value = question;
       setStatus(message, true); appendLog(message); if (!answerView.hidden) appendLog('The partial answer has not been verified.');
     } finally { if (activeRequestId === requestId) { activeRequestId = null; setRunning(false); } }
   });
@@ -203,11 +220,24 @@ function createAskView(container: HTMLElement): AskController {
     const source = container.querySelector<HTMLElement>(link.getAttribute('href')!);
     if (source) { event.preventDefault(); const reveal = source.hidden; source.parentElement!.querySelectorAll<HTMLElement>(':scope > article').forEach(item => { item.hidden = true; }); source.hidden = !reveal; if (reveal) { source.querySelector<HTMLDetailsElement>('details')!.open = true; source.focus(); source.scrollIntoView({ block: 'nearest' }); } }
   });
-  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+  const receive = (message: Record<string, unknown>): void => {
     if (!activeRequestId || message.requestId !== activeRequestId) return;
     if (message.type === 'ASK_PROGRESS') { appendLog(String(message.message || '')); setStatus(String(message.message || 'Working…')); }
     if (message.type === 'ASK_ANSWER_UPDATE') { answerView.hidden = false; answerView.dataset.streaming = 'true'; answerView.textContent = String(message.chunk || ''); }
-  });
+    if (message.type === 'ASK_TOOL_ACTIVITY') {
+      const event = message.event as { callId: string; tool: string; status: string; ms?: number; error?: string };
+      if (!event?.callId) return;
+      const existing = [...log.children].find(row => (row as HTMLElement).dataset.callId === event.callId) as HTMLElement | undefined;
+      const text = `${event.tool.replaceAll('_', ' ')} · ${event.status}${event.ms !== undefined ? ` · ${event.ms}ms` : ''}${event.error ? ` · ${event.error}` : ''}`;
+      if (existing) { existing.textContent = text; session.activity[Number(existing.dataset.activityIndex)] = text; }
+      else { appendLog(text, true); const row = log.lastElementChild as HTMLElement; row.dataset.callId = event.callId; row.dataset.activityIndex = String(session.activity.length - 1); }
+    }
+    if (message.type === 'ASK_RUN_STATE') {
+      const event = message.event as { phase?: string };
+      if (event?.phase) container.dataset.phase = event.phase;
+    }
+  };
+  chrome.runtime.onMessage.addListener(receive);
   return {
     open(target, candidates, title) {
       const next = candidates?.map(page => page.url);
@@ -225,12 +255,15 @@ function createAskView(container: HTMLElement): AskController {
       selectSession(); target.append(container); container.hidden = false; input.focus({ preventScroll: true }); container.scrollIntoView({ block: 'nearest' });
     },
     close,
-    invalidate() { close(); sessions.clear(); session = { draft: '', turns: [], activity: [] }; resetOutput(); }
+    invalidate() { void stopRequest(); generation++; close(); sessions.clear(); pages = null; selected = undefined; key = 'memory'; session = { draft: '', turns: [], activity: [] }; resetOutput(); onState?.(''); },
+    dispose() { this.invalidate(); chrome.runtime.onMessage.removeListener(receive); }
   };
 }
 
 type SearchController = { askMemory: () => void; openPage: (url: string) => Promise<void>; refresh: () => void; openQueue: () => void };
 function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: AskController): SearchController {
+  const itemChats = new Map<string, { host: HTMLElement; controller: AskController; badge: HTMLElement; state: string }>();
+  let activeChat = ask, activeHost = askHost;
   container.innerHTML = `
     <div class="search-header">
       <div class="search-row"><form id="beta-search-form" class="search-form beta-search-form" role="search"><button type="submit" class="icon-button" aria-label="Search saved pages">${iconMarkup('magnifying-glass')}</button><input id="beta-search-input" type="search" placeholder="Search your saved pages" aria-label="Search query" autocomplete="off" /><button type="button" id="beta-search-stop" class="text-button" hidden>Stop</button><button type="button" id="beta-search-clear" class="icon-button" aria-label="Clear search" hidden>${iconMarkup('x')}</button></form></div>
@@ -239,7 +272,7 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
     <div class="results-list">
       <div id="beta-results-conversation"></div>
       <div id="beta-search-results" class="beta-search-results"></div>
-      <section id="beta-recents-section"><div id="beta-recents-list" class="beta-search-results"></div><button id="beta-refresh-recents" class="text-button wr-refresh-recents" hidden>Refresh</button></section>
+      <section id="beta-recents-section"><div id="beta-recents-list" class="beta-search-results"></div><button id="beta-load-more-recents" class="text-button" hidden>Load more</button><button id="beta-refresh-recents" class="text-button wr-refresh-recents" hidden>Refresh</button></section>
       <button id="beta-capture-now" hidden>Capture current tab</button>
       <section id="beta-capture-setup" hidden><h2>Choose your capture policy</h2><p class="wr-help">Capture starts paused. Choose broad capture or allow approved domains first.</p><div class="button-row"><button id="beta-enable-broad-capture" class="secondary-button">Enable broad capture</button><button id="beta-open-capture-settings" class="text-button">Set allowlist first</button></div></section>
       <details id="beta-queue-section" hidden><summary><span id="beta-queue-label">Capture queue</span>${iconMarkup('caret-down')}</summary>
@@ -255,10 +288,13 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
   const captureQueue = q<HTMLDetailsElement>('#beta-queue-section');
   let searchRequestId: string | null = null, generation = 0, debounce: ReturnType<typeof setTimeout> | undefined;
   let searching = false, resultPages: SearchResult[] = [], recentPages: SavedPage[] = [], currentSettings = { ...DEFAULT_SETTINGS };
+  const loadMore = q<HTMLButtonElement>('#beta-load-more-recents');
+  let recentRevision = 0, allowCachedRecents = true, recentError = '';
+  let nextRecentCursor: RecentCursor | null = null, loadingMore = false, loadedMore = false;
   let queue: Array<{ url: string; title: string; status: string; attempts: number }> = [];
   let activeAskButton: HTMLButtonElement | null = null, multiAsk = false;
   function setStatus(text: string, error = false): void { status.textContent = text; status.dataset.variant = error ? 'error' : 'info'; status.dataset.state = text.startsWith('Answer ready') ? 'ready' : 'active'; }
-  function candidates(): SavedPage[] { return searching ? resultPages : recentPages.slice(0, 20); }
+  function candidates(): SavedPage[] { return searching ? resultPages : recentPages; }
   function sync(): void { recentSection.hidden = searching; clear.hidden = !input.value; askResults.hidden = !candidates().length || multiAsk; askResults.disabled = Boolean(searchRequestId); q('.results-toolbar').hidden = !status.textContent && askResults.hidden; }
   function syncQueue(): void {
     captureQueue.hidden = queue.length === 0 && !captureQueue.open;
@@ -268,17 +304,43 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
   }
   captureQueue.addEventListener('toggle', syncQueue);
   function cancelSearch(): void { const id = searchRequestId; searchRequestId = null; stop.hidden = true; if (id) void sendRuntimeMessage({ type: 'CANCEL_SEARCH', requestId: id }).catch(error => console.warn('Unable to cancel search', error)); }
-  function closeAsk(): void { ask.close(); multiAsk = false; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; sync(); }
+  function closeAsk(): void { activeChat.close(); multiAsk = false; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; sync(); }
   window.addEventListener('wr-ask-closed', () => { multiAsk = false; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; sync(); });
   function row(page: SavedPage, result?: SearchResult): HTMLElement {
     const entry = createPageEntry(page); entry.article.classList.add('beta-result-card'); entry.details.name = 'search-preview';
     if (page.snippet) { const snippet = document.createElement('span'); snippet.className = 'result-snippet'; snippet.textContent = page.snippet.replace(/\s+/g, ' ').trim(); entry.summary.append(snippet); }
     const passage = page.snippet ? entry.body.querySelector('p')! : document.createElement('p');
     if (!page.snippet) entry.body.append(passage);
+    const previewLabel = document.createElement('span'); previewLabel.className = 'wr-help'; previewLabel.textContent = 'Summary'; previewLabel.hidden = true; passage.before(previewLabel);
+    const more = document.createElement('button'); more.className = 'text-button preview-toggle'; more.type = 'button'; more.hidden = true;
+    let preview = '', expanded = false;
+    function renderPreview(text: string): void {
+      preview = text.replace(/\s+/g, ' ').trim();
+      const short = preview.length > 260;
+      const prefix = preview.slice(0, 260), boundary = prefix.lastIndexOf(' ');
+      const sentence = [...prefix.matchAll(/[.!?](?=\s|$)/g)].at(-1)?.index;
+      const compact = sentence !== undefined && sentence >= 80 ? prefix.slice(0, sentence + 1) : `${prefix.slice(0, boundary > 0 ? boundary : prefix.length)}…`;
+      passage.textContent = short && !expanded ? compact : preview;
+      more.hidden = !short; more.textContent = expanded ? 'Show less' : 'Show more'; more.setAttribute('aria-expanded', String(expanded));
+    }
+    more.addEventListener('click', () => { expanded = !expanded; renderPreview(preview); });
+    passage.after(more); if (page.snippet) renderPreview(page.snippet);
+    const badge = document.createElement('span'); badge.className = 'wr-item-ask-state wr-help'; badge.setAttribute('role', 'status'); entry.summary.append(badge);
+    const existing = itemChats.get(page.url); if (existing) { existing.badge = badge; badge.textContent = existing.state; }
     const actions = document.createElement('div'); actions.className = 'preview-actions';
     const original = document.createElement('a'); original.href = page.url; original.target = '_blank'; original.rel = 'noreferrer'; original.className = 'open-page-button'; original.append(icon('arrow-up-right'), document.createTextNode('Open page'));
     const button = document.createElement('button'); button.className = 'ask-this-page'; button.append(icon('chat-circle'), document.createTextNode('Ask about this'));
-    button.addEventListener('click', () => { if (activeAskButton) activeAskButton.hidden = false; activeAskButton = button; button.hidden = true; multiAsk = false; ask.open(entry.body, [page], 'Ask about this page'); sync(); });
+    button.addEventListener('click', () => {
+      closeAsk();
+      let chat = itemChats.get(page.url);
+      if (!chat) {
+        const host = document.createElement('section');
+        const controller = createAskView(host, state => { const current = itemChats.get(page.url); if (current) { current.state = state; current.badge.textContent = state; } });
+        chat = { host, controller, badge, state: '' }; itemChats.set(page.url, chat);
+      }
+      activeChat = chat.controller; activeHost = chat.host;
+      activeAskButton = button; button.hidden = true; multiAsk = false; activeChat.open(entry.body, [page], 'Ask about this page'); sync();
+    });
     actions.append(original, button); entry.body.append(actions);
     if (result) { const details = document.createElement('details'); details.className = 'wr-match-details'; const summary = document.createElement('summary'); summary.append(document.createTextNode('Match details'), icon('caret-down')); const copy = document.createElement('p'); copy.textContent = [formatScoreLabel(result), result.hitsFromPage ? `${result.hitsFromPage} matches` : '', formatDate(result.timestamp)].filter(Boolean).join(' · '); details.append(summary, copy); entry.body.append(details); }
     entry.summary.addEventListener('keydown', event => {
@@ -287,12 +349,17 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
       const index = summaries.indexOf(entry.summary); event.preventDefault();
       if (event.key === 'ArrowUp' && index === 0) input.focus(); else summaries[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
     });
-    let loaded = Boolean(page.snippet);
-    entry.details.addEventListener('toggle', () => {
-      if (!entry.details.open) { if (entry.body.contains(askHost)) closeAsk(); return; }
+    let loaded = false;
+    function loadPreview(): void {
       if (loaded) return;
-      loaded = true; passage.textContent = 'Loading saved passage…';
-      void sendRuntimeMessage<{ page: SavedPage | null }>({ type: 'GET_PAGE_PREVIEW', url: page.url }).then(response => { passage.textContent = response.page?.snippet || 'No captured text is available for this page.'; }).catch(error => { loaded = false; passage.textContent = `Preview unavailable: ${(error instanceof Error ? error.message : String(error))}`; });
+      loaded = true;
+      if (!page.snippet) passage.textContent = 'Loading saved passage…';
+      void sendRuntimeMessage<{ page: SavedPage | null }>({ type: 'GET_PAGE_PREVIEW', url: page.url }).then(response => { previewLabel.hidden = response.page?.previewKind !== 'summary'; renderPreview(response.page?.snippet || page.snippet || 'No captured text is available for this page.'); }).catch(error => { loaded = false; if (!page.snippet) passage.textContent = `Preview unavailable: ${(error instanceof Error ? error.message : String(error))}`; });
+    }
+    entry.details.addEventListener('wr-summary-updated', () => { loaded = false; if (entry.details.open) loadPreview(); });
+    entry.details.addEventListener('toggle', () => {
+      if (!entry.details.open) { if (entry.body.contains(activeHost)) closeAsk(); return; }
+      loadPreview();
     });
     return entry.article;
   }
@@ -302,11 +369,8 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
     if (!results.length) replaceWithMessage(resultsWrap, 'No matching pages. Try another search or capture a page.');
     sync();
   }
-  async function refreshRecents(force = false): Promise<void> {
-    try {
-      const response = await sendRuntimeMessage<{ pages: SavedPage[] }>({ type: 'GET_PAGE_LIST' });
-      const incoming = (response.pages || []).slice(0, 20);
-      if (recents.querySelector('details[open]') && recents.children.length) { if (!force) return; closeAsk(); }
+  function showRecents(incoming: SavedPage[], force = false): boolean {
+      if (recents.querySelector('details[open]') && recents.children.length) { if (!force) return false; closeAsk(); }
       if (JSON.stringify(incoming) !== JSON.stringify(recentPages) || !recents.children.length) {
         recentPages = incoming; recents.replaceChildren(...recentPages.map(page => row(page)));
         if (!recentPages.length) {
@@ -318,9 +382,48 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
           const actions = document.createElement('div'); actions.className = 'button-row'; actions.append(capture, settings); empty.append(title, note, actions); recents.append(empty);
         }
       }
-      if (!searching && !searchRequestId) setStatus(recentPages.length ? `${recentPages.length} ${recentPages.length === 1 ? 'page' : 'pages'}` : '');
+      if (!searching && !searchRequestId) setStatus(recentError || (recentPages.length ? `${recentPages.length} ${recentPages.length === 1 ? 'page' : 'pages'}` : ''), Boolean(recentError));
       sync();
-    } catch (error) { if (!searching) setStatus(`Unable to load pages: ${error instanceof Error ? error.message : String(error)}`, true); }
+      return true;
+  }
+  async function refreshRecents(force = false): Promise<void> {
+    if (loadingMore && !force) return;
+    if (force) { loadingMore = false; loadMore.disabled = false; }
+    const revision = ++recentRevision;
+    try {
+      const response = await sendRuntimeMessage<RecentPageBatch>({ type: 'GET_RECENT_PAGES' });
+      if (revision !== recentRevision) return;
+      const incoming = readRecentPages(response.pages);
+      if (!incoming) throw new Error('Invalid recent-pages response');
+      allowCachedRecents = false; recentError = '';
+      const merged = loadedMore && !force ? [...incoming, ...recentPages.filter(page => !incoming.some(latest => latest.url === page.url))] : incoming;
+      if (showRecents(merged, force)) {
+        if (!loadedMore || force) { nextRecentCursor = readRecentCursor(response.nextCursor) || null; loadedMore = false; }
+        loadMore.hidden = !nextRecentCursor;
+      }
+    } catch (error) {
+      if (revision !== recentRevision) return;
+      recentError = `Unable to refresh pages: ${error instanceof Error ? error.message : String(error)}`;
+      if (!searching) setStatus(recentError, true);
+    }
+  }
+  async function loadMoreRecents(): Promise<void> {
+    if (!nextRecentCursor || loadingMore || searching) return;
+    const cursor = nextRecentCursor, revision = recentRevision;
+    loadingMore = true; loadMore.disabled = true;
+    try {
+      const response = await sendRuntimeMessage<RecentPageBatch>({ type: 'GET_RECENT_PAGES', after: cursor });
+      if (revision !== recentRevision) return;
+      const incoming = readRecentPages(response.pages);
+      if (!incoming) throw new Error('Invalid recent-pages response');
+      const additions = incoming.filter(page => !recentPages.some(existing => existing.url === page.url));
+      const appended = additions.map(page => row(page)), focused = document.activeElement === loadMore;
+      recentPages.push(...additions); recents.append(...appended);
+      nextRecentCursor = readRecentCursor(response.nextCursor) || null; loadedMore = true; loadMore.hidden = !nextRecentCursor;
+      if (focused && loadMore.hidden) appended[0]?.querySelector<HTMLElement>('summary')?.focus({ preventScroll: true });
+      if (!searching) setStatus(`${recentPages.length} pages`);
+    } catch (error) { if (revision === recentRevision) setStatus(`Unable to load more pages: ${error instanceof Error ? error.message : String(error)}`, true); }
+    finally { if (revision === recentRevision) { loadingMore = false; loadMore.disabled = false; } }
   }
   async function refreshQueue(): Promise<void> {
     try {
@@ -359,7 +462,7 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
   input.addEventListener('keydown', event => { if (event.key === 'ArrowDown') { event.preventDefault(); container.querySelector<HTMLElement>(searching ? '#beta-search-results > article > details > summary' : '#beta-recents-list > article > details > summary')?.focus(); } });
   clear.addEventListener('click', () => { resetSearch(); input.focus(); });
   stop.addEventListener('click', () => { generation++; cancelSearch(); setStatus('Stopped.'); sync(); });
-  askResults.addEventListener('click', () => { multiAsk = true; if (activeAskButton) activeAskButton.hidden = false; activeAskButton = null; ask.open(multi, candidates(), 'Ask your results'); sync(); });
+  askResults.addEventListener('click', () => { closeAsk(); activeChat = ask; activeHost = askHost; multiAsk = true; ask.open(multi, candidates(), 'Ask your results'); sync(); });
   q('#beta-capture-now').addEventListener('click', () => { void action({ type: 'CAPTURE_ACTIVE_TAB' }, 'Capture requested'); });
   q('#beta-retry-failed').addEventListener('click', () => { void action({ type: 'RETRY_FAILED_CAPTURES' }, 'Retry requested'); });
   q('#beta-refresh-recents').addEventListener('click', () => { if (input.value.trim()) form.requestSubmit(); else void refreshRecents(true); });
@@ -371,11 +474,40 @@ function createSearchView(container: HTMLElement, askHost: HTMLElement, ask: Ask
     if (message.type === 'CAPTURE_QUEUE_UPDATED') void refreshQueue();
     if (message.type === 'BETA_SETTINGS_UPDATED' && message.settings) applySettings(message.settings as BetaSettings);
   });
-  window.addEventListener('wr-memory-changed', () => { ask.invalidate(); generation++; cancelSearch(); if (searching) form.requestSubmit(); else { recents.replaceChildren(); void refreshRecents(); } });
-  startPolling(() => { if (container.hidden) return; void refreshQueue(); void refreshRecents(); void refreshRemoteProviderBanner(document.querySelector('#beta-remote-provider-banner')); }, 5000);
+  window.addEventListener('wr-memory-changed', () => {
+    ask.invalidate(); itemChats.forEach(chat => chat.controller.dispose()); itemChats.clear(); generation++; cancelSearch();
+    allowCachedRecents = false; recentRevision++; recentPages = []; recents.replaceChildren();
+    nextRecentCursor = null; loadedMore = false; loadMore.hidden = true;
+    if (searching) form.requestSubmit();
+    void refreshRecents(true);
+  });
+  chrome.runtime.onMessage.addListener((message: Record<string, unknown>) => {
+    if (message.type === 'SUMMARY_UPDATED') container.querySelectorAll<HTMLDetailsElement>('details[data-url]').forEach(details => {
+      if (details.dataset.url === message.url) details.dispatchEvent(new window.Event('wr-summary-updated'));
+    });
+  });
+  setStatus('Loading saved pages…');
+  void (async () => {
+    try {
+      const stored = await chrome.storage?.session?.get(RECENTS_CACHE_KEY);
+      const cached = readRecentPages(stored?.[RECENTS_CACHE_KEY]);
+      if (allowCachedRecents && cached) showRecents(cached);
+    } catch (error) { console.debug('[beta-ui:sidepanel] recents cache unavailable', error); }
+  })();
+  loadMore.addEventListener('click', () => { void loadMoreRecents(); });
+  chrome.storage?.onChanged?.addListener((changes: Record<string, { oldValue?: unknown; newValue?: unknown }>, area: string) => {
+    if (area === 'session' && changes[RECENTS_CACHE_KEY]?.oldValue && changes[RECENTS_CACHE_KEY].newValue === undefined) window.dispatchEvent(new window.Event('wr-memory-changed'));
+  });
+  if (typeof IntersectionObserver !== 'undefined') {
+    const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) void loadMoreRecents(); }, { rootMargin: '200px' });
+    observer.observe(loadMore);
+    window.addEventListener('pagehide', () => observer.disconnect(), { once: true });
+  }
+  const stopPolling = startPolling(() => { if (container.hidden) return; void refreshQueue(); void refreshRecents(); void refreshRemoteProviderBanner(document.querySelector('#beta-remote-provider-banner')); }, 5000);
+  window.addEventListener('pagehide', stopPolling, { once: true });
   return {
     openQueue() { captureQueue.hidden = false; captureQueue.open = true; void refreshQueue(); captureQueue.querySelector<HTMLElement>('summary')!.focus(); captureQueue.scrollIntoView({ block: 'nearest' }); },
-    askMemory() { multiAsk = true; ask.open(multi, null, 'Ask your memory'); sync(); },
+    askMemory() { closeAsk(); activeChat = ask; activeHost = askHost; multiAsk = true; ask.open(multi, null, 'Ask your memory'); sync(); },
     async openPage(url) {
       closeAsk(); const current = ++generation; cancelSearch();
       try {
@@ -438,9 +570,9 @@ function renderApp(root: HTMLElement): void {
     if (event.key === 'Escape') {
       if (active !== 'sidepanel') show('sidepanel');
       else {
-        const picker = askHost.querySelector<HTMLDetailsElement>('#beta-source-picker');
+        const picker = root.querySelector<HTMLDetailsElement>('#beta-source-picker');
         if (picker?.open) { picker.open = false; picker.querySelector<HTMLElement>('summary')!.focus(); }
-        else if (!askHost.hidden) ask.close();
+        else if (root.querySelector('#beta-ask-host:not([hidden])')) root.querySelector<HTMLButtonElement>('#beta-ask-close')!.click();
         else { const preview = root.querySelector<HTMLDetailsElement>('details[name=search-preview][open]'); if (preview) { preview.open = false; preview.querySelector<HTMLElement>('summary')!.focus(); } else root.querySelector<HTMLInputElement>('#beta-search-input')!.focus(); }
       }
     }
@@ -452,4 +584,8 @@ function renderApp(root: HTMLElement): void {
 }
 
 const root = document.querySelector<HTMLElement>('#app-root');
-if (root) void initTheme().then(() => renderApp(root));
+if (root) {
+  restoreCachedTheme();
+  renderApp(root);
+  void initTheme();
+}

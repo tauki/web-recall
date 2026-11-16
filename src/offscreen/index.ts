@@ -271,14 +271,18 @@ async function topPagesByCentroid(variationEmbeddings: number[][], topN: number,
 
 async function scoreChunksInPages(pageUrls: string[], variationEmbeddings: number[][], originalQuery: string, embeddingKey: string): Promise<ScoreCandidate[]> {
   if (!variationEmbeddings.length) return [];
-  const pages = await readAllPages();
-  const urlSet = new Set(pageUrls);
+  const db = await openDatabase();
+  const pages = await Promise.all([...new Set(pageUrls)].map(url => new Promise<PageRecord | undefined>((resolve, reject) => {
+    const request = db.transaction(PAGES_STORE, 'readonly').objectStore(PAGES_STORE).get(url);
+    request.onsuccess = () => resolve(request.result as PageRecord | undefined);
+    request.onerror = () => reject(request.error);
+  })));
   const candidates: ScoreCandidate[] = [];
   const normalizedQuery = (originalQuery || '').toLowerCase().trim();
   const tokens = normalizedQuery.split(/\W+/).filter((t) => t.length >= 3);
 
   for (const page of pages) {
-    if (!urlSet.has(page.url)) continue;
+    if (!page) continue;
     const titleLower = (page.title || '').toLowerCase();
     page.chunks.forEach((chunk, idx) => {
       if (chunk.embeddingKey !== embeddingKey) return;

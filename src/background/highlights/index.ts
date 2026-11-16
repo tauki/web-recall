@@ -1,4 +1,4 @@
-import { storageManager, type PageRecord, type HighlightRecord } from '../storage/manager';
+import { storageManager, type PageRecord } from '../storage/manager';
 
 type ListDatesParams = {
   from?: string | null;
@@ -60,12 +60,5 @@ export async function getHighlightForDate(date: string): Promise<HighlightSummar
   const formatted = formatLocalYMD(date);
   const pages = await storageManager.listAllPages();
   const todaysPages = pages.filter((page) => formatLocalYMD(page.timestamp) === formatted);
-  const summary = buildSummary(todaysPages);
-  const record: HighlightRecord = {
-    date: formatted,
-    payload: summary,
-    updatedAt: Date.now()
-  };
-  await storageManager.upsertHighlight(record);
-  return summary;
+  return buildSummary(todaysPages);
 }
