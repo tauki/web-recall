@@ -348,9 +348,10 @@ Setup
    only `native/apple/update-public-key.txt` belongs in Git. Do not regenerate
    or replace that public key for an ordinary release. After building,
    `pnpm apple:package` produces the companion ZIP and signed update metadata
-   in `dist/apple-release/`. Tag builds use the matching
-   `APPLE_UPDATE_SIGNING_KEY` Actions secret and attach both assets to the
-   GitHub release. This key is separate from the Chrome extension key and
+   in `dist/apple-release/`. Pull requests run native regression tests; companion
+   app assembly, signing and packaging run only for release tags. Tag builds use
+   the matching `APPLE_UPDATE_SIGNING_KEY` Actions secret and attach both assets
+   to the GitHub release. This key is separate from the Chrome extension key and
    from Apple's Developer ID signing identity.
 
    Ask streams answers with saved-source citations and supports **Stop**.
