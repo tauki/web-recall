@@ -8,7 +8,8 @@ text of pages you visit, generates semantic embeddings locally via either
 Ollama or the optional in-browser runtime, stores the results in your browser,
 and provides a side-panel UI for semantic search. You can also ask questions
 about what you've read using retrieval-augmented generation (RAG) powered by
-locally running models.
+locally running models, including Apple's on-device Foundation Models through
+the optional [Mac companion](#mac-companion).
 
 Screenshots
 -----------
@@ -45,6 +46,64 @@ Shown with sample pages.
 ![Structured Logs with filtering controls and expanded entry metadata](.github/assets/screenshots/readme-logs-0.2.3.png)
 
 </details>
+
+Mac companion
+-------------
+
+The optional **Web Recall Mac companion** runs Ask and background page summaries
+with Apple Foundation Models instead of an Ollama chat model. Your saved pages
+and embeddings stay in Chrome; the companion does not store a second library.
+Keep the app running while using the Apple provider.
+
+### Requirements
+
+- An Apple Silicon Mac running macOS 26.4 or newer, with Apple Intelligence
+  enabled and its on-device model available.
+- Google Chrome 142 or newer with Web Recall installed.
+- To build from source: Xcode 27 with its Swift toolchain selected, Node.js 24
+  or newer, and pnpm. See [Setup](#setup) for the Node.js and pnpm commands.
+
+### Installation
+
+1. From this repository's root, install dependencies and build the app:
+
+   ```sh
+   pnpm install
+   pnpm apple:build
+   ```
+
+2. Open `chrome://extensions` and copy Web Recall's extension ID. Register that
+   exact ID, replacing `YOUR_EXTENSION_ID` below:
+
+   ```sh
+   node scripts/install-apple-host.mjs --extension-id YOUR_EXTENSION_ID
+   ```
+
+   The installer copies the app to `~/Applications/Web Recall.app` and registers
+   its native messaging bridge in Google Chrome's default user-data directory.
+   Add `--dry-run` to inspect the installation paths and registration without
+   changing anything. Opening the app alone does not register it with Chrome.
+
+3. Open `~/Applications/Web Recall.app`. Its menu-bar icon provides **Open
+   dashboard**, **Pause / Resume native inference**, **Stop active work** and
+   **Quit**. Closing the dashboard leaves the app running; **Launch at login**
+   is optional.
+
+### Connect to Chrome
+
+1. Open Web Recall's sidepanel, then **Menu → Settings → Models → Chat provider**.
+2. Select **Apple Foundation Models** and grant Chrome's optional native-app
+   permission when prompted.
+3. Use **Test connection** to check model availability and the detected context
+   size. If Chrome cannot find the bridge, rerun the registration command with
+   the ID of the extension you are currently using.
+4. Keep your current embedding provider, or select **In-browser EmbeddingGemma**
+   for browser-local embeddings. Changing the chat provider does not regenerate
+   existing vectors. Open a saved page and ask a question to try Apple inference.
+
+**Pause** and **Stop** affect native inference, not browser capture. **Quit**
+disconnects Chrome; reopen the app to reconnect. Private Cloud Compute is off by
+default and is not required for on-device use.
 
 Protecting your library
 -----------------------
@@ -266,29 +325,10 @@ Setup
    model. The connection test probes the actual chat endpoint, which helps
    surface `OLLAMA_ORIGINS` misconfiguration.
 
-   **Apple Foundation Models (Mac):** You can use Apple's
-   on-device model for Ask instead of Ollama. This requires macOS 26.4 or newer,
-   an available Apple Intelligence model, and the optional **Web Recall Mac
-   companion**. Building the app requires Xcode 27 with its Swift toolchain:
-
-   ```sh
-   pnpm apple:build
-   node scripts/install-apple-host.mjs --extension-id YOUR_EXTENSION_ID
-   ```
-
-   Copy the ID from `chrome://extensions`. The installer copies the app to
-   `~/Applications/Web Recall.app` and registers its bundled bridge for that
-   extension in Google Chrome's default user-data directory. Use
-   `--dry-run` to inspect the registration without installing anything.
-   Opening the app alone does not register it with Chrome; run the installer
-   for the exact ID of your loaded extension.
-   Open **Web Recall** from Applications. Its menu-bar icon shows live status;
-   hover for a short status message, or click for **Open dashboard**, **Pause /
-   Resume native inference**, **Stop active work**, and **Quit**. The dashboard
-   shows model availability, detected context, live connections and recent
-   operation outcomes—not prompts or page contents. **Launch at login** is
-   optional and requires the normal macOS approval; it is not enabled during
-   installation. Closing the dashboard leaves the menu-bar app running.
+   **Apple Foundation Models:** Follow [Mac companion](#mac-companion) for
+   requirements, installation and connecting Chrome. Its dashboard shows model
+   availability, context size, connections and operation outcomes—not prompts
+   or page contents.
 
    **Companion updates:** The dashboard offers **Check for updates**
    and **Install & restart**. **Automatic updates** is off by default. When
@@ -312,12 +352,6 @@ Setup
    `APPLE_UPDATE_SIGNING_KEY` Actions secret and attach both assets to the
    GitHub release. This key is separate from the Chrome extension key and
    from Apple's Developer ID signing identity.
-
-   In Chrome's **Settings → Models → Chat provider**, select **Apple Foundation Models**,
-   grant the optional native-app permission, and use **Test connection** to
-   see availability and the detected model context size.
-   Continue using **In-browser EmbeddingGemma** for embeddings; changing the
-   chat provider never changes or regenerates existing vectors.
 
    Ask streams answers with saved-source citations and supports **Stop**.
    The menu bar uses the extension mark and shows operational status; the
