@@ -62,7 +62,7 @@ async function backfillFixture(vectors) {
   const mod = await loadSource('src/background/embeddings/backfill.ts', '', {
     '../summaries/index': { queuePageSummary: async () => false },
     './index': { getEmbeddingConfig: () => ({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'test' }), computeEmbeddingsForChunks: async texts => { requests.push(plain(texts)); return vectors; } },
-    '../storage/manager': { storageManager: { listAllPages: async () => [current], getPageRecord: async () => current, savePageRecord: async value => { current = value; } } },
+    '../storage/manager': { storageManager: { listAllPages: async () => [current], getPageRecord: async () => current, getProcessingEntry: async () => undefined, savePageRecord: async value => { current = value; } } },
     '../offscreen/index': { invalidateOffscreenIndex: async () => { invalidations++; } },
     '../../shared/logger/index': { log: async () => {} }
   });
@@ -93,7 +93,7 @@ test('single-page backfill reads only its selected record and never enumerates u
   const selected = { ...page(), updatedAt: 1, chunks: [{ text: 'Selected text', embedding: [] }] };
   const reads = [], requests = [];
   const mod = await loadSource('src/background/embeddings/backfill.ts', '', {
-    '../storage/manager': { storageManager: { listAllPages: () => assert.fail('A selected-page operation must not enumerate the library'), getPageRecord: async url => { reads.push(url); return url === selected.url ? selected : undefined; }, savePageRecord: async () => {} } },
+    '../storage/manager': { storageManager: { listAllPages: () => assert.fail('A selected-page operation must not enumerate the library'), getPageRecord: async url => { reads.push(url); return url === selected.url ? selected : undefined; }, getProcessingEntry: async () => undefined, savePageRecord: async () => {} } },
     './index': { getEmbeddingConfig: () => ({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'test' }), computeEmbeddingsForChunks: async texts => { requests.push(plain(texts)); return [[1, 0]]; } },
     '../offscreen/index': { invalidateOffscreenIndex: async () => {} },
     '../../shared/logger/index': { log: async () => {} },

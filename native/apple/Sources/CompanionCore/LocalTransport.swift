@@ -102,14 +102,15 @@ public final class CompanionServer: @unchecked Sendable {
   private let directory: URL
   private let expectedExecutable: URL
   private let controller: CompanionController
+  private let backups: ManagedBackups
   private let lock = NSLock()
   private var listener: Int32 = -1
   private var lease: Int32 = -1
   private var ownsSocket = false
   private var peers: [UUID: LocalConnection] = [:]
 
-  public init(directory: URL, expectedExecutable: URL, controller: CompanionController) {
-    self.directory = directory; self.expectedExecutable = expectedExecutable; self.controller = controller
+  public init(directory: URL, expectedExecutable: URL, controller: CompanionController, backups: ManagedBackups = ManagedBackups()) {
+    self.directory = directory; self.expectedExecutable = expectedExecutable; self.controller = controller; self.backups = backups
   }
 
   public func start() throws {
@@ -145,16 +146,26 @@ public final class CompanionServer: @unchecked Sendable {
           let id = UUID()
           guard add(connection, id: id) else { connection.close(); return }
           DispatchQueue.global(qos: .utility).async { [self] in
-            DispatchQueue.main.sync { controller.connect(id) }
+            var inference = false
             do {
               while let body = try connection.read(maximumBytes: NativeFraming.maximumRequestBytes) {
                 let request = try JSONDecoder().decode(HostRequest.self, from: body)
-                DispatchQueue.main.sync { controller.receive(request, client: id, writer: NativeWriter(writeFrame: { try connection.writeFrame($0) })) }
+                let writer = NativeWriter(writeFrame: { try connection.writeFrame($0) })
+                if !inference {
+                  try request.validate()
+                  if request.action == "backup_status_encrypted" || request.action == "backup_begin_encrypted" {
+                    backups.serve(body, read: { try connection.read(maximumBytes: NativeFraming.maximumRequestBytes) }, writer: writer)
+                    break
+                  }
+                  DispatchQueue.main.sync { controller.connect(id) }
+                  inference = true
+                }
+                DispatchQueue.main.sync { controller.receive(request, client: id, writer: writer) }
               }
             } catch { }
             remove(id)
             connection.close()
-            DispatchQueue.main.sync { controller.disconnect(id) }
+            if inference { DispatchQueue.main.sync { controller.disconnect(id) } }
           }
         }
       }

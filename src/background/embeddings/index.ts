@@ -2,7 +2,8 @@ import { runInference } from '../providers/inference';
 import { fetchProvider, ProviderAccessError, authorizeProviderOrigin, type ProviderConsentOptions } from '../providers/access';
 import { OllamaRequestError, ollamaResponseError } from '../providers/ollamaErrors';
 import { abortable } from '../../shared/abort';
-import type { BrowserModelDownload, BrowserModelTransfer } from '../../shared/browserModels';
+import type { BrowserEmbedStatus, BrowserModelDownload, BrowserModelTransfer } from '../../shared/browserModels';
+export type { BrowserEmbedStatus } from '../../shared/browserModels';
 import type { CapturePayload } from '../capture/types';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import {
@@ -17,19 +18,7 @@ const DEFAULT_BROWSER_REVISION = DEFAULT_EMBEDDING_CONFIG.browserRevision!;
 const QUERY_PREFIX = 'task: search result | query: ';
 const DOC_PREFIX = 'title: none | text: ';
 const CONFIG_STORAGE_KEY = 'embeddingConfig';
-const BROWSER_READY_KEY = 'browserEmbedReady';
 const MAX_EMBED_RETRIES = 3;
-
-export type BrowserEmbedStatus = {
-  ready: boolean;
-  runtimeAvailable: boolean;
-  model: string;
-  revision: string;
-  state: 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
-  code?: 'runtime_unavailable' | 'offscreen_unavailable' | 'download_failed' | 'resource_exhausted' | 'embed_failed' | 'unknown';
-  lastError?: string;
-  checkedAt?: string;
-};
 
 let currentConfig: EmbeddingConfig = {
   baseUrl: DEFAULT_BASE_URL,
@@ -69,7 +58,6 @@ function broadcastBrowserEmbedStatus(): void {
 
 function setBrowserEmbedReady(value: boolean): void {
   browserEmbedReady = value;
-  chrome.storage.local.set({ [BROWSER_READY_KEY]: value }).catch(() => {});
   browserEmbedStatus = {
     ...browserEmbedStatus,
     ready: value,
@@ -150,30 +138,54 @@ export function getBrowserEmbedStatus(): BrowserEmbedStatus {
 export async function probeBrowserEmbeddingRuntime(options?: { model?: string; revision?: string }): Promise<BrowserEmbedStatus> {
   const model = options?.model || currentConfig.browserModel || DEFAULT_BROWSER_MODEL;
   const revision = options?.revision || currentConfig.browserRevision || DEFAULT_BROWSER_REVISION;
-  updateBrowserEmbedStatus(
+  const key = JSON.stringify([model, revision]);
+  const version = modelVersions.get(key) || 0;
+  let publishedStatus = browserEmbedStatus;
+  const sameSelection = (): boolean => model === currentConfig.browserModel && revision === currentConfig.browserRevision;
+  const selected = (): boolean => sameSelection() && version === (modelVersions.get(key) || 0) && publishedStatus === browserEmbedStatus;
+  const update = (partial: Partial<BrowserEmbedStatus>): BrowserEmbedStatus => {
+    if (!selected()) {
+      if (!sameSelection()) return { ...browserEmbedStatus, ready: false, ...partial, model, revision };
+      const latest = getBrowserEmbedStatus();
+      return latest.state === 'checking' && partial.runtimeAvailable !== undefined
+        ? { ...latest, runtimeAvailable: partial.runtimeAvailable, lastError: partial.lastError, code: partial.code }
+        : latest;
+    }
+    publishedStatus = updateBrowserEmbedStatus(partial, { model, revision });
+    return publishedStatus;
+  };
+  update(
     {
       state: 'checking',
       lastError: undefined,
       code: undefined
-    },
-    { model, revision }
+    }
   );
   try {
     await ensureOffscreenDocument();
-    await sendOffscreenMessage<{ runtimeAvailable: boolean }>({ type: 'OFFSCREEN_EMBED_CAPABILITIES', model });
-    return updateBrowserEmbedStatus(
+    const capabilities = await sendOffscreenMessage<{ runtimeAvailable: boolean; cachedFiles?: boolean }>({ type: 'OFFSCREEN_EMBED_CAPABILITIES', model, revision });
+    const ready = selected() && browserEmbedReady && capabilities.cachedFiles === true;
+    if (selected()) {
+      setBrowserEmbedReady(ready);
+      publishedStatus = browserEmbedStatus;
+    }
+    return update(
       {
         runtimeAvailable: true,
+        ready,
         checkedAt: new Date().toISOString(),
-        state: browserEmbedReady ? 'ready' : 'idle',
+        state: ready ? 'ready' : capabilities.cachedFiles ? 'cached' : 'idle',
         lastError: undefined,
         code: undefined
-      },
-      { model, revision }
+      }
     );
   } catch (err) {
     const failure = classifyBrowserEmbedFailure(err);
-    return updateBrowserEmbedStatus(
+    if (selected()) {
+      setBrowserEmbedReady(false);
+      publishedStatus = browserEmbedStatus;
+    }
+    return update(
       {
         runtimeAvailable: false,
         checkedAt: new Date().toISOString(),
@@ -181,8 +193,7 @@ export async function probeBrowserEmbeddingRuntime(options?: { model?: string; r
         code: failure.code,
         lastError: failure.message,
         ready: false
-      },
-      { model, revision }
+      }
     );
   }
 }
@@ -253,7 +264,7 @@ export async function deleteBrowserModel(model: string, revision: string): Promi
 }
 
 export function configureEmbeddings(): void {
-  chrome.storage.local.get([CONFIG_STORAGE_KEY, BROWSER_READY_KEY], (result: Record<string, unknown>) => {
+  chrome.storage.local.get([CONFIG_STORAGE_KEY], (result: Record<string, unknown>) => {
     const stored = result?.[CONFIG_STORAGE_KEY];
     if (stored && typeof stored === 'object') {
       currentConfig = {
@@ -265,13 +276,13 @@ export function configureEmbeddings(): void {
         updatedAt: (stored as Partial<EmbeddingConfig>).updatedAt
       };
     }
-    browserEmbedReady = Boolean(result?.[BROWSER_READY_KEY]);
+    browserEmbedReady = false;
     browserEmbedStatus = {
       ...browserEmbedStatus,
       ready: browserEmbedReady,
       model: currentConfig.browserModel || DEFAULT_BROWSER_MODEL,
       revision: currentConfig.browserRevision || DEFAULT_BROWSER_REVISION,
-      state: browserEmbedReady ? 'ready' : 'idle'
+      state: 'idle'
     };
   });
   try {
@@ -280,6 +291,11 @@ export function configureEmbeddings(): void {
       const entry = changes[CONFIG_STORAGE_KEY];
       if (!entry || typeof entry.newValue !== 'object') return;
       const payload = entry.newValue as Partial<EmbeddingConfig>;
+      if ((payload.browserModel && payload.browserModel !== currentConfig.browserModel) ||
+          (payload.browserRevision && payload.browserRevision !== currentConfig.browserRevision)) {
+        setBrowserEmbedReady(false);
+        updateBrowserEmbedStatus({ ready: false, state: 'idle', lastError: undefined, code: undefined });
+      }
       currentConfig = {
         baseUrl: sanitizeBaseUrl(payload.baseUrl) || currentConfig.baseUrl,
         model: payload.model || currentConfig.model,
@@ -452,6 +468,6 @@ export async function computeEmbeddingsForQueries(queries: string[], signal?: Ab
   return computeEmbeddingsForChunks(queries, signal);
 }
 
-export async function embedPayloadChunks(payload: CapturePayload): Promise<number[][]> {
-  return computeEmbeddingsForChunks(payload.chunks || []);
+export async function embedPayloadChunks(payload: CapturePayload, signal?: AbortSignal): Promise<number[][]> {
+  return computeEmbeddingsForChunks(payload.chunks || [], signal);
 }

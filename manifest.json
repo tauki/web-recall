@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "minimum_chrome_version": "142",
   "name": "Web Recall",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "A privacy-preserving extension for semantic browsing history",
   "permissions": [
     "sidePanel",
@@ -12,7 +12,8 @@
     "tabs",
     "offscreen",
     "contextMenus",
-    "scripting"
+    "scripting",
+    "alarms"
   ],
   "optional_permissions": ["nativeMessaging"],
   "host_permissions": [
@@ -27,6 +28,8 @@
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" },
   "content_scripts": [
     {
       "matches": [

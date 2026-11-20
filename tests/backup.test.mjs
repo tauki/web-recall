@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, plain, waitFor, chromeFixture } from './helpers.mjs';
+import { loadSource, plain, waitFor, chromeFixture, automaticAiEnabled } from './helpers.mjs';
 
 const header = '{"format":"web-recall","schemaVersion":2}\n';
 const trailer = count => `{"type":"end","pages":${count}}\n`;
@@ -13,6 +13,7 @@ async function captureRestoreFixture(t, { beforeQueue = async () => {}, afterLoo
   const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   t.after(async () => (await source.openDatabase()).close());
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../processing/automaticAi': automaticAiEnabled,
     '../summaries/index': { queuePageSummary: async () => false },
     '../storage/manager': { storageManager: source }, '../storage/index': { whenStorageReady: async () => {} },
     '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: embed },
@@ -47,7 +48,7 @@ test('malformed supplied backup fields fail preflight without replacing saved co
   t.after(async () => (await source.openDatabase()).close());
   await source.savePageRecord(page);
   const api = await loadSource('src/background/manage/index.ts', '', {
-    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs() {} },
+    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
   }, { TextEncoder });
   const backup = await codec();
@@ -124,7 +125,7 @@ test('backup restore replaces destination metadata, clearing omitted fields whil
   const source = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   t.after(async () => (await source.openDatabase()).close());
   const api = await loadSource('src/background/manage/index.ts', '', {
-    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs() {} },
+    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
   }, { TextEncoder });
   const explicit = { summary: 'Backup summary', versions: [{ timestamp: 2, text: 'Backup history', chunks: [] }], lastEmbeddedAt: 7 };
@@ -173,7 +174,7 @@ test('streamed backups round-trip a library beyond legacy file, page and record 
   const urls = Array.from({ length: 8 }, (_, index) => `${page.url}/${index}`);
   for (const url of urls) await source.savePageRecord({ ...large, url });
   const api = await loadSource('src/background/manage/index.ts', '', {
-    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs() {} },
+    '../storage/manager': { storageManager: source }, '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) }, '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
   }, { TextEncoder });
   const backup = await codec();

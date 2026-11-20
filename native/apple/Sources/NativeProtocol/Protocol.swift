@@ -55,7 +55,7 @@ public struct HostRequest: Decodable, Sendable {
 
   public func validate() throws {
     guard !id.isEmpty, id.utf8.count <= 128 else { throw ProtocolError.invalidRequest }
-    guard ["status", "generate", "cancel", "tool_result"].contains(action) else { throw ProtocolError.invalidRequest }
+    guard ["status", "generate", "cancel", "tool_result", "backup_status_encrypted", "backup_begin_encrypted"].contains(action) else { throw ProtocolError.invalidRequest }
     guard mode == nil || mode == "on-device" || mode == "private-cloud" else { throw ProtocolError.invalidRequest }
     if mode == "private-cloud", cloudConsent != true { throw ProtocolError.cloudConsentRequired }
     if action == "generate" {

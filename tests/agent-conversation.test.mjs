@@ -58,6 +58,28 @@ test('source identity survives retrieval reordering and distinguishes saved vers
   assert.equal(Object.hasOwn(cedar, 'evidence'), false);
 });
 
+test('version IDs keep source numbers stable across unchanged recaptures and distinguish new content at the same time', () => {
+  const references = [];
+  const original = mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Cedar', timestamp: 10, versionId: 'original', evidence: 'Saved body' });
+  const revisited = mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Cedar', timestamp: 20, versionId: 'original' });
+  const changed = mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Revised Cedar', timestamp: 20, versionId: 'revised' });
+  const otherUrl = mod.sourceReference(references, { url: 'https://example.test/maple', title: 'Maple', timestamp: 10, versionId: 'original' });
+  assert.equal(original.index, 1);
+  assert.equal(revisited.index, 1);
+  assert.equal(changed.index, 2);
+  assert.equal(otherUrl.index, 3);
+  assert.equal(original.versionId, 'original');
+  assert.equal(changed.versionId, 'revised');
+  assert.equal(Object.hasOwn(original, 'evidence'), false);
+});
+
+test('legacy timestamp references cannot alias a known version merely because capture times coincide', () => {
+  const references = [{ index: 7, url: 'https://example.test/cedar', title: 'Legacy Cedar', timestamp: 10 }];
+  assert.equal(mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Legacy Cedar', timestamp: 10 }).index, 7);
+  assert.equal(mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Cedar', timestamp: 10, versionId: 'original' }).index, 8);
+  assert.equal(mod.sourceReference(references, { url: 'https://example.test/cedar', title: 'Legacy Cedar', timestamp: 20 }).index, 9);
+});
+
 test('cancellation during compaction prevents another summarization and leaves the original checkpoint intact', async () => {
   const controller = new AbortController(), state = makeState();
   state.turns = [{ question: 'Question', answer: 'Large answer '.repeat(500) }];

@@ -46,6 +46,38 @@ private func withBlockingClientIO<Value: Sendable>(_ operation: @escaping @Senda
   #expect(throws: CompanionError.self) { try LocalConnection.connect(directory: directory, expectedExecutable: executable) }
 }
 
+@Test @MainActor func localBridgePublishesBackupWithoutRunningInference() async throws {
+  let directory = try temporaryDirectory()
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+  let libraryId = "a0c3cb19-b68f-478e-bb7b-5b13d92da60a"
+  let controller = CompanionController { request, _, _ in
+    Issue.record("A backup unexpectedly called inference.")
+    return HostEvent(id: request.id, type: "error")
+  }
+  let server = CompanionServer(directory: directory, expectedExecutable: executable, controller: controller, backups: ManagedBackups(folder: { directory }))
+  try server.start()
+  defer { server.stop() }
+  try await withBlockingClientIO {
+    let connection = try LocalConnection.connect(directory: directory, expectedExecutable: executable)
+    defer { connection.close() }
+    let requests: [([String: Any], String)] =
+      [(["action": "backup_begin_encrypted", "libraryId": libraryId, "keyId": sampleKeyId, "revision": 42, "keep": 3], "backup_ready_encrypted")]
+      + sampleEncryptedFrames.map { (["action": "backup_chunk", "data": $0.base64EncodedString()], "backup_ack") }
+      + [(["action": "backup_finish"], "backup_saved")]
+    for (request, expected) in requests {
+      let body = try JSONSerialization.data(withJSONObject: request.merging(["id": "receives-backup"]) { original, _ in original })
+      try connection.send(body)
+      let reply = try #require(try connection.read())
+      let event = try #require(try JSONSerialization.jsonObject(with: reply) as? [String: String])
+      #expect(event["type"] == expected)
+    }
+  }
+  let files = try FileManager.default.contentsOfDirectory(at: directory.appendingPathComponent("Web Recall " + libraryId), includingPropertiesForKeys: nil)
+  #expect(files.count == 1)
+  #expect(try Data(contentsOf: #require(files.first)) == sampleEncryptedBackup)
+}
+
 @Test @MainActor func anotherInstanceCannotRemoveTheLiveEndpointOrAnUnrelatedFile() throws {
   let directory = try temporaryDirectory()
   defer { try? FileManager.default.removeItem(at: directory) }

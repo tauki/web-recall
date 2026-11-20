@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { forceCloseDatabase, IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { loadSource, plain, tick } from './helpers.mjs';
 
 const url = 'https://example.test/saved';
@@ -43,12 +43,52 @@ async function database() {
     }
   };
   const load = () => loadSource('src/shared/db/index.ts', '', {}, { indexedDB, IDBKeyRange });
-  return { mod: await load(), load, writes, abortNext: store => { abortStore = store; } };
+  return { mod: await load(), load, writes, factory, abortNext: store => { abortStore = store; } };
 }
 
 test('Chrome eviction protection is a required installation permission, not an optional user choice', async () => {
   const manifest = JSON.parse(await readFile(new URL('../manifest.json', import.meta.url), 'utf8'));
   assert.ok(manifest.permissions.includes('unlimitedStorage'), 'Chrome requires unlimitedStorage to exempt IndexedDB and model caches from eviction');
+});
+
+test('after a browser-forced connection close, saved evidence and its pending job remain usable without reloading the extension', async testContext => {
+  const { mod } = await database();
+  await mod.savePageRecord(captured);
+  await mod.savePageSummary(url, captured.text, 'An established overview.');
+  await mod.appendProcessing(queued);
+  const connection = await mod.openDatabase();
+  const closed = new Promise(resolve => connection.addEventListener('close', resolve, { once: true }));
+  forceCloseDatabase(connection);
+  await closed;
+  const [saved, job] = await Promise.all([mod.getPageRecord(url), mod.getProcessingEntry(url)]);
+  testContext.after(async () => (await mod.openDatabase()).close());
+  assert.equal(saved.text, captured.text);
+  assert.equal(saved.summary, 'An established overview.');
+  assert.deepEqual(plain(saved.chunks), captured.chunks);
+  assert.deepEqual(plain(job.payload), queued.payload);
+  await mod.deletePages([url]);
+  assert.deepEqual(plain(await mod.listAllPages()), [], 'Intentional forgetting can still leave an empty library');
+  const visible = [];
+  await mod.scanSearchPages(record => visible.push(record));
+  assert.deepEqual(visible, []);
+});
+
+test('a disappeared library is an error, not a fresh database or a successful empty read in the same runtime', async () => {
+  const { mod, factory } = await database();
+  await mod.savePageRecord(captured);
+  const connection = await mod.openDatabase();
+  const closed = new Promise(resolve => connection.addEventListener('close', resolve, { once: true }));
+  forceCloseDatabase(connection);
+  await closed;
+  await new Promise((resolve, reject) => {
+    const request = factory.deleteDatabase(connection.name);
+    request.onsuccess = resolve;
+    request.onerror = () => reject(request.error);
+  });
+  const missing = /previously opened local library is missing/i;
+  await assert.rejects(mod.listAllPages(), missing);
+  await assert.rejects(mod.savePageRecord(captured), missing);
+  assert.ok(!(await factory.databases()).some(entry => entry.name === connection.name), 'Neither the read nor write creates a replacement library');
 });
 
 test('library changes and accepted capture jobs request persistent-media durability', async () => {
@@ -102,11 +142,14 @@ test('storage readiness shares initialization, reports failures, and allows a la
   let attempts = 0;
   let migrations = 0;
   const opening = new Promise((_resolve, reject) => { rejectOpen = reject; });
+  const backend = {};
   const mod = await loadSource('src/background/storage/index.ts', '', {
     '../../shared/db/index': {
-      openDatabase: () => { attempts++; return attempts === 1 ? opening : Promise.resolve(); },
-      migrateLegacySnapshotIfNeeded: async () => { migrations++; }
-    }
+      migrateLegacySnapshotIfNeeded: async () => { migrations++; }, listLogs() {}, clearLogs() {}
+    },
+    './libraryActivation': { async openSqliteAuthority(prepare) { attempts++; if (attempts === 1) await opening; await prepare(); return { id: 'active-library', source: 'indexeddb' }; } },
+    './retireLegacy': { retireLegacySavedData: async () => {} },
+    './sqlite': { createSqliteBackend: () => backend }
   });
   const first = mod.whenStorageReady();
   const second = mod.whenStorageReady();
@@ -116,7 +159,7 @@ test('storage readiness shares initialization, reports failures, and allows a la
   rejectOpen(Error('disk unavailable'));
   await failed;
   assert.equal(migrations, 0);
-  await mod.whenStorageReady();
+  assert.equal(await mod.whenStorageReady(), backend);
   assert.equal(attempts, 2);
   assert.equal(migrations, 1);
 });

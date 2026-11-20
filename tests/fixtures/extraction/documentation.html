@@ -1,0 +1,35 @@
+<!doctype html>
+<title>Queue reference</title>
+<header>Noise documentation masthead</header>
+<div role="navigation">Noise topic index</div>
+<article hidden>Noise old cached article</article>
+<div role="main">
+  <article><h2>Stable release</h2></article>
+  <h1>Configure the worker</h1>
+  <p>Set the <code>queueLimit</code> before starting the worker.</p>
+  <h2>Setup sequence</h2>
+  <ol start="3">
+    <li>Install the package</li>
+    <li value="8">Set the queue size<ul><li>Choose a bounded limit</li><li>Record the chosen value</li></ul></li>
+    <li>Start the worker</li>
+  </ol>
+  <pre><code>function start() {
+  const limit = 42;
+
+
+
+	return limit;
+}</code></pre>
+  <table>
+    <caption>Worker options</caption>
+    <thead><tr><th>Option</th><th>Default</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>queueLimit</td><td>42</td><td>Maximum queued jobs</td></tr>
+      <tr><td>label</td><td></td><td>Optional display name</td></tr>
+    </tbody>
+  </table>
+  <pre>&lt;img src=x onerror="window.savedCodeRan = true"&gt;</pre>
+  <div role="toolbar">Noise code controls <button>Noise copy code</button></div>
+  <div class="sidebar">Noise table of contents</div>
+  <form><label>Noise search docs <input value="private query"></label></form>
+</div>

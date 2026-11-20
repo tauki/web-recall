@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, plain } from './helpers.mjs';
+import { loadSource, plain, automaticAiEnabled } from './helpers.mjs';
 
 const { DEFAULT_SETTINGS, DEFAULT_EMBEDDING_CONFIG, embeddingSpaceKey } = await loadSource('src/shared/config/index.ts');
 
@@ -80,7 +80,10 @@ test('existing beta settings and later user choices take precedence over legacy 
   const f = await settingsFixture({ paused: true, blacklistDomains: ['old.test'], betaSettings: { ...plain(DEFAULT_SETTINGS), paused: false, denylist: [], theme: 'dark' } });
   assert.equal((await f.mod.getSettings()).theme, 'dark');
   assert.equal(await f.mod.shouldCaptureUrl('https://old.test'), true);
-  assert.equal(f.writes.length, 0);
+  assert.deepEqual(f.values.betaSettings.denylist, []);
+  const migratedWrites = f.writes.length;
+  await (await f.load()).getSettings();
+  assert.equal(f.writes.length, migratedWrites, 'A restart must not repeat a completed settings migration');
   const migrated = await settingsFixture({ paused: false, blacklistDomains: ['old.test'] });
   await migrated.mod.getSettings();
   await migrated.mod.updateSettings({ denylist: [] });
@@ -138,9 +141,10 @@ test('a failed settings write rejects only that update and later writes retain s
 test('storage read failures cannot replace capture policy with defaults', async () => {
   const f = await settingsFixture({ betaSettings: { ...plain(DEFAULT_SETTINGS), denylist: ['private.test'] } });
   await f.mod.getSettings();
+  const writesBeforeFailure = f.writes.length;
   f.setReadFailure(true);
   await assert.rejects(f.mod.updateSettings({ theme: 'dark' }), /Read failed/);
-  assert.equal(f.writes.length, 0);
+  assert.equal(f.writes.length, writesBeforeFailure);
   f.setReadFailure(false);
   assert.deepEqual(plain((await f.mod.getSettings()).denylist), ['private.test']);
 });
@@ -215,6 +219,7 @@ async function captureFixture(embeddingResult) {
   await db.updateProcessingEntry({ url: payload.url, title: payload.title, status: 'queued', attempts: 0, lastAttemptAt: 1, createdAt: 1, updatedAt: 1, payload }, true);
   let invalidations = 0;
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../processing/automaticAi': automaticAiEnabled,
     '../summaries/index': { queuePageSummary: async () => false },
     '../embeddings/index': { getEmbeddingConfig: () => config, embedPayloadChunks: async () => embeddingResult({ db, config, old, payload }) },
     '../storage/index': { whenStorageReady: async () => {} },

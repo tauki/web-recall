@@ -9,7 +9,7 @@ const dbMock = { openDatabase: async () => {}, PAGES_STORE: 'pages' };
 
 test('cancel aborts the fetch signal, retains completed files and retry restores the fetch hook', async () => {
   const updates = [], signals = [];
-  let tokenizerCached = false, tokenizerDownloads = 0, weightAttempts = 0;
+  let tokenizerCached = false, tokenizerDownloads = 0, weightAttempts = 0, weightsCached = false;
   const originalFetch = async (_url, options) => {
     signals.push(options.signal);
     if (++weightAttempts === 1) return new Promise((_resolve, reject) => options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true }));
@@ -24,8 +24,12 @@ test('cancel aborts the fetch signal, retains completed files and retry restores
         return () => ({});
       } },
       AutoModel: { from_pretrained: async (_id, options) => {
-        options.progress_callback({ status: 'progress', file: 'onnx/model_quantized.onnx', loaded: 25, total: 100 });
-        await env.fetch('https://huggingface.co/model.onnx');
+        if (options.local_files_only && !weightsCached) throw Error('local_files_only=true: cached weights missing');
+        if (!options.local_files_only) {
+          options.progress_callback({ status: 'progress', file: 'onnx/model_quantized.onnx', loaded: 25, total: 100 });
+          await env.fetch('https://huggingface.co/model.onnx');
+          weightsCached = true;
+        }
         const model = async () => ({ sentence_embedding: [[1, 2]] }); model.dispose = async () => {}; return model;
       } }
     }

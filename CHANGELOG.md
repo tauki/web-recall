@@ -4,6 +4,51 @@ Changelog
 All notable changes to this project are documented in this file.
 This project adheres to Semantic Versioning. Prior to 1.0.0, minor versions may include breaking changes.
 
+0.3.0
+-----
+- Show the same outlined black-and-white icon in the Chrome toolbar and Extensions page, with the existing toolbar pause badge.
+- Match the Chrome outline in the Mac companion’s app and menu-bar icons.
+- Save and restore encrypted backup files with a copyable recovery key, including opt-in daily backups to a folder chosen in the Mac companion. Keep three verified copies by default, with configurable retention, and leave older unencrypted backups untouched.
+- Save the daily backup toggle and retention count automatically when changed.
+- Export all, filtered, or selected saved pages as Markdown or JSON, separately from full backups. Reject mixed-revision backup and export files if the library changes during the transfer.
+- Move saved pages, history, text search and queued work from IndexedDB into a single local SQLite library. Verify existing records before activating the copy; retire old records, report missing active storage rather than replacing it, and do not re-embed on upgrade.
+- Put storage and backup controls in Settings, with shortcuts from Memory Manager and a direct restore link when the library is missing. Group bulk embedding and summary work under Maintenance.
+- Restore a missing saved library from a user-confirmed backup. Activate the replacement only after the full backup verifies; do not replace an existing file or expose an interrupted restore as the library.
+- Show the empty state in Memory Manager only after the saved-page list loads successfully.
+- Refresh Memory after a stopped or failed backup import so already restored pages are visible without reopening.
+- Keep keyboard focus on the next step after choosing manual capture and saving the first page, without interrupting other work.
+- Open the side panel from its shortcut or Chrome context menu without losing the user gesture.
+- Keep the capture shortcut on the triggering tab even if another tab becomes active.
+- Return a consistent capture queue snapshot while indexing runs, without sending saved page bodies or recovery data to the views.
+- Retry only the current failed capture job; overlapping retries cannot restart an active attempt or restore a page that was deleted while retrying.
+- Notify open views when the capture queue changes without rereading and broadcasting saved page content on every transition.
+- Show pending save and durable confirmation in an empty library, and keep capture or retry feedback visible across background refreshes until the next explicit search or refresh.
+- Distinguish cached browser-model files from verified readiness after restart. Never trust a persisted ready flag; verify explicit downloads through a fresh cache-only load before reporting success, and keep cached-file failures separate from saved page data.
+- Search all saved text and retained versions inside the SQLite worker, without moving page bodies or vectors into the background process. Use a bounded search index to avoid opening unrelated text; preserve Stop, scoped search and original saved passages even if derived search data needs to be rebuilt.
+- Recheck search-result identities and capture dates against the text-only view instead of cloning embedding vectors. Preserve result order and historical ambiguity checks, and prevent a late offscreen reply from starting another storage read after Stop.
+- Keep whole-library text search independent from stored embedding vectors. Maintain its lightweight text records in the same durable transactions as captures, restores and history changes; upgrade existing libraries without re-embedding or recapturing pages.
+- Rank meaningful words above common prose and word fragments while preserving literal partial and quoted lookup. Show dense multiword passages in results and the saved reader instead of jumping to an isolated word in a captured heading.
+- Guide first use through saving, finding and reading saved text before optional AI setup. New installations keep automatic AI off; upgrades preserve prior model behavior and preferences. Stop automatic capture enrichment, queued summaries and Search refinement on opt-out without cancelling explicit Ask or manual maintenance. Discover providers only when Models is opened.
+- Explain in Ask that automatic AI is off but questions still need a chat model. Keep retrieved pages visible when a response cannot be generated without claiming the model sent an empty reply.
+- Start with chat disabled on new installations. Hide Ask and stop active questions when chat is disabled, without changing saved pages, embedding settings, or configured provider details.
+- Make the saved reader the primary action in page previews and label the separate live-page link.
+- Show an on-demand browser storage estimate in Memory tools, explain version retention and browsing-history independence, and link directly to scoped forgetting. Keep storage failures separate from page operations and refresh visible estimates after library changes.
+- Stream large retained histories in framed backups, preserving previous import formats and optional metadata. Validate the whole file before restore, replace complete pages atomically, expose Stop, and report interrupted or uncertain transfers honestly. Fence active and queued model work against same-identity restores without changing saved version IDs.
+- Preserve headings, lists, code and tables in visible saved content; identify omitted embedded and collapsed content, and report unsupported PDF or embedded-only captures explicitly.
+- Retain the latest five content versions plus explicitly kept older versions. Keep imported history protected until released, distinguish recapture from re-indexing, and provide a saved-history reader with Keep, Release and individual removal.
+- Carry saved-version identities through search, reranking, Ask and source references so recaptures cannot silently substitute newer text for earlier evidence.
+- Search retained earlier text without a model, group each page to its best matching snapshot, and apply site/date filters to the matched version. Recheck unavailable versions after refinement and reject ambiguous legacy capture times.
+- Add manual-only capture setup, quick pause/resume and site exclusion from the panel menu. Exclusions keep existing saves; forgetting does not exclude future saves.
+- Forget only reviewed versions matching a site/date scope, including kept versions, while preserving other captures of the same page. Promote the newest remaining version when needed, recheck frozen identities and dates transactionally, and cancel only matching indexing/summary work after commit. Failed removal leaves active work intact.
+- Stop active summary and re-embedding work after whole-page Delete or individual historical Remove commits. Use the exact removed snapshots so retained or newly captured versions keep running; Keep and Release never cancel inference.
+- Clear obsolete capture-indexing failures after successful Memory re-embedding, without clearing newer jobs. Keep concurrent page/job revisions distinct even when writes share a clock millisecond.
+- Save page text and its indexing job in one durable transaction before acknowledging capture. Index in the background, preserve newer captures against late writes, cancel forgotten work, and retain actionable indexing errors with Retry while saved text remains searchable.
+- Distinguish saving, saved text, waiting/indexing, indexed and failed indexing in the panel and Memory Manager. Recheck current site rules for queued, recovered and retried work without treating paused automatic collection as a block on indexing already-saved pages.
+- Require foreground visibility and a fresh dwell before automatic capture; discard stale eligibility replies after navigation or switching away. Explicit exclusions override allowlists across manual and automatic capture. Manual capture reports the background confirmation or actual failure.
+- Show whole-library text matches before optional model-based search refinement. Search saved URLs and quoted phrases, preserve older exact matches, and retain visible text results when refinement is stopped or fails.
+- Filter saved-page search by site and capture dates, including browsing a filtered library without entering keywords. Apply the same scope to text results and optional semantic refinement.
+- Read full saved captures without opening the live website or running a model, highlight the matched passage, and show capture time. Retained historical captures remain readable; unavailable captures fail explicitly instead of silently substituting newer text.
+
 0.2.3 - Unreleased
 ------------------
 - Keep blocking companion socket accept/read loops off Swift's cooperative task pool while preserving ordered MainActor request handling. Exercise idle and concurrent clients with single-worker scheduling in CI, and bound only the CI test step to ten minutes; model inference still has no automatic deadline.

@@ -11,9 +11,9 @@ export function conversationText(state: ConversationState): string {
 }
 
 export function sourceReference(references: SourceReference[], source: Omit<SourceReference, 'index'>): SourceReference {
-  const existing = references.find(reference => reference.url === source.url && reference.timestamp === source.timestamp);
+  const existing = references.find(reference => reference.url === source.url && (reference.versionId || source.versionId ? reference.versionId === source.versionId : reference.timestamp === source.timestamp));
   if (existing) return existing;
-  const reference = { url: source.url, title: source.title, timestamp: source.timestamp, index: references.reduce((maximum, entry) => Math.max(maximum, entry.index), 0) + 1 };
+  const reference = { url: source.url, title: source.title, timestamp: source.timestamp, versionId: source.versionId, index: references.reduce((maximum, entry) => Math.max(maximum, entry.index), 0) + 1 };
   references.push(reference);
   return reference;
 }

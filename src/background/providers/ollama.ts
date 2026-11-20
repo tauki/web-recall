@@ -34,27 +34,29 @@ export type ProviderDescriptor = {
   notes?: string;
 };
 
-async function pingOllama(baseUrl: string): Promise<void> {
+async function pingOllama(baseUrl: string, signal?: AbortSignal): Promise<void> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5_000);
   try {
-    const response = await fetchProvider(`${baseUrl}/`, { method: 'GET', signal: controller.signal });
+    const response = await fetchProvider(`${baseUrl}/`, { method: 'GET', signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal });
+    signal?.throwIfAborted();
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
   } finally {
     clearTimeout(timeout);
   }
 }
 
-export async function getOllamaStatus(baseUrl?: string, testInference = false): Promise<ProviderStatus> {
+export async function getOllamaStatus(baseUrl?: string, testInference = false, signal?: AbortSignal): Promise<ProviderStatus> {
   const target = baseUrl || (await getProviderBaseUrl('ollama'));
   try {
-    await pingOllama(target);
+    await pingOllama(target, signal);
     if (!testInference) return { online: true, lastChecked: new Date().toISOString() };
-    const probeModel = await resolveOllamaChatModel(target);
+    const probeModel = await resolveOllamaChatModel(target, undefined, signal);
     const probe = await probeChat({
       providerId: 'ollama',
       baseUrl: target,
-      model: probeModel
+      model: probeModel,
+      signal
     });
     if (!probe.ok) {
       return {
@@ -73,15 +75,16 @@ export async function getOllamaStatus(baseUrl?: string, testInference = false): 
   }
 }
 
-export async function describeOllamaProvider(probe = true): Promise<ProviderDescriptor> {
+export async function describeOllamaProvider(probe = true, signal?: AbortSignal): Promise<ProviderDescriptor> {
   const baseUrl = await getProviderBaseUrl('ollama');
-  const status = probe ? await getOllamaStatus().catch(() => ({
+  const status = probe ? await getOllamaStatus(baseUrl, false, signal).catch(() => ({
     online: false,
     lastChecked: new Date().toISOString(),
     lastError: 'Unknown error'
   })) : { online: false, lastChecked: '', lastError: 'Inactive provider' };
-  const models = status.online ? await listOllamaModels(baseUrl) : [];
-  const selectedModel = await resolveOllamaChatModel(baseUrl, models);
+  if (probe) signal?.throwIfAborted();
+  const models = status.online ? await listOllamaModels(baseUrl, signal) : [];
+  const selectedModel = await resolveOllamaChatModel(baseUrl, models, probe ? signal : undefined);
   return {
     id: 'ollama',
     name: 'Ollama',

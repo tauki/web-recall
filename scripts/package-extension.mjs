@@ -22,9 +22,9 @@ for (const [size, file] of iconEntries) {
 }
 const entries = [manifest.background.service_worker, manifest.side_panel.default_path,
   manifest.options_page, ...manifest.content_scripts.flatMap((entry) => entry.js),
-  ...iconEntries.map(([, file]) => file)];
+  ...iconEntries.map(([, file]) => file), 'dist/beta/offscreen/index.html', 'dist/beta/offscreen/libraryWorker.js', 'dist/beta/offscreen/fflate-LICENSE.txt',
+  ...['index.mjs', 'sqlite3.wasm', 'sqlite3-opfs-async-proxy.js'].map(file => `dist/beta/offscreen/sqlite/${file}`)];
 for (const entry of entries) await fs.access(path.join(root, entry));
-await fs.access(path.join(root, 'dist/beta/offscreen/index.html'));
 const runtimeFiles = await fs.readdir(path.join(root, 'dist/beta/transformers'));
 if (!runtimeFiles.some((name) => name.endsWith('.wasm'))) throw new Error('Missing ONNX runtime assets');
 const archive = path.join(root, `dist/web-recall-${manifest.version}.zip`);

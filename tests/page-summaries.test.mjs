@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, chromeFixture, plain, tick, waitFor } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, tick, waitFor, automaticAiEnabled } from './helpers.mjs';
 import { providerFixture } from './provider-fixture.mjs';
 
 const url = 'https://example.test/article';
-const record = text => ({ url, title: 'Saved article', text, timestamp: 1, manual: true, chunks: [{ text, embedding: [1, 0], embeddingKey: 'saved-space' }] });
+const record = text => ({ url, title: 'Saved article', versionId: 'saved-article', text, timestamp: 1, manual: true, chunks: [{ text, embedding: [1, 0], embeddingKey: 'saved-space' }] });
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
 
 test('the registered single-summary action changes only its selected summary, never invokes embeddings, and rejects non-UI callers', async t => {
@@ -103,8 +103,9 @@ async function fixture(t, generate = async () => 'A concise saved summary.') {
   t.after(async () => (await db.openDatabase()).close());
   let calls = 0, reads = 0;
   const summaries = await loadSource('src/background/summaries/index.ts', '', {
+    '../processing/automaticAi': automaticAiEnabled,
     '../storage/manager': { storageManager: { ...db, getPageRecord: async target => { reads++; return db.getPageRecord(target); } } },
-    '../providers/chat': { getChatConfig: async () => ({ providerId: 'ollama', model: 'fixture', contextTokens: 4096 }), callChat: async (config, body) => { calls++; return { message: { content: await generate(config, body) } }; } }
+    '../providers/chat': { getChatConfig: async signal => ({ providerId: 'ollama', model: 'fixture', contextTokens: 4096, signal }), callChat: async (config, body) => { calls++; return { message: { content: await generate(config, body) } }; } }
   }, { chrome: chromeFixture });
   return { db, summaries, calls: () => calls, reads: () => reads };
 }
@@ -118,6 +119,23 @@ test('a short whole page is summarized in one inference without loading its vect
   assert.ok(requests[0].messages.some(message => message.content.includes('Beginning: local search. Conclusion: everything stays local.')));
   assert.equal(fixtureState.reads(), 1, 'The final database comparison owns stale-content protection');
   assert.equal((await fixtureState.db.getPageRecord(url)).summary, 'The page explains local search.');
+});
+
+test('a summary generated for an earlier title cannot be committed after a title-only recapture', async t => {
+  const started = deferred(), generation = deferred();
+  const state = await fixture(t, async () => { started.resolve(); return generation.promise; });
+  await state.db.savePageRecord({ ...record('The same body.'), versionId: 'first-version' });
+  const pending = state.summaries.queuePageSummary(url);
+  t.after(async () => { generation.resolve('Earlier title overview.'); await pending; });
+  await started.promise;
+  const processing = await loadSource('src/background/processing/index.ts', '', { '../storage/manager': { storageManager: state.db } }, { chrome: chromeFixture });
+  await processing.markQueued({ url, title: 'Changed title', text: 'The same body.', chunks: ['The same body.'], timestamp: 2, manual: true, captureId: 'renamed-capture' }, 0);
+  generation.resolve('Earlier title overview.');
+  assert.equal(await pending, false);
+  const saved = await state.db.getPageRecord(url);
+  assert.equal(saved.title, 'Changed title');
+  assert.equal(saved.summary, undefined);
+  assert.notEqual(saved.versionId, 'first-version');
 });
 
 for (const includeSignal of [false, true]) test(`explicit regeneration ${includeSignal ? 'with' : 'without'} a caller signal supersedes stalled automatic work without accepting late results`, async t => {
@@ -165,6 +183,7 @@ test('cancelling a queued summary settles promptly and never starts that inferen
 test('capture schedules summarization only after storage succeeds and does not wait for inference', async () => {
   const pending = deferred(), actions = [];
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../processing/automaticAi': automaticAiEnabled,
     '../storage/index': { whenStorageReady: async () => {} },
     '../storage/manager': { storageManager: { savePageRecord: async () => actions.push('saved') } },
     '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: async () => [[1, 0]] },
@@ -201,6 +220,7 @@ test('backfill returns phase-specific embedding failures even when the summary s
 test('automatic capture logs embedding and summary failures separately without discarding saved text', async () => {
   const events = [], saved = [];
   const processor = await loadSource('src/background/capture/processor.ts', '', {
+    '../processing/automaticAi': automaticAiEnabled,
     '../storage/index': { whenStorageReady: async () => {} },
     '../storage/manager': { storageManager: { savePageRecord: async page => saved.push(page) } },
     '../embeddings/index': { getEmbeddingConfig: () => ({}), embedPayloadChunks: async () => { throw Error('Model download missing'); } },

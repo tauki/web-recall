@@ -1,3 +1,5 @@
+import type { CaptureInfo } from '../../shared/capture';
+
 export type CapturePayload = {
   url: string;
   title: string;
@@ -6,6 +8,8 @@ export type CapturePayload = {
   text: string;
   force?: boolean;
   manual?: boolean;
+  captureId?: string;
+  captureInfo?: CaptureInfo;
 };
 
 export type QueueItem = {

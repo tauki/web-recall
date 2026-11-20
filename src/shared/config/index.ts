@@ -1,6 +1,10 @@
+export const CHAT_PROVIDER_DISABLED = 'disabled';
+
 export type BetaSettings = {
   paused: boolean;
   captureSetupComplete: boolean;
+  recallSetupComplete: boolean;
+  automaticAi: boolean;
   acknowledgedRemoteProviderOrigins: string[];
   allowlist: string[];
   denylist: string[];
@@ -22,13 +26,15 @@ export type BetaSettings = {
 export const DEFAULT_SETTINGS: BetaSettings = {
   paused: true,
   captureSetupComplete: false,
+  recallSetupComplete: false,
+  automaticAi: false,
   acknowledgedRemoteProviderOrigins: [],
   allowlist: [],
   denylist: [],
   contextWindowChars: 1200,
   askMaxSources: 5,
   theme: 'light',
-  activeProviderId: 'ollama',
+  activeProviderId: CHAT_PROVIDER_DISABLED,
   applePrivateCloud: false,
   logLevel: 'info',
   answerMode: 'concise',

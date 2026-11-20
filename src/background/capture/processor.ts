@@ -6,27 +6,33 @@ import { storageManager, type PageChunkRecord } from '../storage/manager';
 import { invalidateOffscreenIndex } from '../offscreen/index';
 import { queuePageSummary } from '../summaries/index';
 import { log } from '../../shared/logger/index';
+import { runAutomaticAi } from '../processing/automaticAi';
 
 function normalizeChunk(text: string | undefined): string {
   if (typeof text === 'string') return text;
   return '';
 }
 
-export async function processCapturePayload(payload: CapturePayload, shouldContinue = () => true): Promise<void> {
+export async function processCapturePayload(payload: CapturePayload, shouldContinue = () => true, signal?: AbortSignal): Promise<{ embeddingError?: string } | void> {
   if (!payload.url) return;
   await whenStorageReady();
+  return runAutomaticAi(activeSignal => enrichCapturePayload(payload, shouldContinue, activeSignal), signal);
+}
+
+async function enrichCapturePayload(payload: CapturePayload, shouldContinue: () => boolean, signal: AbortSignal): Promise<{ embeddingError?: string } | void> {
   const key = embeddingSpaceKey(getEmbeddingConfig());
   let embeddings: number[][] = [];
   let embeddingError: string | undefined;
   try {
-    embeddings = await embedPayloadChunks(payload);
+    embeddings = await embedPayloadChunks(payload, signal);
     if (key !== embeddingSpaceKey(getEmbeddingConfig())) throw new Error('Embedding settings changed during capture');
   } catch (err) {
+    signal?.throwIfAborted();
     console.warn('[beta-background:capture] embedding request failed; retaining matching saved vectors', err);
     embeddingError = err instanceof Error ? err.message : String(err);
     embeddings = [];
   }
-  if (!shouldContinue()) return;
+  if (!shouldContinue() || signal?.aborted) return;
   const items: PageChunkRecord[] = (payload.chunks || []).map((text, idx) => ({
     text: normalizeChunk(text),
     embedding: embeddings[idx] || [],
@@ -39,9 +45,12 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
     timestamp: payload.timestamp,
     text: payload.text || '',
     manual: Boolean(payload.manual),
+    captureInfo: payload.captureInfo,
     chunks: items,
     lastEmbeddedAt: hasEmbeddings ? Date.now() : undefined
-  }, { requireProcessing: true, preserveMissingEmbeddings: true });
+  }, { requireProcessing: true, expectedCaptureId: payload.captureId ?? null, preserveMissingEmbeddings: true, signal });
+  signal.throwIfAborted();
+  if (!shouldContinue()) return;
   console.info('[beta-background:capture] stored page snapshot', {
     url: payload.url,
     chunkCount: items.length
@@ -56,4 +65,5 @@ export async function processCapturePayload(payload: CapturePayload, shouldConti
       void log('warn', 'capture summary failed', { url: payload.url, phase: 'summary', error: error instanceof Error ? error.message : String(error) }).catch(() => {});
     }
   );
+  return { embeddingError };
 }

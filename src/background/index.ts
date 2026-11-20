@@ -18,10 +18,6 @@ type SidePanelVisibilityEvent = {
   windowId?: number;
 };
 
-type WindowLike = {
-  id?: number;
-};
-
 console.info('[beta-background] Initialising service worker');
 
 initStorage();
@@ -55,50 +51,30 @@ function ensureSidePanelTracking(): void {
   }
 }
 
-async function resolveSidePanelWindowId(windowId?: number): Promise<number | undefined> {
-  if (typeof windowId === 'number' && windowId >= 0) return windowId;
-  try {
-    const current = (await chrome.windows.getCurrent()) as WindowLike;
-    return typeof current.id === 'number' && current.id >= 0 ? current.id : undefined;
-  } catch {
-    return undefined;
-  }
+function hasWindowId(windowId?: number): windowId is number {
+  return typeof windowId === 'number' && windowId >= 0;
 }
 
 async function openSidePanel(windowId?: number): Promise<void> {
-  if (!chrome.sidePanel) return;
+  if (!chrome.sidePanel || !hasWindowId(windowId)) return;
   ensureSidePanelTracking();
-  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
-  const targetWindow =
-    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
-  await chrome.sidePanel.open({ windowId: targetWindow });
-  if (typeof resolvedWindowId === 'number') {
-    openPanelWindows.add(resolvedWindowId);
-  }
+  await chrome.sidePanel.open({ windowId });
+  openPanelWindows.add(windowId);
 }
 
-async function closeSidePanel(windowId?: number): Promise<void> {
+async function closeSidePanel(windowId: number): Promise<void> {
   if (!chrome.sidePanel) return;
   ensureSidePanelTracking();
-  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
-  const targetWindow =
-    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
-  await chrome.sidePanel.close({ windowId: targetWindow });
-  if (typeof resolvedWindowId === 'number') {
-    openPanelWindows.delete(resolvedWindowId);
-  }
+  await chrome.sidePanel.close({ windowId });
+  openPanelWindows.delete(windowId);
 }
 
 async function toggleSidePanel(windowId?: number): Promise<void> {
-  if (!chrome.sidePanel) return;
-  ensureSidePanelTracking();
-  const resolvedWindowId = await resolveSidePanelWindowId(windowId);
-  const trackingWindowId =
-    typeof resolvedWindowId === 'number' ? resolvedWindowId : chrome.windows.WINDOW_ID_CURRENT;
-  if (typeof resolvedWindowId === 'number' && openPanelWindows.has(trackingWindowId)) {
-    await closeSidePanel(resolvedWindowId);
+  if (!hasWindowId(windowId)) return;
+  if (openPanelWindows.has(windowId)) {
+    await closeSidePanel(windowId);
   } else {
-    await openSidePanel(resolvedWindowId);
+    await openSidePanel(windowId);
   }
 }
 
@@ -124,8 +100,7 @@ function setupContextMenus(): void {
   chrome.contextMenus.onClicked.addListener(async (info: ContextMenuClickInfo, tab: TabLike | undefined) => {
     if (info.menuItemId === 'wr_open_panel') {
       try {
-        const windowId = tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT;
-        await openSidePanel(windowId);
+        await openSidePanel(tab?.windowId);
       } catch (err) {
         console.warn('[beta-background] failed to open side panel', err);
       }
@@ -152,18 +127,15 @@ function setupContextMenus(): void {
 
 function setupCommands(): void {
   if (!chrome.commands) return;
-  chrome.commands.onCommand.addListener(async (command: string) => {
+  chrome.commands.onCommand.addListener(async (command: string, tab?: TabLike) => {
     if (command === 'open-side-panel') {
       try {
-        const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-        const windowId = tab?.windowId ?? chrome.windows.WINDOW_ID_CURRENT;
-        await toggleSidePanel(windowId);
+        await toggleSidePanel(tab?.windowId);
       } catch (err) {
         console.warn('[beta-background] command open-side-panel failed', err);
       }
     }
     if (command === 'capture-this-page') {
-      const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
       await sendForceCaptureToTab(tab?.id);
     }
   });

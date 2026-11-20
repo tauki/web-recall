@@ -19,7 +19,7 @@ async function service(session, list) {
   return loadSource('src/background/manage/recents.ts', '', { '../storage/manager': { storageManager: { listRecentPageSummaries: async () => ({ pages: await list(), nextCursor: null }) } } }, { chrome: { storage: { session } } });
 }
 
-async function panel(session, loadRecents, { visible = true, settings, observe, local = {} } = {}) {
+async function panel(session, loadRecents, { visible = true, settings, observe, local = {}, handle = () => ({}) } = {}) {
   const dom = new JSDOM('<div id="app-root"></div>', { url: 'https://extension.test/' });
   const { window } = dom;
   for (const [key, value] of Object.entries(local)) window.localStorage.setItem(key, value);
@@ -35,7 +35,7 @@ async function panel(session, loadRecents, { visible = true, settings, observe, 
     sendMessage(message, done) {
       requests.push(message.type);
       messages.push(message);
-      const response = message.type === 'GET_SETTINGS' ? (settings || { settings: { theme: 'light', captureSetupComplete: true } }) : message.type === 'GET_RECENT_PAGES' ? Promise.resolve().then(() => loadRecents(message)).then(result => Array.isArray(result) ? { pages: result, nextCursor: null } : result) : {};
+      const response = message.type === 'GET_SETTINGS' ? (settings || { settings: { theme: 'light', captureSetupComplete: true } }) : message.type === 'GET_RECENT_PAGES' ? Promise.resolve().then(() => loadRecents(message)).then(result => Array.isArray(result) ? { pages: result, nextCursor: null } : result) : handle(message);
       Promise.resolve(response).then(done, error => done({ error: error.message }));
     }
   } };
@@ -49,6 +49,21 @@ async function panel(session, loadRecents, { visible = true, settings, observe, 
     close() { window.dispatchEvent(new window.Event('pagehide')); window.close(); }
   };
 }
+
+test('closing the sidepanel cancels its in-flight search with the current request identity', async t => {
+  const pending = deferred();
+  const fixture = await panel(sessionFixture(), async () => [first], {
+    handle: message => message.type === 'SEARCH_QUERY' ? pending.promise : {}
+  });
+  t.after(() => { pending.resolve({ results: [] }); fixture.window.close(); });
+  fixture.q('#beta-search-input').value = 'saved page';
+  fixture.q('#beta-search-filter-form').requestSubmit();
+  const active = fixture.messages.find(message => message.type === 'SEARCH_QUERY');
+  assert.ok(active?.requestId, 'Search is in flight when the panel closes');
+  assert.ok(!fixture.requests.includes('CANCEL_SEARCH'));
+  fixture.close();
+  assert.deepEqual(fixture.messages.filter(message => message.type === 'CANCEL_SEARCH').map(message => message.requestId), [active.requestId]);
+});
 
 test('a panel created hidden fetches on becoming visible without waiting for its polling interval', async t => {
   const fixture = await panel(sessionFixture(), async () => [first], { visible: false }); t.after(fixture.close);
@@ -247,9 +262,9 @@ test('explicit deletion and restore invalidate the snapshot before their success
   const api = await service(session, async () => records);
   const manage = await loadSource('src/background/manage/index.ts', '', {
     './recents': api,
-    '../capture/index': { cancelCaptureJobs: async () => {} },
+    '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) },
-    '../storage/manager': { storageManager: { deletePages: async () => { records = []; return 1; }, savePageRecord: async record => { records = [{ url: record.url, title: record.title, timestamp: record.timestamp }]; } } },
+    '../storage/manager': { storageManager: { deletePages: async () => { records = []; return { deleted: 1, removedVersions: [] }; }, savePageRecord: async record => { records = [{ url: record.url, title: record.title, timestamp: record.timestamp }]; } } },
     '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
   });
   await api.getRecentPages(); await manage.deleteManagePages([first.url]);

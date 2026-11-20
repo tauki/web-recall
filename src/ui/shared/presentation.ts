@@ -8,10 +8,25 @@ const paths: Record<AppView, string> = {
 
 export function appUrl(view: AppView): string { return chrome.runtime.getURL(`dist/beta/ui/${paths[view]}`); }
 
-export function navigateTo(view: AppView, url?: string): boolean {
+export function navigateTo(view: AppView, url?: string, mode?: 'history'): boolean {
   if (!document.querySelector('#beta-view-search')) return false;
-  window.dispatchEvent(new window.CustomEvent('wr-navigate', { detail: { view, url } }));
+  window.dispatchEvent(new window.CustomEvent('wr-navigate', { detail: { view, url, mode } }));
   return true;
+}
+
+export function createStorageSettingsLink(detail: 'storage' | 'restore', label: string): HTMLAnchorElement {
+  const link = document.createElement('a');
+  link.className = 'text-button';
+  link.href = `${appUrl('settings')}-${detail}`;
+  link.textContent = label;
+  link.addEventListener('click', event => {
+    if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey && navigateTo('settings', detail)) event.preventDefault();
+  });
+  return link;
+}
+
+export function isMissingLibraryError(message: string): boolean {
+  return /(?:saved|previously opened local) library(?: file)? is missing\b/iu.test(message);
 }
 
 export function icon(name: string): HTMLElement {
@@ -94,9 +109,27 @@ export function installSharedStyles(): void {
     .beta-sidepanel-shell .panel-menu { top:40px; }
     .wr-utility-navigation { display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:36px; }
     .wr-empty-memory { padding:28px 6px; }
+    .search-filters { margin-top:10px;color:var(--muted);font-size:12px; }
+    .search-filters > summary { cursor:pointer;width:fit-content; }
+    .search-filters form { padding-top:10px;display:grid;gap:10px;color:var(--ink); }
+    .search-filters input { min-width:0;max-width:65%; }
+    .content-entry-body[data-reading] > :not(.saved-reader-host) { display:none; }
+    .saved-reader-host { min-width:0; }
+    .saved-reader-text { white-space:pre-wrap;overflow-wrap:anywhere;max-width:75ch;line-height:1.65; }
+    .saved-reader-text mark { color:var(--ink);background:var(--mark); }
+    .saved-reader-history { margin:12px 0; }
+    .saved-reader-history > div { display:grid;gap:10px;padding-top:10px; }
+    .saved-reader-history select { min-width:0;max-width:75%; }
+    .saved-reader-history .field-note,.capture-notice { color:var(--ink); }
+    .capture-notice { font-size:12px;line-height:1.6; }
+    .saved-version-confirm { padding:10px 0; }
+    .saved-reader-live { display:inline-block;margin-top:20px; }
     .wr-empty-memory > p { margin:0 0 6px;font-size:14px; }
     .wr-empty-memory > .wr-help { font-size:12px; }
     .wr-empty-memory .button-row { margin-top:18px; }
+    .wr-recall-guide { padding:0 0 20px; }
+    .wr-recall-guide h2 { font-size:14px;font-weight:500;margin:0 0 6px; }
+    .wr-recall-guide .wr-help { margin:0 0 12px;max-width:65ch; }
     .wr-icon { display:inline-block;vertical-align:middle;width:16px;height:16px;flex-shrink:0;background:currentColor;mask-size:contain;mask-position:center;mask-repeat:no-repeat; }
     ${names.map(name => `.icon-${name}{mask-image:url('${assets}ui/${name}.svg');}`).join('\n')}
     .browser-header .wr-icon { width:16px;height:16px; }
@@ -194,10 +227,27 @@ export function installSharedStyles(): void {
     #beta-capture-setup h2 { font-size:14px; }
     #beta-queue-section { font-size:12px;margin-top:14px; }
     #beta-queue-section > summary { color:var(--muted);padding:8px 0; }
+    #beta-capture-status { color:var(--ink); }
     #beta-capture-status ul { padding:0;list-style:none; }
     #beta-capture-status li { display:flex;justify-content:space-between;gap:10px;padding:8px 0; }
+    #beta-capture-status li > span { flex:1;min-width:0;overflow-wrap:anywhere; }
+    #beta-capture-status li > button { flex:none;align-self:start;white-space:nowrap; }
     .wr-row-progress { display:block;font-size:11px;margin:6px 0; }
     .manage-actions { display:flex;gap:12px;align-items:center; }
+    .manage-title { display:flex;justify-content:space-between;align-items:baseline;gap:12px; }
+    .forget-scope-form { display:grid;gap:12px;padding:12px 0; }
+    .forget-scope-form input { min-width:0;max-width:65%; }
+    .forget-scope-form .field-note { color:var(--ink); }
+    .wr-storage-block + .wr-storage-block { border-top:1px solid var(--preview-line);margin-top:14px;padding-top:14px; }
+    .wr-storage-block h2 { font-size:13px;line-height:19px;font-weight:550;margin:0 0 8px; }
+    .wr-storage-row { display:flex;justify-content:space-between;align-items:center;gap:12px; }
+    .wr-storage-row .field-note { margin:0;overflow-wrap:anywhere; }
+    .wr-storage-row .text-button { flex-shrink:0;min-height:30px; }
+    #settings-storage :is(.wr-storage-row, .button-row, .backup-key-entry) button { margin-top:0; }
+    #settings-storage .status-line:empty { margin:0; }
+    #settings-storage .beta-toggle input { margin:0; }
+    #manage-folder-backup { margin-top:14px; }
+    .wr-folder-options .compact-setting { margin:0 0 8px; }
     #manage-import-label { position:relative;overflow:hidden; }
     #manage-import { position:absolute;inset:0;opacity:0;width:100%;height:100%;cursor:pointer; }
     #manage-import-label:focus-within { outline:2px solid var(--violet);outline-offset:3px; }

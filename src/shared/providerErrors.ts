@@ -1,3 +1,10 @@
+export class ChatDisabledError extends Error {
+  constructor() {
+    super('Chat is disabled. Choose a chat provider in Settings → Models.');
+    this.name = 'ChatDisabledError';
+  }
+}
+
 export class AppleSafetyBlockError extends Error {
   readonly code = 'apple_safety_block';
 

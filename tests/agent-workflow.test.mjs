@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource, chromeFixture, plain } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, scanFixturePages } from './helpers.mjs';
 
 const overview = { url: 'https://example.test/release', title: 'Release overview', timestamp: 1, text: 'Look in the release approvals for the date.', chunks: [{ text: 'Look in the release approvals for the date.' }] };
 const details = { url: 'https://example.test/approvals', title: 'Release approvals', timestamp: 2, text: 'Approvals\nThe Cedar launch is May 19.', chunks: [{ text: 'Approvals' }, { text: 'The Cedar launch is May 19.' }] };
@@ -87,7 +87,7 @@ test('Ollama compacts an overfull tool transcript and continues retrieval withou
 test('agent retrieval can page beyond the interactive search display limit', async () => {
   const pages = Array.from({ length: 65 }, (_, index) => ({ url: `https://example.test/page-${index}`, title: `Needle ${index}`, text: 'Needle evidence', timestamp: 1, chunks: [] }));
   const mod = await loadSource('src/background/search/index.ts', '', {
-    '../storage/manager': { storageManager: { listAllPages: async () => pages, getPageRecord: async url => pages.find(page => page.url === url) } },
+    '../storage/manager': { storageManager: { scanSearchPages: scanFixturePages(pages), getPageRecord: async url => pages.find(page => page.url === url) } },
     '../embeddings/index': { computeEmbeddingsForQueries: async () => [[1, 0]], getEmbeddingConfig: () => ({ provider: 'ollama', baseUrl: 'http://localhost:11434', model: 'fixture' }) },
     '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async message => message.type === 'OFFSCREEN_TOP_PAGES' ? { pages: pages.map(page => ({ url: page.url })) } : { candidates: pages.map((page, index) => ({ ...page, snippet: page.text, score: 1 - index / 100 })) } },
     '../settings/index': { getSettings: async () => ({ queryRewrite: false }) },
