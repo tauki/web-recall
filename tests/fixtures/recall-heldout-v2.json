@@ -1,0 +1,203 @@
+[
+  {
+    "id": "v2-title-01",
+    "kind": "exact-title",
+    "query": "When query strings and fragments identify different pages",
+    "expected": ["https://docs.benchmark.test/urls"]
+  },
+  {
+    "id": "v2-title-02",
+    "kind": "exact-title",
+    "query": "Finding a remembered passage without a model",
+    "expected": ["https://reading.benchmark.test/search"]
+  },
+  {
+    "id": "v2-title-03",
+    "kind": "exact-title",
+    "query": "Load important images first and defer the rest",
+    "expected": ["https://docs.benchmark.test/lazy-images"],
+    "cold": true
+  },
+  {
+    "id": "v2-title-04",
+    "kind": "exact-title",
+    "query": "Why a heat pump moves more heat than its electrical input",
+    "expected": ["https://reading.benchmark.test/heat-pump"]
+  },
+  {
+    "id": "v2-phrase-01",
+    "kind": "exact-phrase",
+    "query": "\"Early bulbs and later herbs serve different parts of the calendar\"",
+    "expected": ["https://reading.benchmark.test/pollinators"],
+    "cold": true
+  },
+  {
+    "id": "v2-phrase-02",
+    "kind": "exact-phrase",
+    "query": "\"Letting the covered pot rest changes the result without additional active boiling\"",
+    "expected": ["https://docs.benchmark.test/rice"]
+  },
+  {
+    "id": "v2-phrase-03",
+    "kind": "exact-phrase",
+    "query": "\"Switching models keeps existing page vectors until a deliberate re-embedding request replaces them\"",
+    "expected": ["https://docs.benchmark.test/downloads"]
+  },
+  {
+    "id": "v2-phrase-04",
+    "kind": "exact-phrase",
+    "query": "\"Adding a site to an exclusion list does not delete earlier captures\"",
+    "expected": ["https://docs.benchmark.test/capture-policy"]
+  },
+  {
+    "id": "v2-url-01",
+    "kind": "url",
+    "query": "https://docs.benchmark.test/ollama",
+    "expected": ["https://docs.benchmark.test/ollama"]
+  },
+  {
+    "id": "v2-url-02",
+    "kind": "url",
+    "query": "https://docs.benchmark.test/release",
+    "expected": ["https://docs.benchmark.test/release"]
+  },
+  {
+    "id": "v2-url-03",
+    "kind": "url",
+    "query": "reading.benchmark.test/cycling",
+    "expected": ["https://reading.benchmark.test/cycling"]
+  },
+  {
+    "id": "v2-url-04",
+    "kind": "url",
+    "query": "forum.benchmark.test/responsive",
+    "expected": ["https://forum.benchmark.test/responsive"],
+    "cold": true
+  },
+  {
+    "id": "v2-vague-01",
+    "kind": "vague",
+    "query": "the checklist about uploading a ZIP rather than a locally signed CRX to the Chrome Web Store",
+    "expected": ["https://docs.benchmark.test/release"]
+  },
+  {
+    "id": "v2-vague-02",
+    "kind": "vague",
+    "query": "the balcony planting plan that kept flowers available for insects through the whole season",
+    "expected": ["https://reading.benchmark.test/pollinators"]
+  },
+  {
+    "id": "v2-vague-03",
+    "kind": "vague",
+    "query": "the bike ride where they reversed the loop so the strongest afternoon headwind was not on the way home",
+    "expected": ["https://reading.benchmark.test/cycling"],
+    "cold": true
+  },
+  {
+    "id": "v2-vague-04",
+    "kind": "vague",
+    "query": "that loom lesson where the woven edge wandered even though the decorative pattern was counted correctly",
+    "expected": ["https://docs.benchmark.test/weaving"]
+  },
+  {
+    "id": "v2-vague-05",
+    "kind": "vague",
+    "query": "the setup note about an extension getting a 403 from a local model server that was already running",
+    "expected": ["https://docs.benchmark.test/ollama"],
+    "cold": true
+  },
+  {
+    "id": "v2-vague-06",
+    "kind": "vague",
+    "query": "the explanation of how a heat pump can deliver more heat than the electricity it uses",
+    "expected": ["https://reading.benchmark.test/heat-pump"]
+  },
+  {
+    "id": "v2-old-01",
+    "kind": "old-evidence",
+    "query": "An Alpine rail notebook: lakeside transfer",
+    "expected": ["https://trips.benchmark.test/notebook?journey=alpine"],
+    "version": "earlier",
+    "cold": true
+  },
+  {
+    "id": "v2-filter-01",
+    "kind": "filter",
+    "query": "rats and feral cats threatening eggs and hatchlings",
+    "expected": ["https://reading.benchmark.test/tortoises"],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2020-11-01",
+      "through": "2020-11-30"
+    },
+    "cold": true
+  },
+  {
+    "id": "v2-filter-02",
+    "kind": "filter",
+    "query": "the room airflow notes comparing a small opening with a brief airing period",
+    "expected": ["https://reading.benchmark.test/ventilation"],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2023-10-01",
+      "through": "2023-10-31"
+    },
+    "cold": true
+  },
+  {
+    "id": "v2-filter-03",
+    "kind": "filter",
+    "query": "stopping a late embedding worker from replacing a newer visit",
+    "expected": ["https://docs.benchmark.test/transactions"],
+    "filters": {
+      "domain": "docs.benchmark.test",
+      "from": "2021-09-01",
+      "through": "2021-10-01"
+    }
+  },
+  {
+    "id": "v2-filter-04",
+    "kind": "filter",
+    "query": "direct train with an offline route copy and a fallback stop",
+    "expected": ["https://trips.benchmark.test/notebook?journey=alpine"],
+    "version": "current",
+    "filters": {
+      "domain": "trips.benchmark.test",
+      "from": "2024-09-01",
+      "through": "2024-09-30"
+    }
+  },
+  {
+    "id": "v2-filter-05",
+    "kind": "filter",
+    "query": "checking every backup frame before committing a whole restored page",
+    "expected": ["https://docs.benchmark.test/backup"],
+    "filters": {
+      "domain": "docs.benchmark.test",
+      "from": "2025-06-01",
+      "through": "2025-06-30"
+    }
+  },
+  {
+    "id": "v2-empty-01",
+    "kind": "empty",
+    "query": "\"Opening the lid repeatedly makes the comparison less useful\"",
+    "expected": [],
+    "filters": {
+      "domain": "docs.benchmark.test",
+      "from": "2024-01-01",
+      "through": "2024-12-31"
+    }
+  },
+  {
+    "id": "v2-empty-02",
+    "kind": "empty",
+    "query": "\"moving thermal energy between places\"",
+    "expected": [],
+    "filters": {
+      "domain": "forum.benchmark.test",
+      "from": "2024-01-01",
+      "through": "2024-12-31"
+    }
+  }
+]

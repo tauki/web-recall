@@ -15,8 +15,9 @@ analytics SDKs or remote usage telemetry.
   preferences. Questions and answers are processed for the conversations you
   initiate; relevant context is supplied to your selected model provider.
 
-Page data primarily lives in IndexedDB. Settings and migration/recovery data
-may also live in `chrome.storage.local`. Automatic capture starts paused; you
+Saved capture data lives in private browser storage (SQLite in 0.3.0; IndexedDB
+in earlier versions). Diagnostic logs use IndexedDB, and preferences and
+migration status use `chrome.storage.local`. Automatic capture starts paused; you
 can save pages manually or enable capture for the sites you choose. Domain
 allowlists/blocklists also apply to manual capture. A saved page or question
 can contain sensitive information, so choose capture scope and providers with
@@ -81,15 +82,19 @@ provided to your selected local or explicitly enabled remote inference provider.
 
 You can pause automatic capture, configure domain rules, delete saved pages in
 Memory Manager, manage browser-model downloads, clear conversations, configure
-local logging, and export/import library backups. Exported files stay wherever
-you save them; Web Recall does not automatically upload them. You are responsible
-for protecting or deleting those files.
+local logging, and export or restore library backups. For encrypted backups,
+Chrome encrypts the saved library and its history before writing the file.
+If you enable automatic folder backups, the Mac companion receives only the
+encrypted archive and metadata needed to save and rotate it. The recovery key
+is not written to the backup or sent to the companion. Web Recall does not
+upload backups or exports. Other software may sync the folder you choose.
+Manual unencrypted backups and Markdown/JSON exports are not encrypted.
 
-Older databases/settings may be retained locally during an upgrade to protect
-against migration loss. Deleting a page from the current library is not a secure
-erase of historical recovery copies or backups. To remove all extension-owned
-data, remove its Chrome profile storage or uninstall the extension; separately
-delete exported backups and the optional companion if you no longer need them.
+During an upgrade, Web Recall keeps the old saved records until it has verified
+the new library. Deleting a page does not delete separately exported backups or
+securely erase disk remnants. To remove extension-owned data from Chrome, clear
+its profile storage or uninstall the extension; separately delete exported
+backups and the optional companion if you no longer need them.
 
 We do not sell your data, use it for advertising, or transfer it for purposes
 unrelated to the browsing-memory features you request. Any information you
@@ -103,7 +108,8 @@ page content, credentials or diagnostic logs without reviewing them first.
   pages for capture, track navigation and inject the bundled capture script.
 - `contextMenus`: provides right-click capture actions.
 - `storage` and `unlimitedStorage`: retain preferences, saved pages and models.
-- `offscreen`: runs browser embedding/retrieval tasks outside the service worker.
+- `offscreen`: hosts the local saved library and browser embedding/retrieval outside the service worker.
+- `alarms`: schedules optional local backups when Chrome is running.
 - Optional `nativeMessaging`: connects the user-selected Mac companion.
 - Host permissions also enable explicitly configured model servers and requested
   browser-model downloads. Capture remains subject to your pause/domain settings

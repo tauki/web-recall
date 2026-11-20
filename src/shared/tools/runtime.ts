@@ -232,7 +232,10 @@ export class ToolsRuntime implements ToolsHandlerContext {
         if (typeof url !== 'string' || !this.allowedUrls.has(url)) continue;
         const text = row.text || row.summary || row.snippet ||
           (row.matches || row.chunks || []).map((item: { snippet?: string; preview?: string }) => item.snippet || item.preview || '').join('\n');
-        if (this.recordEvidence) row.sourceIndex = this.recordEvidence(url, String(text || ''), { timestamp: row.timestamp ?? this.getPage(url)?.timestamp, title: row.title });
+        const page = name === 'search_memory' ? undefined : this.getPage(url);
+        row.versionId = row.versionId ?? page?.versionId;
+        row.timestamp = row.timestamp ?? page?.timestamp;
+        if (this.recordEvidence) row.sourceIndex = this.recordEvidence(url, String(text || ''), { timestamp: row.timestamp, title: row.title || page?.title, versionId: row.versionId });
       }
       content = JSON.stringify(payload);
     }

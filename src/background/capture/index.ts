@@ -3,6 +3,9 @@ import type { CapturePayload, QueueItem } from './types';
 import { shouldCaptureUrl, getCachedSettingsSnapshot } from '../settings/index';
 import { markQueued, markProcessing, markFailed, markDone, getProcessingEntryByUrl, listProcessingEntries } from '../processing/index';
 import { log } from '../../shared/logger/index';
+import { matchesSearchFilters, type SearchFilters } from '../../shared/searchFilters';
+import { readCaptureInfo } from '../../shared/capture';
+import { storageManager } from '../storage/manager';
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -20,13 +23,14 @@ function normalizePayload(message: Record<string, unknown>): CapturePayload {
     text: typeof message.text === 'string' ? message.text : '',
     chunks: Array.isArray(message.chunks) ? message.chunks.map((c) => String(c)) : [],
     force: message.force === true,
-    manual: message.manual === true
+    manual: message.manual === true,
+    captureInfo: readCaptureInfo(message.captureInfo)
   };
 }
 
-const cancelHandlers = new Set<(urls: string[]) => Promise<void>>();
-export async function cancelCaptureJobs(urls: string[]): Promise<void> {
-  await Promise.all(Array.from(cancelHandlers, cancel => cancel(urls)));
+const cancelHandlers = new Set<(urls: string[], filters?: SearchFilters, captureIds?: ReadonlyMap<string, string | null>) => Promise<QueueItem[]>>();
+export async function cancelCaptureJobs(urls: string[], filters?: SearchFilters, captureIds?: ReadonlyMap<string, string | null>): Promise<QueueItem[]> {
+  return (await Promise.all(Array.from(cancelHandlers, cancel => cancel(urls, filters, captureIds)))).flat();
 }
 
 export function createCaptureQueue(processFn = processCapturePayload) {
@@ -34,13 +38,21 @@ export function createCaptureQueue(processFn = processCapturePayload) {
   const enqueuedUrls = new Set<string>();
   let currentUrl: string | null = null;
   let currentItem: QueueItem | undefined;
+  let currentController: AbortController | undefined;
   const cancelled = new WeakSet<QueueItem>();
-  cancelHandlers.add((urls) => {
+  cancelHandlers.add((urls, filters, captureIds) => {
     const targets = new Set(urls);
+    const stopped = new Set<QueueItem>();
+    const matches = (item: QueueItem): boolean => targets.has(item.url) && (!filters || matchesSearchFilters(item.payload, filters)) && (!captureIds || captureIds.has(item.url) && captureIds.get(item.url) === (item.payload.captureId ?? null));
     const cancelMaterialized = (): void => {
-      if (currentItem && targets.has(currentItem.url)) cancelled.add(currentItem);
+      if (currentItem && matches(currentItem)) {
+        cancelled.add(currentItem);
+        stopped.add(currentItem);
+        currentController?.abort();
+      }
       for (let index = queue.length - 1; index >= 0; index--) {
-        if (targets.has(queue[index]!.url)) {
+        if (matches(queue[index]!)) {
+          stopped.add(queue[index]!);
           enqueuedUrls.delete(queue[index]!.url);
           queue.splice(index, 1);
         }
@@ -48,9 +60,9 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     };
     cancelMaterialized();
     return updateQueue(async () => {
-      await ready;
+      await ensureReady();
       cancelMaterialized();
-    });
+    }).then(() => [...stopped]);
   });
   let processing = false;
   let processedCount = 0;
@@ -92,13 +104,28 @@ export function createCaptureQueue(processFn = processCapturePayload) {
         enqueuedUrls.delete(item.url);
         currentUrl = item.url;
         currentItem = item;
+        currentController = new AbortController();
         try {
           if (item.delayMs > 0) await sleep(item.delayMs);
           if (cancelled.has(item)) continue;
+          if (!await shouldCaptureUrl(item.url, { ignorePaused: true })) {
+            await updateQueue(async () => {
+              if (!cancelled.has(item) && !queue.some(entry => entry.url === item.url)) await markDone(item.url);
+            });
+            continue;
+          }
+          if (cancelled.has(item)) continue;
           if (await markProcessing(item.payload, item.attempts) === false) continue;
           if (cancelled.has(item)) continue;
-          await processFn(item.payload, () => !cancelled.has(item));
+          const result = await processFn(item.payload, () => !cancelled.has(item), currentController.signal);
           if (cancelled.has(item)) continue;
+          if (result?.embeddingError) {
+            failedCount += 1;
+            await updateQueue(async () => {
+              if (!cancelled.has(item) && !queue.some(entry => entry.url === item.url)) await markFailed(item.payload, item.attempts, result.embeddingError);
+            });
+            continue;
+          }
           processedCount += 1;
           const includeBodies = getCachedSettingsSnapshot().logFullBodies;
           await log('info', 'capture processed', {
@@ -138,12 +165,13 @@ export function createCaptureQueue(processFn = processCapturePayload) {
               await markQueued(item.payload, nextAttempt, false);
             } else {
               failedCount += 1;
-              await markFailed(item.payload, nextAttempt);
+              await markFailed(item.payload, nextAttempt, err instanceof Error ? err.message : String(err));
             }
           });
         } finally {
           currentUrl = null;
           currentItem = undefined;
+          currentController = undefined;
           logQueueState('after-iteration', { lastProcessed: item.url });
         }
       }
@@ -152,24 +180,40 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     }
   }
 
-  const ready = (async () => {
+  let readiness: Promise<void> | undefined;
+  async function recoverQueue(): Promise<void> {
+    const recovered: QueueItem[] = [];
     const entries = await listProcessingEntries();
     for (const entry of entries) {
       if (!entry.payload || (entry.status !== 'queued' && entry.status !== 'processing')) continue;
-      queue.push({ url: entry.url, payload: entry.payload, attempts: entry.attempts, delayMs: 0 });
-      enqueuedUrls.add(entry.url);
+      if (!await shouldCaptureUrl(entry.url, { ignorePaused: true })) {
+        await markDone(entry.url);
+        continue;
+      }
+      if (await markQueued(entry.payload, entry.attempts, false) === false) continue;
+      recovered.push({ url: entry.url, payload: entry.payload, attempts: entry.attempts, delayMs: 0 });
     }
-  })();
-  void ready.then(runQueue).catch((err) => console.error('[capture] recovery failed', err));
+    for (const item of recovered) { queue.push(item); enqueuedUrls.add(item.url); }
+  }
+  function ensureReady(): Promise<void> {
+    return readiness ??= recoverQueue().catch(error => { readiness = undefined; throw error; });
+  }
+  void ensureReady().then(runQueue).catch((err) => console.error('[capture] recovery failed', err));
 
   function enqueue(payload: CapturePayload, delayMs = 0): Promise<void> {
     return updateQueue(() => persistAndEnqueue(payload, delayMs));
   }
 
-  async function persistAndEnqueue(payload: CapturePayload, delayMs: number): Promise<void> {
-    await ready;
+  async function persistAndEnqueue(payload: CapturePayload, delayMs: number, retryOf?: string | null): Promise<void> {
+    await ensureReady();
     if (!payload.url) throw new Error('Capture URL is required');
-    await markQueued(payload, 0);
+    if (!await shouldCaptureUrl(payload.url, { ignorePaused: retryOf !== undefined || payload.manual })) throw new Error('Capture blocked by your capture rules.');
+    payload = { ...payload, captureId: crypto.randomUUID() };
+    await markQueued(payload, 0, true, retryOf);
+    if (currentItem?.url === payload.url) {
+      cancelled.add(currentItem);
+      currentController?.abort();
+    }
     const existing = queue.find((item) => item.url === payload.url);
     if (existing) {
       existing.payload = payload;
@@ -183,24 +227,17 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     logQueueState('enqueue');
   }
 
-  async function requeueProcessing(urls: string[]): Promise<{ retried: number }> {
+  async function requeueProcessing(targets: Array<{ url: string; captureId?: string | null }>): Promise<{ retried: number }> {
     let retried = 0;
-    for (const url of urls) {
+    for (const target of targets) {
       try {
         await updateQueue(async () => {
-          const entry = await getProcessingEntryByUrl(url);
-          if (entry?.payload) {
-            await persistAndEnqueue({
-              url: entry.payload.url,
-              title: entry.payload.title,
-              timestamp: entry.payload.timestamp,
-              chunks: entry.payload.chunks,
-              text: entry.payload.text,
-              force: entry.payload.force,
-              manual: entry.payload.manual
-            }, 0);
-            retried += 1;
-          }
+          const entry = await getProcessingEntryByUrl(target.url);
+          if (entry?.status !== 'failed' || !entry.payload) return;
+          const captureId = entry.payload.captureId ?? null;
+          if (target.captureId !== undefined && captureId !== target.captureId) return;
+          await persistAndEnqueue(entry.payload, 0, captureId);
+          retried += 1;
         });
       } catch (err) {
         console.warn('[beta-background:capture] requeue failed', err);
@@ -213,8 +250,8 @@ export function createCaptureQueue(processFn = processCapturePayload) {
     chrome.runtime.onMessage.addListener((message: Record<string, unknown>, sender: unknown, sendResponse?: (response?: unknown) => void) => {
       if (!message || typeof message !== 'object') return false;
       if (message.type === 'SAVE_PAGE') {
-        const payload = normalizePayload(message);
         void updateQueue(async () => {
+          const payload = normalizePayload(message);
           const allow = await shouldCaptureUrl(payload.url, { ignorePaused: payload.manual });
           if (!allow) throw new Error('Capture blocked by your capture rules.');
           await persistAndEnqueue(payload, 0);
@@ -238,7 +275,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       if (message.type === 'RETRY_PROCESSING') {
         if (typeof sendResponse === 'function') {
           const targetUrl = typeof message.url === 'string' ? message.url : '';
-          requeueProcessing(targetUrl ? [targetUrl] : [])
+          requeueProcessing(targetUrl ? [{ url: targetUrl }] : [])
             .then((result) => sendResponse({ retried: result.retried }))
             .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
           return true;
@@ -247,9 +284,8 @@ export function createCaptureQueue(processFn = processCapturePayload) {
       }
       if (message.type === 'RETRY_FAILED_CAPTURES') {
         if (typeof sendResponse === 'function') {
-          listProcessingEntries()
-            .then((entries) => entries.filter((entry) => entry.status === 'failed').map((entry) => entry.url))
-            .then((urls) => requeueProcessing(urls))
+          storageManager.listFailedProcessingTargets()
+            .then(requeueProcessing)
             .then((result) => sendResponse({ retried: result.retried }))
             .catch((err) => sendResponse({ error: err instanceof Error ? err.message : String(err) }));
           return true;
@@ -262,7 +298,7 @@ export function createCaptureQueue(processFn = processCapturePayload) {
 
   return {
     enqueue,
-    ready,
+    get ready() { return ensureReady(); },
     bindRuntimeListener,
     isProcessing: () => processing,
     peekQueue: (): readonly QueueItem[] => queue

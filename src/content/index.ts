@@ -1,3 +1,5 @@
+import { extractPage } from './extraction';
+
 const CHUNK_MAX_WORDS = 512;
 const AUTO_CAPTURE_IDLE_MS = 1500;
 const AUTO_CAPTURE_MAX_WAIT_MS = 20_000;
@@ -9,41 +11,6 @@ function isTopFrame(): boolean {
   } catch {
     return false;
   }
-}
-
-function extractPageText(): string {
-  let root: HTMLElement | null;
-  try {
-    root = (document.querySelector('article') || document.querySelector('main') || document.body) as HTMLElement | null;
-  } catch {
-    root = document.body;
-  }
-  if (!root) return '';
-  for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
-    const style = getComputedStyle(ancestor);
-    if (style.display === 'none' || style.contentVisibility === 'hidden') return '';
-    if (ancestor instanceof HTMLDetailsElement && !ancestor.open && !ancestor.querySelector('summary')?.contains(root)) return '';
-  }
-  function readVisibleText(node: Node): string {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const parent = node.parentElement;
-      if (!parent) return '';
-      const style = getComputedStyle(parent);
-      if (style.visibility !== 'visible') return '';
-      const text = node.textContent || '';
-      return /^(pre|break-spaces)/.test(style.whiteSpace) ? text : text.replace(/\s+/g, ' ');
-    }
-    if (!(node instanceof Element) || node.matches('script, style, noscript, iframe, svg, nav, footer, aside')) return '';
-    const style = getComputedStyle(node);
-    if (style.display === 'none' || style.contentVisibility === 'hidden') return '';
-    if (node.tagName === 'BR') return style.visibility === 'visible' ? '\n' : '';
-    const children = node instanceof HTMLDetailsElement && !node.open
-      ? Array.from(node.children).filter(child => child.tagName === 'SUMMARY').slice(0, 1)
-      : Array.from(node.childNodes);
-    const text = children.map(readVisibleText).join('');
-    return /^(inline|contents)/.test(style.display) ? text : `\n${text}\n`;
-  }
-  return readVisibleText(root).replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function chunkText(text: string, maxWords = CHUNK_MAX_WORDS): string[] {
@@ -64,60 +31,73 @@ function chunkText(text: string, maxWords = CHUNK_MAX_WORDS): string[] {
   return chunks;
 }
 
-function sendPageToBackground({ force = false }: { force?: boolean } = {}): void {
-  const proceed = (): void => {
-    const text = extractPageText();
-    if (!text) return;
-    const chunks = chunkText(text);
-    const message = {
-      type: 'SAVE_PAGE',
-      url: location.href,
-      title: document.title || location.href,
-      timestamp: Date.now(),
-      chunks,
-      text,
-      force,
-      manual: force
-    };
-    try {
-      chrome.runtime.sendMessage(message, () => {});
-    } catch (err) {
-      console.warn('[beta-content] failed to send capture payload', err);
-    }
-  };
+function isForeground(): boolean {
+  return document.visibilityState === 'visible' && document.hasFocus();
+}
 
-  if (force) {
-    proceed();
-    return;
-  }
-
-  try {
-    chrome.runtime.sendMessage({ type: 'SHOULD_CAPTURE', url: location.href }, (resp: { allow?: boolean } | undefined) => {
-      if (resp && resp.allow === false) return;
-      proceed();
+async function sendPageToBackground({ force = false, isCurrent = () => true }: { force?: boolean; isCurrent?: () => boolean } = {}): Promise<boolean> {
+  const url = location.href;
+  if (!force) {
+    if (!isForeground() || !isCurrent()) return false;
+    const allow = await new Promise<boolean>((resolve) => {
+      chrome.runtime.sendMessage({ type: 'SHOULD_CAPTURE', url }, (response: { allow?: boolean } | undefined) => {
+        resolve(!chrome.runtime.lastError && response?.allow === true);
+      });
     });
-  } catch (err) {
-    console.warn('[beta-content] capture eligibility failed, skipping', err);
+    if (!allow || !isForeground() || !isCurrent() || location.href !== url) return false;
   }
+  const { text, captureInfo } = extractPage(document);
+  if (!text) return false;
+  await new Promise<void>((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'SAVE_PAGE', url, title: document.title || url, timestamp: Date.now(), chunks: chunkText(text), text, captureInfo, force, manual: force }, (response?: { status?: string; error?: string }) => {
+      const error = chrome.runtime.lastError?.message || response?.error;
+      if (error) reject(new Error(error));
+      else if (response?.status === 'queued' || response?.status === 'saved') resolve();
+      else reject(new Error('Capture was not confirmed. Try capturing the page again.'));
+    });
+  });
+  return true;
 }
 
 function scheduleAutoCapture(): () => void {
-  let fired = false;
+  let stopped = false, attempted = false, generation = 0;
+  let cycleUrl = location.href;
   let idleTimer: number | null = null;
+  let maxTimer: number | null = null;
+
+  const clearTimers = (): void => {
+    if (idleTimer !== null) window.clearTimeout(idleTimer);
+    if (maxTimer !== null) window.clearTimeout(maxTimer);
+    idleTimer = null; maxTimer = null;
+  };
+  const cleanup = (): void => {
+    stopped = true; generation++; clearTimers(); observer.disconnect();
+    document.removeEventListener('visibilitychange', foregroundChanged);
+    window.removeEventListener('focus', foregroundChanged);
+    window.removeEventListener('blur', foregroundChanged);
+  };
 
   const triggerCapture = (): void => {
-    if (fired) return;
-    fired = true;
-    observer.disconnect();
-    if (idleTimer) {
-      window.clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-    sendPageToBackground();
+    if (stopped || attempted || !isForeground()) return;
+    if (location.href !== cycleUrl) { foregroundChanged(); return; }
+    attempted = true; clearTimers();
+    const revision = generation;
+    const retryLater = (): void => {
+      if (stopped || revision !== generation) return;
+      if (location.href !== cycleUrl) { foregroundChanged(); return; }
+      attempted = false;
+      maxTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_MAX_WAIT_MS);
+    };
+    void sendPageToBackground({ isCurrent: () => !stopped && revision === generation && location.href === cycleUrl }).then(saved => {
+      if (stopped || revision !== generation) return;
+      if (saved) cleanup();
+      else retryLater();
+    }).catch(error => { retryLater(); console.warn('[beta-content] automatic capture unavailable', error); });
   };
 
   const observer = new MutationObserver(() => {
-    if (idleTimer) window.clearTimeout(idleTimer);
+    if (stopped || attempted || !isForeground()) return;
+    if (idleTimer !== null) window.clearTimeout(idleTimer);
     idleTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_IDLE_MS);
   });
 
@@ -125,14 +105,19 @@ function scheduleAutoCapture(): () => void {
     observer.observe(document.body, { childList: true, subtree: true, characterData: true });
   }
 
-  idleTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_IDLE_MS);
-  const maxTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_MAX_WAIT_MS);
-
-  return () => {
-    observer.disconnect();
-    if (idleTimer) window.clearTimeout(idleTimer);
-    window.clearTimeout(maxTimer);
-  };
+  function foregroundChanged(): void {
+    if (stopped) return;
+    generation++; attempted = false; clearTimers();
+    cycleUrl = location.href;
+    if (!isForeground()) return;
+    idleTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_IDLE_MS);
+    maxTimer = window.setTimeout(triggerCapture, AUTO_CAPTURE_MAX_WAIT_MS);
+  }
+  document.addEventListener('visibilitychange', foregroundChanged);
+  window.addEventListener('focus', foregroundChanged);
+  window.addEventListener('blur', foregroundChanged);
+  foregroundChanged();
+  return cleanup;
 }
 
 function watchNavigation(onNavigate: () => void): () => void {
@@ -204,13 +189,10 @@ function init(): void {
   chrome.runtime.onMessage.addListener((
     message: Record<string, unknown>,
     _sender: unknown,
-    sendResponse: (response?: { ok?: boolean }) => void
+    sendResponse: (response?: { ok?: boolean; error?: string }) => void
   ) => {
     if (message?.type === 'FORCE_CAPTURE') {
-      sendPageToBackground({ force: true });
-      if (typeof sendResponse === 'function') {
-        sendResponse({ ok: true });
-      }
+      void sendPageToBackground({ force: true }).then(saved => sendResponse(saved ? { ok: true } : { error: 'No readable page text was found.' }), error => sendResponse({ error: error instanceof Error ? error.message : String(error) }));
       return true;
     }
     return false;

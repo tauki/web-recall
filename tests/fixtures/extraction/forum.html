@@ -1,0 +1,13 @@
+<!doctype html>
+<title>Durable queue discussion</title>
+<nav>Noise forum categories</nav>
+<main>
+  <h1>How do we drain a queue?</h1>
+  <article><header><h2>Original question</h2></header><p>Can an interrupted worker resume its pending jobs?</p><button>Noise reply action</button></article>
+  <article><h2>First reply</h2><p>Keep a durable journal before acknowledging a job.</p><pre><code>await journal.append(job);
+await acknowledge(job);</code></pre><div role="toolbar">Noise post tools</div></article>
+  <article><h2>Follow-up from the author</h2><p>The restart recovered every pending job in order.</p><ul><li>Stop before commit</li><li>Restart and compare the journal</li></ul></article>
+  <aside>Noise member statistics</aside>
+  <div aria-label="Advertisement">Noise membership offer</div>
+</main>
+<footer>Noise forum rules</footer>

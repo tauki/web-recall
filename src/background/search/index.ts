@@ -1,16 +1,21 @@
 import { abortable } from '../../shared/abort';
-import { embeddingSpaceKey } from '../../shared/config/index';
+import { CHAT_PROVIDER_DISABLED, embeddingSpaceKey } from '../../shared/config/index';
 import { storageManager, type PageRecord } from '../storage/manager';
 import { computeEmbeddingsForQueries, getEmbeddingConfig } from '../embeddings/index';
 import { ensureOffscreenDocument, sendOffscreenMessage } from '../offscreen/index';
 import { callChat, callChatJson, getChatConfig } from '../providers/chat';
 import { getSettings } from '../settings/index';
+import type { TextMatch } from '../../shared/textSearch';
+import { matchesSearchFilters, readSearchFilters, type SearchFilters } from '../../shared/searchFilters';
+import { pageContent } from '../../shared/pageContent';
+import { runAutomaticAi } from '../processing/automaticAi';
 
 export type SearchResult = {
   url: string;
   title: string;
   snippet: string;
   timestamp: number;
+  versionId?: string;
   score: number;
   weightedScore?: number;
   recencyWeight?: number;
@@ -19,19 +24,23 @@ export type SearchResult = {
   crossScore?: number;
   hitsFromPage?: number;
   textMatch?: boolean;
+  match?: TextMatch;
 };
 
 export type SearchOptions = {
+  explicitModelUse?: boolean;
   scopeUrls?: string[];
   signal?: AbortSignal;
   rewrite?: boolean;
   rerank?: boolean;
+  onTextResults?: (results: SearchResult[]) => void;
+  filters?: SearchFilters;
 };
 
 type OffscreenTopPageResponse = { pages?: Array<{ url: string }> };
 type OffscreenScoreResponse = {
   candidates?: Array<
-    Pick<SearchResult, 'url' | 'title' | 'snippet' | 'chunkIndex' | 'score' | 'weightedScore' | 'recencyWeight' | 'containsExact' | 'hitsFromPage' | 'textMatch'> & {
+    Pick<SearchResult, 'url' | 'title' | 'snippet' | 'chunkIndex' | 'score' | 'weightedScore' | 'recencyWeight' | 'containsExact' | 'hitsFromPage' | 'textMatch' | 'match' | 'versionId'> & {
       timestamp?: number;
       crossScore?: number;
     }
@@ -40,85 +49,9 @@ type OffscreenScoreResponse = {
 
 const MIN_LLM_KEEP_SCORE = 2;
 
-function tokenize(query: string): string[] {
-  return query
-    .toLowerCase()
-    .split(/\s+/)
-    .map((part) => part.trim())
-    .filter(Boolean);
-}
-
-function textFallbackScore(page: PageRecord, tokens: string[]): { score: number; snippet: string } {
-  if (!tokens.length) {
-    return { score: 0, snippet: '' };
-  }
-  const lowerTitle = (page.title || page.url).toLowerCase();
-  const lowerText = (page.text || '').toLowerCase();
-  let score = 0;
-  let snippet = '';
-
-  for (const token of tokens) {
-    if (lowerTitle.includes(token)) {
-      score += 4;
-    }
-    if (lowerText.includes(token) && page.text) {
-      score += 2;
-      const idx = lowerText.indexOf(token);
-      if (idx >= 0 && !snippet) {
-        snippet = page.text.slice(Math.max(0, idx - 80), idx + 120);
-      }
-    }
-    if (!snippet && page.chunks) {
-      for (const chunk of page.chunks) {
-        const text = chunk.text || '';
-        const lowerChunk = text.toLowerCase();
-        if (lowerChunk.includes(token)) {
-          score += 1;
-          snippet = text;
-          break;
-        }
-      }
-    }
-  }
-
-  const recencyBoost = 1 + Math.max(0, Date.now() - page.timestamp) / (1000 * 60 * 60 * 24 * 30);
-  score = score / recencyBoost;
-
-  if (!snippet && page.chunks?.length) {
-    snippet = page.chunks[0]?.text || '';
-  }
-  if (!snippet) {
-    snippet = page.text?.slice(0, 200) || '';
-  }
-
-  return { score, snippet };
-}
-
-async function fallbackSearch(query: string, limit: number, scopeUrls?: string[]): Promise<SearchResult[]> {
-  const tokens = tokenize(query);
-  if (!tokens.length) return [];
-  const pages = scopeUrls ? (await Promise.all(scopeUrls.map(url => storageManager.getPageRecord(url)))).filter((page): page is PageRecord => Boolean(page)) : await storageManager.listAllPages();
-  const scored: SearchResult[] = pages
-    .map((page) => {
-      const { score, snippet } = textFallbackScore(page, tokens);
-      return {
-        url: page.url,
-        title: page.title || page.url,
-        snippet,
-        timestamp: page.timestamp,
-        score,
-        textMatch: true
-      };
-    })
-    .filter((entry) => entry.score > 0);
-  scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit);
-}
-
 function canonicalizeUrl(url: string): string {
   try {
     const parsed = new URL(url);
-    parsed.hash = '';
     return parsed.toString();
   } catch {
     return url;
@@ -137,6 +70,7 @@ function toSearchResult(res: Partial<SearchResult> & { url: string }): SearchRes
     title: res.title || res.url,
     snippet: res.snippet || '',
     timestamp: typeof res.timestamp === 'number' ? res.timestamp : Date.now(),
+    versionId: res.versionId,
     score: res.score ?? 0,
     weightedScore: res.weightedScore,
     recencyWeight: res.recencyWeight,
@@ -144,7 +78,8 @@ function toSearchResult(res: Partial<SearchResult> & { url: string }): SearchRes
     chunkIndex: res.chunkIndex,
     crossScore: res.crossScore,
     hitsFromPage: res.hitsFromPage,
-    textMatch: res.textMatch
+    textMatch: res.textMatch,
+    match: res.match
   };
 }
 
@@ -153,13 +88,14 @@ function dedupeByUrl(results: Array<Partial<SearchResult> & { url: string }>): S
   for (const res of results) {
     const normalized = toSearchResult(res);
     const key = canonicalizeUrl(normalized.url);
+    const matches = normalized.hitsFromPage || 1;
     if (!grouped.has(key)) {
-      grouped.set(key, { ...normalized, hitsFromPage: normalized.hitsFromPage || 1 });
+      grouped.set(key, { ...normalized, hitsFromPage: matches });
       continue;
     }
     const existing = grouped.get(key)!;
     const better = chooseBetter(existing, normalized);
-    const count = (existing.hitsFromPage || 1) + 1;
+    const count = (existing.hitsFromPage || 1) + matches;
     grouped.set(key, { ...better, hitsFromPage: count });
   }
   return Array.from(grouped.values());
@@ -175,10 +111,11 @@ function mergeRetrievalResults(semantic: SearchResult[], text: SearchResult[]): 
       const existing = results.get(key);
       const rank = 1 / (60 + index + 1);
       if (existing) {
+        const sameVersion = existing.result.versionId || result.versionId ? existing.result.versionId === result.versionId : existing.result.timestamp === result.timestamp;
+        if (!sameVersion) return;
         existing.rank += rank;
         if (existing.result.url === result.url) {
-          // Retain semantic metrics without replacing the retrieved text evidence.
-          existing.result = { ...result, snippet: existing.result.snippet, chunkIndex: existing.result.chunkIndex };
+          existing.result = { ...existing.result, score: result.score, weightedScore: result.weightedScore, recencyWeight: result.recencyWeight, crossScore: result.crossScore, hitsFromPage: result.hitsFromPage || existing.result.hitsFromPage };
         }
       } else results.set(key, { result, rank });
     });
@@ -194,17 +131,26 @@ function extractDomain(url: string): string {
   }
 }
 
+function resolveSavedVersion(record: PageRecord | undefined, candidate: { versionId?: string; timestamp?: number }) {
+  if (!record || !candidate.versionId && candidate.timestamp !== undefined && !Number.isFinite(candidate.timestamp)) return undefined;
+  const matches = [record, ...(record.versions || [])].filter(version => candidate.versionId ? version.versionId === candidate.versionId : candidate.timestamp === undefined ? version === record : version.timestamp === candidate.timestamp || version.firstCapturedAt === candidate.timestamp);
+  if (matches.length > 1 && matches.some(version => pageContent(version) !== pageContent(matches[0]!) || version.title !== matches[0]!.title)) return undefined;
+  return matches[0];
+}
+
 async function enrichRerankCandidates(
-  candidates: NonNullable<OffscreenScoreResponse['candidates']>
+  candidates: NonNullable<OffscreenScoreResponse['candidates']>,
+  filters?: SearchFilters
 ): Promise<NonNullable<OffscreenScoreResponse['candidates']>> {
   const enriched = await Promise.all(
     candidates.map(async (candidate) => {
       const record = await storageManager.getPageRecord(candidate.url);
+      const version = resolveSavedVersion(record, candidate);
+      if (!version || filters && Object.keys(filters).length && !matchesSearchFilters({ url: candidate.url, timestamp: version.timestamp }, filters)) return null;
       const richerExcerpt = (
-        (typeof candidate.chunkIndex === 'number' ? record?.chunks?.[candidate.chunkIndex]?.text : '') ||
+        (typeof candidate.chunkIndex === 'number' ? version.chunks?.[candidate.chunkIndex]?.text : '') ||
         candidate.snippet ||
-        record?.text ||
-        candidate.snippet ||
+        version.text ||
         ''
       )
         .replace(/\s+/g, ' ')
@@ -213,23 +159,38 @@ async function enrichRerankCandidates(
       return {
         ...candidate,
         snippet: richerExcerpt || candidate.snippet || '',
-        title: record?.title || candidate.title || candidate.url,
+        title: version.title || candidate.url,
+        timestamp: version.timestamp,
+        versionId: version.versionId,
         hitsFromPage: candidate.hitsFromPage,
         containsExact: candidate.containsExact,
         recencyWeight: candidate.recencyWeight
       };
     })
   );
-  return enriched;
+  return enriched.filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+}
+
+async function retainFilteredResults(results: Array<Partial<SearchResult> & { url: string }>, filters: SearchFilters, signal?: AbortSignal): Promise<SearchResult[]> {
+  const byUrl = new Map<string, Array<{ hit: typeof results[number]; index: number }>>();
+  results.forEach((hit, index) => { const entries = byUrl.get(hit.url) || []; entries.push({ hit, index }); byUrl.set(hit.url, entries); });
+  const checked: Array<SearchResult | null> = Array(results.length).fill(null);
+  await storageManager.scanSearchPages(record => {
+    for (const { hit, index } of byUrl.get(record.url) || []) {
+      const version = resolveSavedVersion(record, hit);
+      if (version && matchesSearchFilters({ url: hit.url, timestamp: version.timestamp }, filters)) checked[index] = { ...toSearchResult(hit), title: version.title || hit.url, timestamp: version.timestamp, versionId: version.versionId };
+    }
+  }, { scopeUrls: [...byUrl.keys()], signal });
+  return checked.filter((hit): hit is NonNullable<typeof hit> => hit !== null);
 }
 
 async function generateQueryVariations(query: string, n = 3, options: SearchOptions = {}): Promise<string[]> {
   const variations = [query];
   const settings = await getSettings();
   const rewriteEnabled = typeof options.rewrite === 'boolean' ? options.rewrite : settings.queryRewrite !== false;
-  if (!rewriteEnabled) return variations;
+  if (!rewriteEnabled || settings.activeProviderId === CHAT_PROVIDER_DISABLED) return variations;
   try {
-    const config = { ...await getChatConfig(options.signal), signal: options.signal };
+    const config = await getChatConfig(options.signal);
     options.signal?.throwIfAborted();
     const body = {
       model: config.model,
@@ -379,13 +340,15 @@ async function rerankWithCrossEncoder(
   if (!pool.length) return [];
   const settings = await getSettings();
   const rerankEnabled = typeof options.rerank === 'boolean' ? options.rerank : settings.searchRerank !== false;
-  if (!rerankEnabled) return pool;
-  const limited = pool.slice(0, Math.min(12, pool.length));
+  if (!rerankEnabled || settings.activeProviderId === CHAT_PROVIDER_DISABLED) return pool;
+  const headCount = Math.min(12, pool.length);
+  let limited = pool.slice(0, headCount);
   try {
-    const config = { ...await getChatConfig(options.signal), signal: options.signal };
+    const config = await getChatConfig(options.signal);
     options.signal?.throwIfAborted();
-    const enriched = await enrichRerankCandidates(limited);
-    const batchScores = await batchScoreCandidatesWithLLM(query, enriched, config);
+    limited = await enrichRerankCandidates(limited, options.filters);
+    if (!limited.length) return pool.slice(headCount);
+    const batchScores = await batchScoreCandidatesWithLLM(query, limited, config);
     if (batchScores.size) {
       limited.forEach((candidate, index) => {
         const score = batchScores.get(index + 1);
@@ -405,7 +368,7 @@ async function rerankWithCrossEncoder(
     options.signal?.throwIfAborted();
     console.warn('[beta-background:search] cross-encoder rerank failed', err);
   }
-  const merged = [...limited, ...pool.slice(limited.length)];
+  const merged = [...limited, ...pool.slice(headCount)];
   const filtered = merged.filter((candidate) => typeof candidate.crossScore !== 'number' || candidate.crossScore >= MIN_LLM_KEEP_SCORE);
   filtered.sort((a, b) => {
     const ca = typeof a.crossScore === 'number' ? 100 + a.crossScore : a.weightedScore ?? a.score ?? 0;
@@ -415,7 +378,7 @@ async function rerankWithCrossEncoder(
   return filtered;
 }
 
-async function semanticSearchInternal(query: string, limit: number, options: SearchOptions = {}): Promise<SearchResult[]> {
+async function semanticSearchInternal(query: string, limit: number, options: SearchOptions, textResults: SearchResult[]): Promise<SearchResult[]> {
   options.signal?.throwIfAborted();
   const normalized = query.trim();
   if (!normalized) return [];
@@ -423,11 +386,11 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
   options.signal?.throwIfAborted();
   const embeddingKey = embeddingSpaceKey(getEmbeddingConfig());
   const embeddings = await computeEmbeddingsForQueries(variations, options.signal).catch((err) => { options.signal?.throwIfAborted(); console.warn(err); return []; });
-  if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return fallbackSearch(normalized, limit, options.scopeUrls);
+  if (embeddingKey !== embeddingSpaceKey(getEmbeddingConfig())) return textResults;
   options.signal?.throwIfAborted();
   const validEmbeddings = embeddings.filter((emb) => Array.isArray(emb) && emb.length);
   if (!validEmbeddings.length) {
-    return fallbackSearch(normalized, limit, options.scopeUrls);
+    return textResults;
   }
 
   try {
@@ -439,46 +402,48 @@ async function semanticSearchInternal(query: string, limit: number, options: Sea
       topN: Math.max(limit * 3, 30)
     });
     const pageUrls = (topResp.pages || []).map((p) => p.url);
-    if (!pageUrls.length) return fallbackSearch(normalized, limit, options.scopeUrls);
-    const chunkResp = await sendOffscreenMessage<OffscreenScoreResponse>({
-      type: 'OFFSCREEN_SCORE_CHUNKS',
-      pageUrls,
-      variationEmbeddings: validEmbeddings,
-      embeddingKey,
-      originalQuery: normalized
-    });
-    const candidates = chunkResp.candidates || [];
+    if (!pageUrls.length) return textResults;
+    const candidates: NonNullable<OffscreenScoreResponse['candidates']> = [];
+    const scope = options.scopeUrls ? new Set(options.scopeUrls) : undefined;
+    const batchSize = 64;
+    for (let offset = 0; offset < pageUrls.length; offset += batchSize) {
+      options.signal?.throwIfAborted();
+      const chunkResp = await sendOffscreenMessage<OffscreenScoreResponse>({
+        type: 'OFFSCREEN_SCORE_CHUNKS', pageUrls: pageUrls.slice(offset, offset + batchSize),
+        variationEmbeddings: validEmbeddings, embeddingKey, originalQuery: normalized
+      });
+      candidates.push(...(chunkResp.candidates || []).filter(hit => !scope || scope.has(hit.url)));
+    }
     candidates.sort((a, b) => {
       const aw = a.weightedScore ?? a.score ?? 0;
       const bw = b.weightedScore ?? b.score ?? 0;
       return bw - aw;
     });
-    const dedupedCandidates = mergeRetrievalResults(dedupeByUrl(candidates), await fallbackSearch(normalized, limit, options.scopeUrls));
+    const eligible = dedupeByUrl(await retainFilteredResults(candidates, options.filters || {}, options.signal));
+    const dedupedCandidates = mergeRetrievalResults(eligible, textResults);
     const reranked = await rerankWithCrossEncoder(normalized, dedupedCandidates, options);
-    return reranked.slice(0, limit).map((cand) => ({
-      url: cand.url,
-      title: cand.title || cand.url,
-      snippet: cand.snippet || '',
-      timestamp: cand.timestamp || Date.now(),
-      score: cand.score ?? 0,
-      weightedScore: cand.weightedScore,
-      recencyWeight: cand.recencyWeight,
-      containsExact: cand.containsExact,
-      chunkIndex: cand.chunkIndex,
-      crossScore: cand.crossScore,
-      hitsFromPage: cand.hitsFromPage,
-      textMatch: cand.textMatch
-    }));
+    return reranked.slice(0, limit).map(toSearchResult);
   } catch (err) {
     options.signal?.throwIfAborted();
     console.warn('[beta-background:search] offscreen search failed, falling back', err);
-    const fallback = await fallbackSearch(normalized, limit, options.scopeUrls);
-    return dedupeByUrl(fallback).slice(0, limit);
+    return textResults;
   }
 }
 
 export async function searchStoredPages(query: string, limit = 10, options: SearchOptions = {}): Promise<SearchResult[]> {
   options.signal?.throwIfAborted();
-  const results = await abortable(semanticSearchInternal(query, limit, options), options.signal);
-  return options.scopeUrls ? results.filter(hit => options.scopeUrls!.includes(hit.url)) : results;
+  const filters = readSearchFilters(options.filters);
+  const filtered = Object.keys(filters).length > 0;
+  if ((!query.trim() && !filtered) || limit <= 0) return [];
+  const { results: textResults, scopeUrls, hasPages } = await storageManager.searchTextPages(query, limit, filters, { signal: options.signal, scopeUrls: options.scopeUrls });
+  options.signal?.throwIfAborted();
+  options.onTextResults?.(textResults);
+  if (!query.trim() || !hasPages || /["“][^"”]+["”]/u.test(query)) return abortable(retainFilteredResults(textResults, filters, options.signal), options.signal);
+  const refine = (signal?: AbortSignal): Promise<SearchResult[]> => semanticSearchInternal(query, limit, { ...options, signal, scopeUrls, filters }, textResults);
+  const results = (options.explicitModelUse ? await abortable(refine(options.signal), options.signal) : await runAutomaticAi(refine, options.signal)) ?? textResults;
+  const enhanced = new Map<string, SearchResult>(results.map(hit => [hit.url, hit]));
+  const exact = textResults.filter(hit => hit.containsExact).map(hit => ({ ...enhanced.get(hit.url), ...hit, crossScore: enhanced.get(hit.url)?.crossScore, weightedScore: enhanced.get(hit.url)?.weightedScore }));
+  const exactUrls = new Set(exact.map(hit => canonicalizeUrl(hit.url)));
+  const ordered = [...exact, ...results.filter(hit => !exactUrls.has(canonicalizeUrl(hit.url)))].slice(0, limit);
+  return abortable(retainFilteredResults(scopeUrls ? ordered.filter(hit => scopeUrls.includes(hit.url)) : ordered, filters, options.signal), options.signal);
 }

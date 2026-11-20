@@ -9,14 +9,15 @@ function toStoredPayload(payload: CapturePayload): ProcessingEntry['payload'] {
     chunks: payload.chunks,
     text: payload.text,
     force: payload.force,
-    manual: payload.manual
+    manual: payload.manual,
+    captureId: payload.captureId,
+    captureInfo: payload.captureInfo
   };
 }
 
-async function broadcastQueue(): Promise<void> {
+function broadcastQueue(): void {
   try {
-    const queue = await listProcessingEntries();
-    chrome.runtime.sendMessage({ type: 'CAPTURE_QUEUE_UPDATED', queue });
+    chrome.runtime.sendMessage({ type: 'CAPTURE_QUEUE_UPDATED' }, () => { void chrome.runtime.lastError; });
   } catch (err) {
     console.warn('[beta-processing] broadcast failed', err);
   }
@@ -28,6 +29,8 @@ async function saveEntry(params: {
   status: ProcessingEntry['status'];
   attempts: number;
   payload?: CapturePayload;
+  error?: string;
+  retryOf?: string | null;
 }, create = false): Promise<boolean> {
   const now = Date.now();
   const entry: ProcessingEntry = {
@@ -38,28 +41,45 @@ async function saveEntry(params: {
     createdAt: now,
     lastAttemptAt: now,
     updatedAt: now,
-    payload: params.payload ? toStoredPayload(params.payload) : undefined
+    payload: params.payload ? toStoredPayload(params.payload) : undefined,
+    error: params.error,
+    textSaved: create ? true : undefined
   };
-  const updated = await storageManager.updateProcessingEntry(entry, create);
-  await broadcastQueue();
+  let updated: boolean;
+  if (create && params.payload) {
+    await storageManager.savePageRecord({
+      url: params.url,
+      title: params.title || params.url,
+      timestamp: params.payload.timestamp,
+      text: params.payload.text,
+      manual: Boolean(params.payload.manual),
+      captureInfo: params.payload.captureInfo,
+      chunks: params.payload.chunks.map(text => ({ text, embedding: [] }))
+    }, {
+      preserveMissingEmbeddings: true, captureEntry: entry,
+      ...(params.retryOf !== undefined && { requireProcessing: true, expectedCaptureId: params.retryOf })
+    });
+    updated = true;
+  } else updated = await storageManager.updateProcessingEntry(entry, create);
+  broadcastQueue();
   return updated;
 }
 
-export async function markQueued(payload: CapturePayload, attempts: number, create = true): Promise<boolean> {
-  return saveEntry({ url: payload.url, title: payload.title, status: 'queued', attempts, payload }, create);
+export async function markQueued(payload: CapturePayload, attempts: number, create = true, retryOf?: string | null): Promise<boolean> {
+  return saveEntry({ url: payload.url, title: payload.title, status: 'queued', attempts, payload, retryOf }, create);
 }
 
 export async function markProcessing(payload: CapturePayload, attempts: number): Promise<boolean> {
   return saveEntry({ url: payload.url, title: payload.title, status: 'processing', attempts, payload });
 }
 
-export async function markFailed(payload: CapturePayload, attempts: number): Promise<void> {
-  await saveEntry({ url: payload.url, title: payload.title, status: 'failed', attempts, payload });
+export async function markFailed(payload: CapturePayload, attempts: number, error?: string): Promise<void> {
+  await saveEntry({ url: payload.url, title: payload.title, status: 'failed', attempts, payload, error });
 }
 
 export async function markDone(url: string): Promise<void> {
   await storageManager.deleteProcessing(url);
-  await broadcastQueue();
+  broadcastQueue();
 }
 
 export function listProcessingEntries(): Promise<ProcessingEntry[]> {

@@ -22,7 +22,8 @@ function normalizeHits(ctx: ToolsHandlerContext, hits: Awaited<ReturnType<ToolsH
     score: hit.score,
     hitsFromPage: hit.hitsFromPage,
     partial: partial || hit.partial,
-    timestamp: hit.timestamp
+    timestamp: hit.timestamp,
+    versionId: hit.versionId
   }));
 }
 
@@ -44,9 +45,10 @@ export async function runSearchMemory(ctx: ToolsHandlerContext, rawArgs: unknown
 
   const previous = ctx.cache.searchResults.get(query) || [];
   const fresh = previous.length >= offset + k + 1 ? [] : await ctx.searchMemory(query, offset + k + 1);
-  const seen = new Set(previous.map(hit => hit.url));
+  const key = (hit: typeof previous[number]) => JSON.stringify([hit.url, hit.versionId ?? hit.timestamp]);
+  const seen = new Set(previous.map(key));
   const hits = [...previous];
-  for (const hit of fresh) if (!seen.has(hit.url)) { seen.add(hit.url); hits.push(hit); }
+  for (const hit of fresh) if (!seen.has(key(hit))) { seen.add(key(hit)); hits.push(hit); }
   ctx.cache.searchResults.set(query, hits);
   const content = JSON.stringify({
     ok: true,

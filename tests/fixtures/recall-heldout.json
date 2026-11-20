@@ -1,0 +1,168 @@
+[
+  {
+    "id": "held-title-01",
+    "kind": "exact-title",
+    "query": "Keeping a wooden cutting board flat",
+    "expected": ["wood-board"],
+    "cold": true
+  },
+  {
+    "id": "held-title-02",
+    "kind": "exact-title",
+    "query": "A dropdown that loses keyboard focus after refresh",
+    "expected": ["keyboard"]
+  },
+  {
+    "id": "held-title-03",
+    "kind": "exact-title",
+    "query": "A quieter induction kitchen",
+    "expected": ["induction"],
+    "cold": true
+  },
+  {
+    "id": "held-title-04",
+    "kind": "exact-title",
+    "query": "Transactional outbox delivery",
+    "expected": ["outbox"]
+  },
+  {
+    "id": "held-phrase-01",
+    "kind": "exact-phrase",
+    "query": "\"Their nests sit above the high tide line\"",
+    "expected": ["terns"],
+    "cold": true
+  },
+  {
+    "id": "held-phrase-02",
+    "kind": "exact-phrase",
+    "query": "\"Reprints can share a title while differing in meaningful production details\"",
+    "expected": ["archives"]
+  },
+  {
+    "id": "held-phrase-03",
+    "kind": "exact-phrase",
+    "query": "\"If either write fails, neither partial state is acknowledged\"",
+    "expected": ["transactions"]
+  },
+  {
+    "id": "held-phrase-04",
+    "kind": "exact-phrase",
+    "query": "\"Hiding horizontal overflow only masks the oversized control\"",
+    "expected": ["responsive"]
+  },
+  {
+    "id": "held-url-01",
+    "kind": "url",
+    "query": "https://app.benchmark.test/notes#/view/reader",
+    "expected": ["dynamic"]
+  },
+  {
+    "id": "held-url-02",
+    "kind": "url",
+    "query": "https://app.benchmark.test/routes#/red",
+    "expected": ["route-red"],
+    "cold": true
+  },
+  {
+    "id": "held-url-03",
+    "kind": "url",
+    "query": "https://trips.benchmark.test/notebook?journey=alpine",
+    "expected": ["rail"]
+  },
+  {
+    "id": "held-vague-01",
+    "kind": "vague",
+    "query": "that discussion about a waterfall portrait where the water looked smooth but the person was blurred",
+    "expected": ["photography"]
+  },
+  {
+    "id": "held-vague-02",
+    "kind": "vague",
+    "query": "the garden thread where watering pots every day left the roots wet and people asked whether the containers drain",
+    "expected": ["tomatoes"]
+  },
+  {
+    "id": "held-vague-03",
+    "kind": "vague",
+    "query": "the notes about a bedroom that stayed warm but felt stale even though the heating was quiet",
+    "expected": ["ventilation"],
+    "cold": true
+  },
+  {
+    "id": "held-vague-04",
+    "kind": "vague",
+    "query": "the service boundaries article about moving business capabilities out of a monolith one at a time",
+    "expected": ["microservices"]
+  },
+  {
+    "id": "held-old-01",
+    "kind": "old-evidence",
+    "query": "the earlier rail plan with a lakeside branch, a long platform change and a fallback night near the station",
+    "expected": ["rail"],
+    "version": "rail-v1",
+    "cold": true
+  },
+  {
+    "id": "held-old-02",
+    "kind": "old-evidence",
+    "query": "the old browser crash notes distinguishing durable article records from a best-effort downloaded-model cache",
+    "expected": ["storage"]
+  },
+  {
+    "id": "held-filter-01",
+    "kind": "filter",
+    "query": "tokenizer and model weights before working offline",
+    "expected": ["downloads"],
+    "filters": {
+      "domain": "docs.benchmark.test",
+      "from": "2025-12-03",
+      "through": "2025-12-03"
+    },
+    "cold": true
+  },
+  {
+    "id": "held-filter-02",
+    "kind": "filter",
+    "query": "passenger interchange platform connections",
+    "expected": ["route-blue"],
+    "filters": {
+      "domain": "app.benchmark.test",
+      "from": "2024-08-01",
+      "through": "2024-08-02"
+    },
+    "cold": true
+  },
+  {
+    "id": "held-filter-03",
+    "kind": "filter",
+    "query": "catalogue identifier photograph label text",
+    "expected": ["museum"],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2020-06-30",
+      "through": "2020-06-30"
+    }
+  },
+  {
+    "id": "held-empty-01",
+    "kind": "empty",
+    "query": "\"warehouse dispatch and loading bays\"",
+    "expected": [],
+    "filters": {
+      "domain": "trips.benchmark.test",
+      "from": "2023-09-08",
+      "through": "2024-09-08"
+    }
+  },
+  {
+    "id": "held-empty-02",
+    "kind": "empty",
+    "query": "\"Their nests sit above the high tide line\"",
+    "expected": [],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2020-01-01",
+      "through": "2026-11-01"
+    }
+  }
+]

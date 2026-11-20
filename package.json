@@ -1,6 +1,6 @@
 {
   "name": "web-recall",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "Web Recall 0.2.x workspace tooling",
   "private": true,
   "type": "module",
@@ -15,13 +15,17 @@
     "lint": "eslint src --ext .ts",
     "test": "node --test --test-timeout=30000 tests/*.test.mjs",
     "test:setup": "playwright-core install --with-deps chromium",
+    "bench:recall": "node scripts/recall-benchmark.mjs",
+    "qualify:capture": "node scripts/qualify-capture.mjs",
     "package:extension": "node scripts/package-extension.mjs"
   },
   "engines": {
     "node": ">=24"
   },
   "dependencies": {
-    "@huggingface/transformers": "4.3.1"
+    "@huggingface/transformers": "4.3.1",
+    "@sqlite.org/sqlite-wasm": "3.54.1-build1",
+    "fflate": "0.8.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

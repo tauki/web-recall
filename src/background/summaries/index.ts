@@ -1,9 +1,12 @@
-import { storageManager } from '../storage/manager';
+import { storageManager, type PageRecord } from '../storage/manager';
 import { runInference } from '../providers/inference';
 import { pageContent } from '../../shared/pageContent';
+import { ChatDisabledError } from '../../shared/providerErrors';
 import { abortable } from '../../shared/abort';
+import { runSavedWork, beginSavedWork, type SavedWorkScope } from '../processing/savedWork';
+import { runAutomaticAi, trackAutomaticAi } from '../processing/automaticAi';
 
-type SummaryJob = { url: string; controller: AbortController; automatic: boolean; regenerate: boolean; resolve: (saved: boolean) => void; reject: (error: unknown) => void; cleanup: () => void };
+type SummaryJob = { url: string; scope: SavedWorkScope; controller: AbortController; automatic: boolean; regenerate: boolean; resolve: (saved: boolean) => void; reject: (error: unknown) => void; cleanup: () => void };
 const pending: SummaryJob[] = [];
 let active: SummaryJob | undefined;
 const SUMMARY_INSTRUCTIONS = 'Write a concise whole-page overview: what the page is about, its main purpose or argument, and its key themes or conclusion. Cover the entire page, not just its final section or incidental configuration limits. Use 1–3 complete sentences, no preamble.';
@@ -23,14 +26,28 @@ function* parts(text: string, bytes: number): Generator<string> {
   if (part) yield part;
 }
 
-async function summarize(url: string, signal?: AbortSignal, regenerate = false): Promise<boolean> {
+async function summarize(url: string, signal: AbortSignal, regenerate: boolean, scope: SavedWorkScope): Promise<boolean> {
   signal?.throwIfAborted();
-  const page = await storageManager.getPageRecord(url);
-  if (!page || (!regenerate && page.summary?.trim())) return false;
+  const saved = await storageManager.getPageRecord(url);
+  if (!saved || (!regenerate && saved.summary?.trim())) return false;
+  let page = saved;
+  return runSavedWork(page, signal, async activeSignal => {
+    if (!page.versionId) {
+      const [current] = await storageManager.listPageVersions(url, activeSignal);
+      if (!current) return false;
+      page = { ...page, ...current };
+    }
+    return summarizeSavedPage(page, activeSignal, regenerate);
+  }, scope);
+}
+
+async function summarizeSavedPage(page: PageRecord, requestSignal: AbortSignal, regenerate: boolean): Promise<boolean> {
+  const url = page.url;
   const text = pageContent(page);
   if (!text.trim()) return false;
   const { getChatConfig, callChat } = await import('../providers/chat');
-  const config = { ...await getChatConfig(signal), signal };
+  const config = await getChatConfig(requestSignal);
+  const signal = config.signal || requestSignal;
   const window = config.contextTokens || 4096;
   const output = Math.max(32, Math.min(160, Math.floor(window * 0.1)));
   const summaryBudget = Math.floor(window * 0.2);
@@ -85,7 +102,7 @@ async function summarize(url: string, signal?: AbortSignal, regenerate = false):
     summary = await generate(SUMMARY_INSTRUCTIONS, `Notes covering the entire saved page:\n${notes.join('\n\n')}`, summaryBudget);
   }
   signal?.throwIfAborted();
-  const saved = await storageManager.savePageSummary(url, text, summary, signal, regenerate ? page.summary : undefined);
+  const saved = await storageManager.savePageSummary(url, text, summary, signal, regenerate ? page.summary : undefined, page.title, page.versionId ?? null);
   if (saved) {
     try { void Promise.resolve(chrome.runtime.sendMessage({ type: 'SUMMARY_UPDATED', url })).catch(() => {}); }
     catch (error) { console.debug('[beta-background:summaries] preview notification unavailable', error); }
@@ -98,21 +115,29 @@ function runNext(): void {
   const job = pending.shift();
   if (!job) return;
   active = job;
-  void runInference(() => abortable(summarize(job.url, job.controller.signal, job.regenerate), job.controller.signal))
+  const generate = (signal: AbortSignal): Promise<boolean> => runInference(() => abortable(summarize(job.url, signal, job.regenerate, job.scope), signal));
+  void (job.automatic ? runAutomaticAi(generate, job.controller.signal).then(saved => saved ?? false).catch(error => {
+    if (error instanceof ChatDisabledError) return false;
+    throw error;
+  }) : generate(job.controller.signal))
     .then(job.resolve, job.reject).finally(() => { job.cleanup(); active = undefined; runNext(); });
 }
 
-export function queuePageSummary(url: string, signal?: AbortSignal, regenerate = false): Promise<boolean> {
+export function queuePageSummary(url: string, signal?: AbortSignal, regenerate = false, scope?: SavedWorkScope): Promise<boolean> {
   if (signal?.aborted) return Promise.reject(signal.reason);
+  const token = scope || beginSavedWork([url]);
   return new Promise((resolve, reject) => {
     const controller = new AbortController();
-    const cancel = (): void => {
-      controller.abort(signal?.reason || new Error('Summary stopped'));
+    const automatic = !signal && !regenerate;
+    const untrack = automatic ? trackAutomaticAi(controller) : (): void => {};
+    const cancel = (): void => { controller.abort(signal?.reason || new Error('Summary stopped')); };
+    const dequeue = (): void => {
       const index = pending.indexOf(job);
-      if (index >= 0) { pending.splice(index, 1); job.cleanup(); reject(controller.signal.reason); }
+      if (index >= 0) { pending.splice(index, 1); job.cleanup(); if (automatic) resolve(false); else reject(controller.signal.reason); }
     };
-    const job: SummaryJob = { url, controller, automatic: !signal && !regenerate, regenerate, resolve, reject, cleanup: () => signal?.removeEventListener('abort', cancel) };
+    const job: SummaryJob = { url, scope: token, controller, automatic, regenerate, resolve, reject, cleanup: () => { signal?.removeEventListener('abort', cancel); controller.signal.removeEventListener('abort', dequeue); untrack(); if (!scope) token.release(); } };
     signal?.addEventListener('abort', cancel, { once: true });
+    controller.signal.addEventListener('abort', dequeue, { once: true });
     if (!job.automatic) {
       const firstAutomatic = pending.findIndex(queued => queued.automatic);
       pending.splice(firstAutomatic < 0 ? pending.length : firstAutomatic, 0, job);

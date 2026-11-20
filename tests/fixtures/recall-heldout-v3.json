@@ -1,0 +1,174 @@
+[
+  {
+    "id": "v3-title-01",
+    "kind": "exact-title",
+    "query": "Museum research notes with a trail back to the object",
+    "expected": ["museum"],
+    "cold": true
+  },
+  {
+    "id": "v3-title-02",
+    "kind": "exact-title",
+    "query": "Sharp people or smooth water: choosing a shutter speed",
+    "expected": ["photography"]
+  },
+  {
+    "id": "v3-title-03",
+    "kind": "exact-title",
+    "query": "Downloading browser embeddings once, then working offline",
+    "expected": ["downloads"],
+    "cold": true
+  },
+  {
+    "id": "v3-title-04",
+    "kind": "exact-title",
+    "query": "Suspicion rather than a fixed heartbeat deadline",
+    "expected": ["failure-detector"]
+  },
+  {
+    "id": "v3-phrase-01",
+    "kind": "exact-phrase",
+    "query": "\"A library catalogue record helps locate a volume but does not substitute for inspecting its edition\"",
+    "expected": ["archives"],
+    "cold": true
+  },
+  {
+    "id": "v3-phrase-02",
+    "kind": "exact-phrase",
+    "query": "\"Magnetic compatibility is separate from a flat stable base\"",
+    "expected": ["induction"]
+  },
+  {
+    "id": "v3-phrase-03",
+    "kind": "exact-phrase",
+    "query": "\"Leave enough low gears for a tired climb\"",
+    "expected": ["cycling"]
+  },
+  {
+    "id": "v3-phrase-04",
+    "kind": "exact-phrase",
+    "query": "\"Weft packing and tension are observed separately\"",
+    "expected": ["weaving"]
+  },
+  {
+    "id": "v3-url-01",
+    "kind": "url",
+    "query": "https://reading.benchmark.test/pollinators",
+    "expected": ["pollinators"]
+  },
+  {
+    "id": "v3-url-02",
+    "kind": "url",
+    "query": "https://docs.benchmark.test/wood-board",
+    "expected": ["wood-board"],
+    "cold": true
+  },
+  {
+    "id": "v3-url-03",
+    "kind": "url",
+    "query": "https://forum.benchmark.test/keyboard",
+    "expected": ["keyboard"]
+  },
+  {
+    "id": "v3-vague-01",
+    "kind": "vague",
+    "query": "I remember something about why a big adult tortoise can be safe while its eggs are still threatened by cats and rats",
+    "expected": ["tortoises"],
+    "cold": true
+  },
+  {
+    "id": "v3-vague-02",
+    "kind": "vague",
+    "query": "the saved page explaining why a backup is still needed even with persistent browser storage",
+    "expected": ["storage"],
+    "cold": true
+  },
+  {
+    "id": "v3-vague-03",
+    "kind": "vague",
+    "query": "the cooking note about keeping the rice and pot the same and not lifting the lid during the comparison",
+    "expected": ["rice"]
+  },
+  {
+    "id": "v3-vague-04",
+    "kind": "vague",
+    "query": "I read that excluding a site would leave its older saved pages alone and manual saves still worked while capture was paused",
+    "expected": ["capture-policy"]
+  },
+  {
+    "id": "v3-old-01",
+    "kind": "old-evidence",
+    "query": "I want the rail draft that kept a fallback night near the station in case that last evening connection failed",
+    "expected": ["rail"],
+    "version": "rail-v1",
+    "cold": true
+  },
+  {
+    "id": "v3-old-02",
+    "kind": "old-evidence",
+    "query": "the older lakeside branch plan through a small interchange, not the direct connection chosen later",
+    "expected": ["rail"],
+    "version": "rail-v1",
+    "filters": {
+      "domain": "trips.benchmark.test",
+      "from": "2023-09-08",
+      "through": "2023-09-08"
+    }
+  },
+  {
+    "id": "v3-filter-01",
+    "kind": "filter",
+    "query": "the router note about keeping a document query separate from a campaign tag",
+    "expected": ["urls"],
+    "filters": {
+      "domain": "docs.benchmark.test",
+      "from": "2022-06-01",
+      "through": "2022-06-30"
+    },
+    "cold": true
+  },
+  {
+    "id": "v3-filter-02",
+    "kind": "filter",
+    "query": "the note about a background tab not being enough to start collection",
+    "expected": ["dynamic"],
+    "filters": {
+      "domain": "app.benchmark.test",
+      "from": "2025-03-12",
+      "through": "2025-03-12"
+    }
+  },
+  {
+    "id": "v3-filter-03",
+    "kind": "filter",
+    "query": "the balcony garden notes on wind exposure and shallow containers",
+    "expected": ["pollinators"],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2021-03-01",
+      "through": "2021-03-31"
+    }
+  },
+  {
+    "id": "v3-empty-01",
+    "kind": "empty",
+    "query": "\"Removing invasive mammals is only one part of habitat protection\"",
+    "expected": [],
+    "filters": {
+      "domain": "reading.benchmark.test",
+      "from": "2022-05-27",
+      "through": "2022-05-27"
+    }
+  },
+  {
+    "id": "v3-empty-02",
+    "kind": "empty",
+    "query": "\"Rinsing, evaporation and the shape of the pan are recorded separately\"",
+    "expected": [],
+    "filters": {
+      "domain": "forum.benchmark.test",
+      "from": "2021-02-15",
+      "through": "2021-02-15"
+    }
+  }
+]

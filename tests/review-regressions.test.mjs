@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
-import { loadSource, chromeFixture, plain, tick } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, tick, scanFixturePages } from './helpers.mjs';
 
 const url = 'https://example.test/article';
 const page = (overrides = {}) => ({ url, title: 'Article', text: 'current text', timestamp: Date.now(), manual: false, chunks: [{ text: 'current text', embedding: [1, 0], embeddingKey: 'old' }], ...overrides });
@@ -117,7 +117,7 @@ test('upgrade preserves existing 0.2 captures and copies the old versions only o
 test('legacy exports retain text, vectors and version history through import and export', async () => {
   const saved = [];
   const mod = await loadSource('src/background/manage/index.ts', '', {
-    '../capture/index': { cancelCaptureJobs() {} },
+    '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) },
     '../storage/manager': { storageManager: { savePageRecord: async record => saved.push(plain(record)), listAllPages: async () => saved } },
     '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
@@ -142,7 +142,7 @@ test('Memory Manager includes older pages beyond 500 captures and returns summar
   const db = await loadSource('src/shared/db/index.ts', '', {}, { indexedDB: new IDBFactory(), IDBKeyRange });
   await Promise.all(Array.from({ length: 501 }, (_, index) => db.savePageRecord(page({ url: `https://example.test/${index}`, timestamp: index + 1 }))));
   const mod = await loadSource('src/background/manage/index.ts', '', {
-    '../capture/index': { cancelCaptureJobs() {} },
+    '../capture/index': { cancelCaptureJobs: async () => [] },
     '../embeddings/index': { getEmbeddingConfig: () => ({}) },
     '../storage/manager': { storageManager: db },
     '../offscreen/index': { invalidateOffscreenIndex: async () => {} }
@@ -219,7 +219,7 @@ test('provider health reads are cheap and explicit connection tests still probe 
 });
 
 const searchMocks = (pages = [], candidates = []) => ({
-  '../storage/manager': { storageManager: { listAllPages: async () => pages, listRecentPages: async () => pages, getPageRecord: async target => pages.find(p => p.url === target) } },
+  '../storage/manager': { storageManager: { scanSearchPages: scanFixturePages(pages), listAllPages: async () => pages, listRecentPages: async () => pages, getPageRecord: async target => pages.find(p => p.url === target) } },
   '../embeddings/index': { computeEmbeddingsForQueries: async () => [[1, 0]], getEmbeddingConfig: () => ({ provider: 'browser', browserModel: 'new', browserRevision: 'pin' }) },
   '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async message => message.type === 'OFFSCREEN_TOP_PAGES' ? { pages: candidates.map(c => ({ url: c.url })) } : { candidates } },
   '../providers/chat': { callChat: async () => ({}), callChatJson: async () => ({}), getChatConfig: async () => ({}) },

@@ -15,7 +15,8 @@ const entryPoints = {
   'ui/manage/index': path.resolve(REPO_ROOT, 'src/ui/manage/index.ts'),
   'ui/highlights/index': path.resolve(REPO_ROOT, 'src/ui/highlights/index.ts'),
   'ui/logs/index': path.resolve(REPO_ROOT, 'src/ui/logs/index.ts'),
-  'offscreen/index': path.resolve(REPO_ROOT, 'src/offscreen/index.ts')
+  'offscreen/index': path.resolve(REPO_ROOT, 'src/offscreen/index.ts'),
+  'offscreen/libraryWorker': path.resolve(REPO_ROOT, 'src/offscreen/libraryWorker.ts')
 };
 
 async function copyHtml() {
@@ -51,6 +52,17 @@ async function copyTransformersWasm() {
   );
 }
 
+async function copySavedLibraryRuntime() {
+  const source = path.dirname(fileURLToPath(import.meta.resolve('@sqlite.org/sqlite-wasm/sqlite3.wasm')));
+  const destination = path.join(OUT_DIR, 'offscreen', 'sqlite');
+  await fs.mkdir(destination, { recursive: true });
+  for (const filename of ['index.mjs', 'sqlite3.wasm', 'sqlite3-opfs-async-proxy.js']) {
+    await fs.copyFile(path.join(source, filename), path.join(destination, filename));
+  }
+  const compression = path.dirname(fileURLToPath(import.meta.resolve('fflate/package.json')));
+  await fs.copyFile(path.join(compression, 'LICENSE'), path.join(OUT_DIR, 'offscreen', 'fflate-LICENSE.txt'));
+}
+
 async function main() {
   await fs.rm(OUT_DIR, { recursive: true, force: true });
   await fs.mkdir(OUT_DIR, { recursive: true });
@@ -78,6 +90,7 @@ async function main() {
     await fs.cp(path.join(REPO_ROOT, 'src/assets', folder), path.join(OUT_DIR, folder), { recursive: true });
   }
   await copyTransformersWasm();
+  await copySavedLibraryRuntime();
   console.info(`Beta workspace bundled to ${OUT_DIR}`);
 }
 

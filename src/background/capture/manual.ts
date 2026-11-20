@@ -9,7 +9,7 @@ export async function captureTab(tabId?: number | null): Promise<{ ok: boolean; 
   if (!await shouldCaptureUrl(tab.url, { ignorePaused: true })) {
     throw new Error('Capture blocked by your allowlist or denylist rules for this page.');
   }
-  let response: { ok?: boolean } | undefined;
+  let response: { ok?: boolean; error?: string } | undefined;
   try {
     response = await chrome.tabs.sendMessage(tabId, { type: 'FORCE_CAPTURE' });
   } catch (err) {
@@ -17,5 +17,7 @@ export async function captureTab(tabId?: number | null): Promise<{ ok: boolean; 
     await chrome.scripting.executeScript({ target: { tabId }, files: ['dist/beta/content.js'] });
     response = await chrome.tabs.sendMessage(tabId, { type: 'FORCE_CAPTURE' });
   }
-  return { ok: true, received: response?.ok === true };
+  if (response?.error) throw new Error(response.error);
+  if (response?.ok !== true) throw new Error('Capture was not confirmed. Reload the page and try again.');
+  return { ok: true, received: true };
 }

@@ -9,7 +9,9 @@ import { build } from 'esbuild';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const offline = process.argv.includes('--offline');
-const empty = process.argv.includes('--empty');
+const firstRun = process.argv.includes('--first-run');
+const empty = firstRun || process.argv.includes('--empty');
+const historyPreview = process.argv.includes('--history-preview');
 const modelCachePreview = process.argv.includes('--model-cache');
 const downloadPreview = process.argv.includes('--download-preview');
 const portArg = process.argv.indexOf('--port');
@@ -17,10 +19,20 @@ const port = portArg >= 0 ? Number(process.argv[portArg + 1]) : 4180;
 const cacheBundle = modelCachePreview ? (await build({ entryPoints: [path.join(root, 'src/offscreen/modelCache.ts')], bundle: true, write: false, format: 'esm', platform: 'browser' })).outputFiles[0].contents : null;
 const backend = providerFixture('http://localhost:11434');
 const { DEFAULT_SETTINGS } = await backend.load('src/shared/config/index.ts');
-Object.assign(backend.stored.betaSettings, DEFAULT_SETTINGS, { paused: true, captureSetupComplete: true, queryRewrite: false, askRerank: false, enableTools: false, searchRerank: false, logLevel: 'debug' });
+Object.assign(backend.stored.betaSettings, DEFAULT_SETTINGS, { paused: true, captureSetupComplete: !firstRun, recallSetupComplete: !firstRun, automaticAi: !firstRun && !offline, queryRewrite: false, askRerank: false, enableTools: false, searchRerank: false, logLevel: 'debug' });
 const database = await backend.load('src/shared/db/index.ts');
 const library = empty ? [] : JSON.parse(await readFile(new URL('./fixtures/ui-library.json', import.meta.url), 'utf8'));
-for (const [index, record] of library.entries()) await database.savePageRecord({ ...record, timestamp: Date.now() - Math.floor(index / 2) * 86400000, manual: index % 3 === 0, chunks: [{ text: record.text, embedding: [] }] });
+for (const [index, record] of library.entries()) await database.savePageRecord({
+  ...record, timestamp: Date.now() - Math.floor(index / 2) * 86400000, manual: index % 3 === 0, chunks: [{ text: record.text, embedding: [] }],
+  ...(historyPreview && index === 0 ? {
+    versionId: 'preview-current', firstCapturedAt: Date.now() - 86400000, lastVisitedAt: Date.now(), kept: false,
+    captureInfo: { source: 'article', warnings: [] },
+    versions: [
+      { versionId: 'preview-earlier', timestamp: Date.now() - 7 * 86400000, firstCapturedAt: Date.now() - 8 * 86400000, title: record.title, text: '# Earlier saved reading\n\nThis isolated fixture preserves an earlier explanation about deferred image loading.\n\n- Load the important content first.\n- Keep surrounding context available.', chunks: [], kept: false, captureInfo: { source: 'main', warnings: ['Collapsed content was not captured. Expand it and capture again.'] } },
+      { versionId: 'preview-kept', timestamp: Date.now() - 30 * 86400000, title: record.title, text: '# Kept field notes\n\nA deliberately kept snapshot remains available beyond automatic history retention.', chunks: [], kept: true }
+    ]
+  } : {})
+});
 await database.saveLog({ level: 'info', message: 'Isolated UI verification library loaded.', createdAt: Date.now(), data: { test: true, pages: library.length } });
 await database.saveLog({ level: 'warn', message: 'Sample pages have no embeddings; text retrieval is available.', createdAt: Date.now() + 1, data: { test: true, missing: library.length } });
 const orchestrator = await backend.load('src/background/orchestration/index.ts', {
@@ -101,7 +113,12 @@ const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1:4180');
     if (url.pathname === '/runtime' && request.method === 'POST') {
       const parts = []; for await (const part of request) parts.push(part);
-      const payload = await backend.send(JSON.parse(Buffer.concat(parts).toString()));
+      const message = JSON.parse(Buffer.concat(parts).toString());
+      if (firstRun && message.type === 'CAPTURE_ACTIVE_TAB') {
+        await backend.send({ type: 'IMPORT_PAGES', pages: [{ url: 'https://recall.test/field-notes', title: 'Coastal field notes', text: 'Copper terns migrate along the coast. Their nests sit above the high tide line. These field notes compare nesting sites and seasonal migration.', timestamp: Date.now(), manual: true, chunks: [] }] });
+        response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ ok: true, received: true })); return;
+      }
+      const payload = await backend.send(message);
       response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify(payload)); return;
     }
     if (url.pathname === '/bridge.js') { response.setHeader('Content-Type','text/javascript'); response.end(bridge); return; }

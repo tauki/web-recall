@@ -1,6 +1,8 @@
 import { runInference } from './inference';
 import { ollamaResponseError } from './ollamaErrors';
-import { DEFAULT_SETTINGS } from '../../shared/config/index';
+import { CHAT_PROVIDER_DISABLED } from '../../shared/config/index';
+import { ChatDisabledError } from '../../shared/providerErrors';
+import { chatWorkSignal } from './chatWork';
 import { resolveOllamaChatModel, getOllamaContextTokens } from './ollamaModels';
 import { getSettings } from '../settings/index';
 import { getProviderBaseUrl } from './config';
@@ -44,10 +46,6 @@ export function normalizeToolArguments(value: unknown): Record<string, unknown> 
   return parsed as Record<string, unknown>;
 }
 
-function normalizeProviderId(providerId: string | undefined): string {
-  return providerId === 'ollama' || providerId === 'apple' ? providerId : DEFAULT_SETTINGS.activeProviderId;
-}
-
 function buildOriginSuggestion(message: string): string | undefined {
   const normalized = message.toLowerCase();
   if (
@@ -61,24 +59,31 @@ function buildOriginSuggestion(message: string): string | undefined {
   return undefined;
 }
 
-export async function getChatConfig(signal?: AbortSignal): Promise<ChatConfig> {
+export async function getChatConfig(requestSignal?: AbortSignal): Promise<ChatConfig> {
+  const signal = chatWorkSignal(requestSignal);
   const settings = await getSettings();
-  signal?.throwIfAborted();
-  const providerId = normalizeProviderId(settings.activeProviderId);
+  signal.throwIfAborted();
+  if (settings.activeProviderId === CHAT_PROVIDER_DISABLED) throw new ChatDisabledError();
+  const providerId = settings.activeProviderId === 'apple' ? 'apple' : 'ollama';
   if (providerId === 'apple') {
     const model: AppleMode = settings.applePrivateCloud ? 'private-cloud' : 'on-device';
     const status = await getAppleStatus(model, settings.applePrivateCloud, signal);
+    signal.throwIfAborted();
     if (!status.libraryTools) throw new Error('Update and restart the Web Recall Mac companion to enable the saved-memory tool bridge.');
-    return { providerId, baseUrl: '', model, contextTokens: status.contextTokens, appleCloudConsent: settings.applePrivateCloud };
+    return { providerId, baseUrl: '', model, signal, contextTokens: status.contextTokens, appleCloudConsent: settings.applePrivateCloud };
   }
   const baseUrl = await getProviderBaseUrl(providerId);
   await assertProviderOriginAcknowledged(baseUrl);
-  const model = await resolveOllamaChatModel(baseUrl);
+  signal.throwIfAborted();
+  const model = await resolveOllamaChatModel(baseUrl, undefined, signal);
+  const contextTokens = await getOllamaContextTokens(baseUrl, model, signal);
+  signal.throwIfAborted();
   return {
     providerId,
     baseUrl,
     model,
-    contextTokens: await getOllamaContextTokens(baseUrl, model, signal)
+    signal,
+    contextTokens
   };
 }
 
@@ -148,7 +153,9 @@ export async function callChat(config: ChatConfig, body: Record<string, unknown>
     if (!resp.ok) {
       throw await ollamaResponseError(resp, 'chat request');
     }
-    return (await resp.json()) as ChatResponse;
+    const answer = (await resp.json()) as ChatResponse;
+    config.signal?.throwIfAborted();
+    return answer;
   });
 }
 
@@ -217,6 +224,7 @@ export async function streamChat(
     try {
       while (true) {
         const { done, value } = await reader.read();
+        config.signal?.throwIfAborted();
         if (done) break;
         buffer += textDecoder.decode(value, { stream: true });
         const lines = buffer.split('\n');

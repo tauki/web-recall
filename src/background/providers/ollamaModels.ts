@@ -2,17 +2,19 @@ import { getModelSettings } from '../models/index';
 import { getProviderBaseUrl } from './config';
 import { fetchProvider } from './access';
 
-export async function listOllamaModels(baseUrl?: string): Promise<string[]> {
+export async function listOllamaModels(baseUrl?: string, signal?: AbortSignal): Promise<string[]> {
   const target = baseUrl || (await getProviderBaseUrl('ollama'));
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 8_000);
   try {
-    const response = await fetchProvider(`${target}/api/tags`, { signal: controller.signal });
+    const response = await fetchProvider(`${target}/api/tags`, { signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const json = await response.json();
+    signal?.throwIfAborted();
     if (!Array.isArray(json?.models)) return [];
     return (json.models as Array<{ name?: string }>).map(model => String(model.name || '')).filter(Boolean);
   } catch (error) {
+    signal?.throwIfAborted();
     console.warn('[beta-background:providers] unable to list models', error);
     return [];
   } finally {
@@ -20,10 +22,11 @@ export async function listOllamaModels(baseUrl?: string): Promise<string[]> {
   }
 }
 
-export async function resolveOllamaChatModel(baseUrl: string, installed?: string[]): Promise<string> {
+export async function resolveOllamaChatModel(baseUrl: string, installed?: string[], signal?: AbortSignal): Promise<string> {
   const settings = await getModelSettings();
+  signal?.throwIfAborted();
   if (settings.chatModel) return settings.chatModel;
-  const models = installed ?? await listOllamaModels(baseUrl);
+  const models = installed ?? await listOllamaModels(baseUrl, signal);
   return models[0] || 'llama3.1';
 }
 

@@ -1,7 +1,9 @@
 /// <reference types="chrome" />
 
 import { runOperation, cancelOperation } from './operations';
-import { getSettings, updateSettings } from '../settings/index';
+import { CHAT_PROVIDER_DISABLED } from '../../shared/config/index';
+import { cancelSavedWork } from '../processing/savedWork';
+import { getSettings, updateSettings, toggleCapturePause, excludeCaptureSite } from '../settings/index';
 import { captureTab } from '../capture/manual';
 import {
   getEmbeddingConfig,
@@ -15,9 +17,11 @@ import {
   probeBrowserEmbeddingRuntime
 } from '../embeddings/index';
 import { searchStoredPages } from '../search/index';
-import { handleAskQuestion, cancelAskQuestion, type AskOptions } from '../ask/index';
+import { handleAskQuestion, cancelAskQuestion, cancelAllAskQuestions, type AskOptions } from '../ask/index';
 import {
   deleteManagePages,
+  previewForgetPages,
+  forgetManagePages,
   exportManagePages,
   exportBackupPage,
   importBackupPage,
@@ -30,23 +34,35 @@ import { getModelSettings, updateModelSettings } from '../models/index';
 import { providerManager } from '../providers/manager';
 import { getProviderBaseUrl } from '../providers/config';
 import { listLogs, clearLogs } from '../logs/index';
-import { listProcessingEntries } from '../processing/index';
 import { backfillMissingEmbeddings } from '../embeddings/backfill';
 import { queuePageSummary } from '../summaries/index';
 import type { BetaSettings, EmbeddingConfig } from '../../shared/config/index';
 import { AppleSafetyBlockError } from '../../shared/providerErrors';
 import { getRecentPages } from '../manage/recents';
+import { readSearchFilters } from '../../shared/searchFilters';
+import { getSavedPage, getSavedHistory } from '../manage/reader';
+import { storageManager } from '../storage/manager';
+import { bindBackupTransfers } from '../manage/backup';
+import { bindFolderBackups, getFolderBackup, setFolderBackup, runFolderBackup } from '../manage/folderBackup';
+import { isTrustedUi } from './trustedUi';
+import { needsLibraryRecovery } from '../storage/libraryRecovery';
 
 type RuntimeMessage =
+  | { type: 'GET_BACKUP_RESTORE_MODE' }
+  | { type: 'GET_FOLDER_BACKUP'; probe?: boolean }
+  | { type: 'SET_FOLDER_BACKUP'; automatic: unknown; keep: unknown }
+  | { type: 'RUN_FOLDER_BACKUP' }
   | { type: 'CANCEL_ASK'; requestId: string }
   | { type: 'CANCEL_SEARCH'; requestId: string }
   | { type: 'CANCEL_BACKFILL'; requestId: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'SET_SETTINGS'; payload?: Partial<BetaSettings> }
+  | { type: 'TOGGLE_CAPTURE_PAUSE' }
+  | { type: 'EXCLUDE_ACTIVE_SITE' }
   | { type: 'SET_APPLE_CLOUD'; enabled: boolean; acknowledgeCloud?: boolean }
   | { type: 'GET_EMBEDDING_CONFIG' }
   | { type: 'SET_EMBEDDING_CONFIG'; payload?: Partial<EmbeddingConfig>; acknowledgeRemoteOrigin?: boolean }
-  | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string }
+  | { type: 'SEARCH_QUERY'; query: string; limit?: number; requestId?: string; filters?: unknown }
   | { type: 'ASK_QUESTION'; question: string; options?: AskOptions }
   | { type: 'GET_MODEL_SETTINGS' }
   | { type: 'SET_MODEL'; key: 'chatModel'; value?: string }
@@ -57,8 +73,13 @@ type RuntimeMessage =
   | { type: 'PROVIDER_ACTION'; providerId: string; action: string; baseOverride?: string }
   | { type: 'GET_PAGE_LIST' }
   | { type: 'GET_RECENT_PAGES'; after?: unknown }
-  | { type: 'GET_PAGE_PREVIEW'; url: string }
+  | { type: 'GET_PAGE_PREVIEW'; url: string; timestamp?: number; versionId?: string }
+  | { type: 'GET_SAVED_PAGE'; url: string; timestamp?: number; query?: string; chunkIndex?: number; versionId?: string }
+  | { type: 'GET_SAVED_HISTORY'; url: string }
+  | { type: 'UPDATE_SAVED_VERSION'; url: string; versionId: string; action: 'keep' | 'release' | 'delete' }
   | { type: 'DELETE_PAGE'; url?: string; urls?: string[] }
+  | { type: 'PREVIEW_FORGET_PAGES'; filters?: unknown }
+  | { type: 'FORGET_PAGES'; selection?: unknown; filters?: unknown }
   | { type: 'GET_ALL_PAGES' }
   | { type: 'GET_BACKUP_PAGE'; afterUrl?: string }
   | { type: 'IMPORT_BACKUP_PAGE'; line: string }
@@ -108,6 +129,14 @@ function handleCaptureActiveTab(sendResponse: SendResponse): boolean {
 }
 
 const runtimeHandlers: RuntimeHandlerMap = {
+  GET_BACKUP_RESTORE_MODE: (_message, respond) => respondWith(needsLibraryRecovery().then(recover => ({ recover })), respond),
+  GET_FOLDER_BACKUP: (message, respond) => respondWith(getFolderBackup(message.probe === true), respond),
+  SET_FOLDER_BACKUP: (message, respond) => respondWith(setFolderBackup(message.automatic, message.keep).then(() => ({ ok: true })), respond),
+  RUN_FOLDER_BACKUP: (_message, respond) => respondWith(runFolderBackup(), respond),
+  TOGGLE_CAPTURE_PAUSE: (_message, sendResponse) => respondWith(toggleCapturePause().then(settings => ({ settings })), sendResponse),
+  EXCLUDE_ACTIVE_SITE: (_message, sendResponse) => respondWith(chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs: Array<{ url?: string }>) => excludeCaptureSite(tabs[0]?.url || '')), sendResponse),
+  PREVIEW_FORGET_PAGES: (message, sendResponse) => respondWith(previewForgetPages(message.filters), sendResponse),
+  FORGET_PAGES: (message, sendResponse) => respondWith(forgetManagePages(message.selection, message.filters), sendResponse),
   GET_BACKUP_PAGE: (message, sendResponse) =>
     respondWith(exportBackupPage(message.afterUrl), sendResponse),
   IMPORT_BACKUP_PAGE: (message, sendResponse) =>
@@ -130,7 +159,10 @@ const runtimeHandlers: RuntimeHandlerMap = {
   SET_SETTINGS: (message, sendResponse) => {
     const payload = { ...message.payload };
     delete payload.applePrivateCloud;
-    return respondWith(updateSettings(payload).then(settings => ({ settings })), sendResponse);
+    return respondWith(updateSettings(payload).then(settings => {
+      if (payload.activeProviderId === CHAT_PROVIDER_DISABLED) cancelAllAskQuestions();
+      return { settings };
+    }), sendResponse);
   },
 
   SET_APPLE_CLOUD: (message, sendResponse) => {
@@ -163,7 +195,9 @@ const runtimeHandlers: RuntimeHandlerMap = {
       runOperation('search', message.requestId, (signal) => searchStoredPages(
         String(message.query || ''),
         typeof message.limit === 'number' ? message.limit : 10,
-        { signal }
+        { signal, filters: readSearchFilters(message.filters), onTextResults: results => {
+          if (message.requestId) void Promise.resolve(chrome.runtime.sendMessage({ type: 'SEARCH_RESULTS_UPDATE', requestId: message.requestId, results })).catch(() => {});
+        } }
       )).then((results) => ({ results })),
       sendResponse
     ),
@@ -230,7 +264,13 @@ const runtimeHandlers: RuntimeHandlerMap = {
       sendResponse
     ),
 
-  GET_PAGE_PREVIEW: (message, sendResponse) => respondWith(getPagePreview(String(message.url || '')).then(page => ({ page })), sendResponse),
+  GET_PAGE_PREVIEW: (message, sendResponse) => respondWith(getPagePreview(String(message.url || ''), message.timestamp, message.versionId).then(page => ({ page })), sendResponse),
+  GET_SAVED_PAGE: (message, sendResponse) => respondWith(getSavedPage(String(message.url || ''), message.timestamp, String(message.query || ''), message.chunkIndex, message.versionId).then(page => ({ page })), sendResponse),
+  GET_SAVED_HISTORY: (message, sendResponse) => respondWith(getSavedHistory(String(message.url || '')).then(versions => ({ versions })), sendResponse),
+  UPDATE_SAVED_VERSION: (message, sendResponse) => {
+    if (!['keep', 'release', 'delete'].includes(message.action)) { sendResponse({ error: 'Choose a supported saved-version action.' }); return false; }
+    return respondWith(storageManager.updateSavedVersion(String(message.url || ''), String(message.versionId || ''), message.action).then(removed => { cancelSavedWork(removed); return { ok: true }; }), sendResponse);
+  },
 
   GET_PAGE_LIST: (_message, sendResponse) =>
     respondWith(
@@ -296,10 +336,7 @@ const runtimeHandlers: RuntimeHandlerMap = {
     respondWith(clearLogs().then(() => ({ ok: true })), sendResponse),
 
   GET_PROCESSING: (_message, sendResponse) =>
-    respondWith(
-      listProcessingEntries().then((queue) => ({ queue })),
-      sendResponse
-    ),
+    respondWith(storageManager.listProcessingSummaries().then(queue => ({ queue })), sendResponse),
 
   CAPTURE_ACTIVE_TAB: (_message, sendResponse) => handleCaptureActiveTab(sendResponse),
 
@@ -346,6 +383,8 @@ const runtimeHandlers: RuntimeHandlerMap = {
 
 export function orchestrateLifecycle(): void {
   console.info('[beta-background:orchestration] lifecycle orchestration ready');
+  bindBackupTransfers();
+  bindFolderBackups();
   chrome.runtime.onMessage.addListener(
     (
       message: (RuntimeMessage & Record<string, unknown>) | undefined,
@@ -357,15 +396,13 @@ export function orchestrateLifecycle(): void {
       }
       const handler = runtimeHandlers[message.type as RuntimeMessage['type']];
       if (!handler) return false;
-      const guarded = ['ASK_QUESTION', 'SEARCH_QUERY', 'CANCEL_ASK', 'CANCEL_SEARCH', 'PROVIDER_ACTION', 'SET_APPLE_CLOUD', 'REGENERATE_PAGE_SUMMARY', 'BACKFILL_EMBEDDINGS', 'CANCEL_BACKFILL'];
+      const captureActions = ['TOGGLE_CAPTURE_PAUSE', 'EXCLUDE_ACTIVE_SITE', 'PREVIEW_FORGET_PAGES', 'FORGET_PAGES', 'GET_SAVED_HISTORY', 'UPDATE_SAVED_VERSION'];
+      const backupActions = ['GET_ALL_PAGES', 'GET_BACKUP_PAGE', 'IMPORT_BACKUP_PAGE', 'IMPORT_PAGES', 'GET_BACKUP_RESTORE_MODE', 'GET_FOLDER_BACKUP', 'SET_FOLDER_BACKUP', 'RUN_FOLDER_BACKUP'];
+      const guarded = ['SET_SETTINGS', 'ASK_QUESTION', 'SEARCH_QUERY', 'GET_SAVED_PAGE', 'CANCEL_ASK', 'CANCEL_SEARCH', 'PROVIDER_ACTION', 'SET_APPLE_CLOUD', 'REGENERATE_PAGE_SUMMARY', 'BACKFILL_EMBEDDINGS', 'CANCEL_BACKFILL', ...backupActions, ...captureActions];
       if (guarded.includes(message.type)) {
         const source = sender as { id?: string; url?: string };
-        let trusted = false;
-        try {
-          const url = new URL(source.url || '');
-          trusted = source.id === chrome.runtime.id && url.protocol === 'chrome-extension:' && url.hostname === chrome.runtime.id && url.pathname.startsWith('/dist/beta/ui/');
-        } catch { trusted = false; }
-        if (!trusted) { sendResponse({ error: 'Only Web Recall extension pages can request model operations.' }); return false; }
+        const trusted = isTrustedUi(source);
+        if (!trusted) { sendResponse({ error: captureActions.includes(message.type) ? 'Only Web Recall extension pages can use capture controls.' : backupActions.includes(message.type) ? 'Only Web Recall extension pages can transfer saved memory.' : message.type === 'GET_SAVED_PAGE' ? 'Only Web Recall extension pages can read saved captures.' : 'Only Web Recall extension pages can request model operations.' }); return false; }
       }
       return (handler as (message: RuntimeMessage & Record<string, unknown>, sendResponse: SendResponse) => boolean)(
         message,

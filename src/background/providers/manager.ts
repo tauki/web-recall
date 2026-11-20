@@ -10,6 +10,9 @@ import {
 import type { ProviderConsentOptions } from './access';
 import { getAppleStatus } from './apple';
 import { getSettings } from '../settings/index';
+import { CHAT_PROVIDER_DISABLED } from '../../shared/config/index';
+import { ChatDisabledError } from '../../shared/providerErrors';
+import { chatWorkSignal } from './chatWork';
 
 export type ProviderActionPayload = { baseOverride?: string };
 export type ProviderActionResult = { status?: ProviderStatus; models?: string[] };
@@ -18,9 +21,17 @@ export type ProviderAdapter = {
   id: string;
   describe: () => Promise<ProviderDescriptor>;
   setSetting: (key: string, value: string, options?: ProviderConsentOptions) => Promise<void>;
-  action: (action: string, payload?: ProviderActionPayload) => Promise<ProviderActionResult>;
-  listModels?: () => Promise<string[]>;
+  action: (action: string, payload: ProviderActionPayload | undefined, signal: AbortSignal) => Promise<ProviderActionResult>;
+  listModels?: (signal: AbortSignal) => Promise<string[]>;
 };
+
+async function activeChatSignal(): Promise<AbortSignal> {
+  const signal = chatWorkSignal();
+  const { activeProviderId } = await getSettings();
+  signal.throwIfAborted();
+  if (activeProviderId === CHAT_PROVIDER_DISABLED) throw new ChatDisabledError();
+  return signal;
+}
 
 export class ProviderManager {
   private providers = new Map<string, ProviderAdapter>();
@@ -42,13 +53,13 @@ export class ProviderManager {
   async runAction(providerId: string, action: string, payload?: ProviderActionPayload): Promise<ProviderActionResult> {
     const provider = this.providers.get(providerId);
     if (!provider) throw new Error('Unknown provider');
-    return provider.action(action, payload);
+    return provider.action(action, payload, await activeChatSignal());
   }
 
   async listModels(providerId: string): Promise<string[]> {
     const provider = this.providers.get(providerId);
     if (!provider || !provider.listModels) return [];
-    return provider.listModels();
+    return provider.listModels(await activeChatSignal());
   }
 }
 
@@ -68,11 +79,11 @@ providerManager.register({
     };
   },
   setSetting: async () => { throw new Error('Apple uses its system model, not an HTTP endpoint.'); },
-  action: async (action) => {
+  action: async (action, _payload, signal) => {
     if (action !== 'test') throw new Error('Unknown provider action');
     const settings = await getSettings();
     try {
-      const status = await getAppleStatus(settings.applePrivateCloud ? 'private-cloud' : 'on-device', settings.applePrivateCloud);
+      const status = await getAppleStatus(settings.applePrivateCloud ? 'private-cloud' : 'on-device', settings.applePrivateCloud, signal);
       return { status: { online: status.available, lastChecked: new Date().toISOString(), contextTokens: status.contextTokens } };
     } catch (error) {
       return { status: { online: false, lastChecked: new Date().toISOString(), lastError: error instanceof Error ? error.message : String(error) } };
@@ -82,20 +93,23 @@ providerManager.register({
 
 providerManager.register({
   id: 'ollama',
-  describe: async () => describeOllamaProvider((await getSettings()).activeProviderId !== 'apple'),
+  describe: async () => {
+    const signal = chatWorkSignal();
+    return describeOllamaProvider((await getSettings()).activeProviderId === 'ollama', signal);
+  },
   setSetting: updateOllamaSetting,
-  action: async (action, payload) => {
+  action: async (action, payload, signal) => {
     if (action === 'test') {
-      const status = await getOllamaStatus(payload?.baseOverride, true);
+      const status = await getOllamaStatus(payload?.baseOverride, true, signal);
       return { status };
     }
     if (action === 'refreshModels') {
-      const models = await listOllamaModels(payload?.baseOverride);
+      const models = await listOllamaModels(payload?.baseOverride, signal);
       return { models };
     }
     throw new Error('Unknown provider action');
   },
-  listModels: () => listOllamaModels()
+  listModels: signal => listOllamaModels(undefined, signal)
 });
 
 export { providerManager };

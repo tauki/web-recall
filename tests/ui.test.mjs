@@ -4,24 +4,27 @@ import { JSDOM } from 'jsdom';
 import { loadSource, tick, waitFor } from './helpers.mjs';
 import { providerFixture } from './provider-fixture.mjs';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
+import { recallFixture, recallPage } from './recall-fixture.mjs';
 
 const { DEFAULT_SETTINGS, DEFAULT_EMBEDDING_CONFIG } = await loadSource('src/shared/config/index.ts');
 const pages = [{ url: 'https://example.test/cats', title: 'Cats', timestamp: Date.now(), manual: false, embeddingStatus: 'Present', chunkCount: 3 }];
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
-async function ui(view, overrides = {}, backend) {
+async function ui(view, overrides = {}, backend, context = {}) {
   const dom = new JSDOM(`<div id="app-root" data-view="${view}"></div>`, { url: 'https://extension.test/' });
   const { window } = dom;
   window.HTMLElement.prototype.scrollIntoView = () => {};
   window.scrollTo = () => {};
   const listeners = [], requests = [], polls = [];
   let pendingMessages = 0;
+  const ports = [];
   const responses = {
-    GET_SETTINGS: () => ({ settings: { ...DEFAULT_SETTINGS, captureSetupComplete: true } }),
+    GET_SETTINGS: () => ({ settings: { ...DEFAULT_SETTINGS, activeProviderId: 'ollama', captureSetupComplete: true, recallSetupComplete: true, automaticAi: true } }),
     GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG } }),
     GET_PROVIDERS: () => ({ providers: [] }),
     GET_PROVIDER_CONFIG: () => ({ baseUrl: 'http://localhost:11434' }),
     GET_BROWSER_EMBED_STATUS: () => ({ status: { ready: false, state: 'idle', runtimeAvailable: true } }),
     GET_PROCESSING: () => ({ queue: [] }),
+    GET_BACKUP_RESTORE_MODE: () => ({ recover: false }),
     GET_PAGE_LIST: () => ({ pages }),
     GET_RECENT_PAGES: () => ({ ...responses.GET_PAGE_LIST(), nextCursor: null }),
     ...overrides
@@ -29,6 +32,7 @@ async function ui(view, overrides = {}, backend) {
   const chrome = {
     permissions: { allowed: true, requests: [], async request(request) { this.requests.push(request); return this.allowed; } },
     runtime: {
+      connect(options) { const port = backend.runtime.connect(options); ports.push(port); return port; },
       getURL: path => 'https://extension.test/' + path,
       onMessage: { addListener: listener => listeners.push(listener), removeListener: listener => { const index = listeners.indexOf(listener); if (index >= 0) listeners.splice(index, 1); } },
       sendMessage(message, callback) {
@@ -50,15 +54,721 @@ async function ui(view, overrides = {}, backend) {
     '../shared/polling': { startPolling: task => { polls.push(task); void task(); return () => {}; } }
   }, {
     window, document: window.document, HTMLElement: window.HTMLElement, TextEncoder,
-    chrome
+    chrome, navigator: window.navigator, ...context
   });
   await tick(); await tick();
   const q = selector => window.document.querySelector(selector);
   const change = (selector, value) => { q(selector).value = value; q(selector).dispatchEvent(new window.Event('change', { bubbles: true })); };
-  return { window, q, change, requests, listenerCount: () => listeners.length, permissions: chrome.permissions, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => window.close(),
+  return { window, q, change, requests, listenerCount: () => listeners.length, permissions: chrome.permissions, poll: async () => { polls.forEach(task => task()); await tick(); await tick(); }, emit: message => listeners.forEach(f => f(message)), close: () => { for (const port of ports) port.disconnect(); window.close(); },
     settle: () => waitFor(() => pendingMessages === 0, 'UI requests to finish'),
     submit: selector => q(selector).dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true })) };
 }
+
+async function openModels(fixture) {
+  fixture.q('a[data-view="settings"]').click();
+  const models = fixture.q('#settings-models');
+  if (!models.open) await new Promise(resolve => { models.addEventListener('toggle', resolve, { once: true }); models.open = true; });
+  await tick();
+}
+
+async function openStorage(fixture) {
+  fixture.q('a[data-view="settings"]').click();
+  const disclosure = fixture.q('#settings-storage');
+  if (!disclosure.open) await new Promise(resolve => {
+    disclosure.addEventListener('toggle', resolve, { once: true });
+    disclosure.querySelector('summary').click();
+  });
+  await tick();
+}
+
+test('Memory never claims zero pages before a successful library read, even if the queue responds first', async testContext => {
+  const first = deferred(), queue = deferred();
+  let result = first.promise;
+  const fixture = await ui('manage', { GET_PAGE_LIST: () => result, GET_PROCESSING: () => queue.promise });
+  testContext.after(fixture.close);
+  const count = fixture.q('#manage-count'), rows = fixture.q('#manage-rows'), status = fixture.q('#manage-status');
+  queue.resolve({ queue: [] }); await tick();
+  assert.match(count.textContent, /loading/i);
+  assert.doesNotMatch(rows.textContent, /No saved pages yet/);
+  first.resolve({ error: 'The previously opened local library is missing. Restore a backup.' }); await fixture.settle();
+  assert.match(status.textContent, /library is missing.*restore a backup/i);
+  const recovery = fixture.q('#manage-library-recovery');
+  assert.equal(recovery.hidden, false);
+  assert.match(recovery.querySelector('a').href, /\/sidepanel\/index\.html#settings-restore$/u);
+  assert.doesNotMatch(count.textContent, /0 pages/);
+  assert.doesNotMatch(rows.textContent, /No saved pages yet/);
+  result = Promise.resolve({ pages: [] });
+  fixture.q('#manage-refresh').click(); await fixture.settle();
+  assert.equal(count.textContent, '0 pages');
+  assert.match(rows.textContent, /No saved pages yet/);
+  assert.equal(status.textContent, '');
+  assert.equal(recovery.hidden, true);
+  result = Promise.resolve({ error: 'Storage is unavailable' });
+  fixture.q('#manage-refresh').click(); await fixture.settle();
+  assert.match(status.textContent, /Storage is unavailable/);
+  assert.equal(recovery.hidden, true, 'An unrelated storage failure must not suggest recovery');
+  assert.doesNotMatch(count.textContent, /0 pages/);
+  assert.doesNotMatch(rows.textContent, /No saved pages yet/);
+});
+
+test('folder backup settings autosave ordered changes, and Back up now uses the committed count', async testContext => {
+  const firstWrite = deferred();
+  const writes = [], manual = [];
+  let settings = { automatic: false, keep: 3 };
+  let folder = '/test-backups';
+  const fixture = await ui('sidepanel', {
+    GET_FOLDER_BACKUP: ({ probe }) => ({ ...settings, ...(probe ? { folder } : {}) }),
+    SET_FOLDER_BACKUP: async ({ automatic, keep }) => {
+      writes.push({ automatic, keep });
+      if (writes.length === 1) await firstWrite.promise;
+      settings = { automatic, keep };
+      return { ok: true };
+    },
+    RUN_FOLDER_BACKUP: () => { manual.push({ ...settings }); return {}; }
+  });
+  testContext.after(fixture.close);
+  await openStorage(fixture);
+  const disclosure = fixture.q('#manage-folder-backup');
+  const auto = fixture.q('#manage-backup-automatic');
+  const keep = fixture.q('#manage-backup-keep');
+  disclosure.open = true;
+  await waitFor(() => !keep.disabled, 'folder settings to load');
+  assert.doesNotMatch(disclosure.textContent, /Save settings/);
+  keep.value = '7';
+  keep.dispatchEvent(new fixture.window.Event('input', { bubbles: true }));
+  assert.equal(writes.length, 0, 'An unfinished number edit must not apply retention');
+  fixture.change('#manage-backup-keep', '7');
+  auto.click();
+  await waitFor(() => writes.length === 1, 'retention to save first');
+  assert.deepEqual(writes[0], { automatic: false, keep: 7 });
+  assert.equal(manual.length, 0);
+  firstWrite.resolve();
+  await waitFor(() => writes.length === 2, 'the enabled toggle to save without another click');
+  assert.deepEqual(writes[1], { automatic: true, keep: 7 });
+  await fixture.settle();
+
+  folder = undefined;
+  auto.click();
+  await waitFor(() => !settings.automatic, 'the toggle to turn off without connecting to the companion');
+  assert.equal(fixture.permissions.requests.length, 1);
+  fixture.change('#manage-backup-keep', '31');
+  assert.equal(keep.value, '7');
+  assert.equal(writes.length, 3);
+  fixture.change('#manage-backup-keep', '5');
+  fixture.q('#manage-backup-run').click();
+  await waitFor(() => manual.length === 1, 'manual backup to wait for the latest retention');
+  assert.deepEqual(manual[0], { automatic: false, keep: 5 });
+  await fixture.settle();
+  auto.click();
+  await waitFor(() => !auto.checked && /Choose a folder/.test(fixture.q('#manage-backup-report').textContent), 'unavailable folder to revert the setting');
+  assert.deepEqual(settings, { automatic: false, keep: 5 });
+});
+
+test('a malformed Memory reply leaves the last readable library on screen and shows an error', async testContext => {
+  let result = { pages };
+  const fixture = await ui('manage', { GET_PAGE_LIST: () => result });
+  testContext.after(fixture.close);
+  await fixture.settle();
+  const rows = fixture.q('#manage-rows');
+  for (const page of pages) assert.ok(rows.textContent.includes(page.title));
+  result = { pages: [null] };
+  fixture.q('#manage-refresh').click(); await fixture.settle();
+  for (const page of pages) assert.ok(rows.textContent.includes(page.title), 'A failed refresh must not hide previously read evidence');
+  assert.match(fixture.q('#manage-status').textContent, /failed to load pages/i);
+});
+
+test('Memory Backups opens Settings and reads storage only on demand', async testContext => {
+  let estimates = 0;
+  const fixture = await ui('sidepanel', {}, undefined, { navigator: { storage: { estimate: async () => { estimates++; return { usage: 134217728, quota: 9999999999 }; } } } });
+  testContext.after(fixture.close);
+  assert.equal(estimates, 0, 'Loading saved pages must not start a hidden storage check');
+  assert.ok(fixture.q('#settings-storage-summary').textContent.trim(), 'Storage and backups is described before it opens');
+  fixture.q('a[data-view="manage"]').click();
+  const memory = fixture.q('#beta-view-manage');
+  assert.equal(memory.querySelector('#manage-import'), null, 'Memory Manager must not duplicate the file picker');
+  [...memory.querySelectorAll('a')].find(link => link.textContent === 'Backups').click();
+  await waitFor(() => estimates === 1, 'Settings storage estimate');
+  assert.equal(fixture.q('#beta-view-settings').hidden, false);
+  assert.equal(fixture.q('#settings-storage').open, true);
+  assert.equal(estimates, 1);
+  assert.match(fixture.q('#manage-storage-usage').textContent, /128 MiB/);
+  assert.match(fixture.q('#settings-storage').textContent, /downloaded browser models/);
+  assert.match(fixture.q('#settings-storage').textContent, /Clearing Chrome history won’t delete saved pages/);
+});
+
+test('missing library shortcuts lead directly to the restore picker without starting a transfer', async testContext => {
+  const error = { error: 'The previously activated saved library is missing.' };
+  const fixture = await ui('sidepanel', { GET_PAGE_LIST: () => error, GET_RECENT_PAGES: () => error });
+  testContext.after(fixture.close);
+  const searchLink = fixture.q('#beta-library-recovery a');
+  assert.equal(searchLink.parentElement.hidden, false);
+  searchLink.click();
+  const picker = fixture.q('input[type=file]');
+  assert.equal(fixture.window.document.activeElement, picker);
+  fixture.q('a[data-view="manage"]').click();
+  await fixture.settle();
+  const memoryLink = fixture.q('#manage-library-recovery a');
+  assert.equal(memoryLink.parentElement.hidden, false);
+  memoryLink.click();
+  assert.equal(fixture.q('#settings-storage').open, true);
+  assert.equal(fixture.window.document.activeElement, picker);
+  assert.ok(!fixture.requests.some(message => message.type === 'GET_BACKUP_RESTORE_MODE'));
+});
+
+test('Stop releases Restore while the library check is pending and ignores a late reply', async testContext => {
+  const check = deferred();
+  let fileReads = 0;
+  const fixture = await ui('sidepanel', { GET_BACKUP_RESTORE_MODE: () => check.promise });
+  testContext.after(fixture.close);
+  await openStorage(fixture);
+  const input = fixture.q('input[type=file]');
+  Object.defineProperty(input, 'files', { value: [{ name: 'backup.json', size: 2, text: async () => { fileReads++; return '[]'; } }] });
+  input.dispatchEvent(new fixture.window.Event('change'));
+  assert.equal(input.disabled, true);
+  fixture.q('#settings-transfer-stop').click();
+  await waitFor(() => !input.disabled, 'Stop to release Restore before the check returns');
+  assert.match(fixture.q('#settings-backup-status').textContent, /Import stopped/);
+  check.resolve({ recover: true });
+  await fixture.settle();
+  assert.equal(fileReads, 0);
+});
+
+test('storage errors and missing estimates never become zero or replace Memory operation status; refresh recovers', async testContext => {
+  for (const failure of [undefined, {}, { estimate: async () => ({ quota: 200 }) }, { estimate: async () => ({ usage: NaN }) }, { estimate: async () => ({ usage: -1 }) }, { estimate: async () => { throw Error('Unavailable'); } }]) {
+    const navigator = { storage: failure };
+    const fixture = await ui('sidepanel', {}, undefined, { navigator }); testContext.after(fixture.close);
+    fixture.q('#settings-backup-status').textContent = 'Backup saved.';
+    await openStorage(fixture);
+    assert.match(fixture.q('#manage-storage-usage').textContent, /unavailable/i);
+    assert.doesNotMatch(fixture.q('#manage-storage-usage').textContent, /0 B|NaN/);
+    assert.equal(fixture.q('#settings-backup-status').textContent, 'Backup saved.');
+    assert.equal(fixture.q('#manage-storage-refresh').disabled, false);
+    navigator.storage = { estimate: async () => ({ usage: 0 }) };
+    fixture.q('#manage-storage-refresh').click(); await tick();
+    assert.match(fixture.q('#manage-storage-usage').textContent, /0 B/);
+  }
+});
+
+test('storage refresh follows deletion and ignores an older estimate that finishes afterward', async testContext => {
+  const first = deferred(); let estimates = 0; let saved = pages;
+  const fixture = await ui('sidepanel', {
+    GET_PAGE_LIST: () => ({ pages: saved }),
+    DELETE_PAGE: () => { saved = []; return { deleted: 1 }; }
+  }, undefined, { navigator: { storage: { estimate: () => ++estimates === 1 ? first.promise : Promise.resolve({ usage: 2048 }) } } });
+  testContext.after(fixture.close);
+  await openStorage(fixture);
+  assert.equal(fixture.q('#manage-storage-usage').getAttribute('aria-busy'), 'true');
+  fixture.q('a[data-view="manage"]').click(); await fixture.settle();
+  fixture.q('#manage-select').click(); fixture.q('#manage-select-all').checked = true; fixture.change('#manage-select-all', '');
+  fixture.q('#manage-delete').click(); await fixture.settle(); await tick();
+  fixture.q('a[data-view="settings"]').click(); await tick();
+  assert.match(fixture.q('#manage-storage-usage').textContent, /2 KiB/);
+  first.resolve({ usage: 536870912 }); await tick();
+  assert.match(fixture.q('#manage-storage-usage').textContent, /2 KiB/);
+  assert.equal(fixture.q('#manage-storage-usage').getAttribute('aria-busy'), 'false');
+  assert.equal(fixture.q('#manage-count').textContent, '0 pages');
+  fixture.q('#settings-storage').open = false; await tick();
+  const before = estimates;
+  fixture.window.dispatchEvent(new fixture.window.CustomEvent('wr-memory-changed')); await tick();
+  assert.equal(estimates, before, 'Closed storage controls must not poll after library changes');
+});
+
+test('storage checks pause when the section or Settings closes, then refresh when shown again', async testContext => {
+  let estimates = 0;
+  const fixture = await ui('sidepanel', {}, undefined, { navigator: { storage: { estimate: async () => ({ usage: ++estimates * 1024 }) } } });
+  testContext.after(fixture.close);
+  await openStorage(fixture);
+  const storage = fixture.q('#settings-storage');
+  storage.open = false; await tick(); await tick();
+  const before = estimates;
+  fixture.window.dispatchEvent(new fixture.window.CustomEvent('wr-memory-changed')); await tick();
+  assert.equal(estimates, before);
+  storage.open = true; await waitFor(() => estimates > before, 'fresh estimate after reopening storage settings');
+  assert.match(fixture.q('#manage-storage-usage').textContent, /2 KiB/);
+  fixture.q('#beta-view-settings .utility-back').click();
+  fixture.window.dispatchEvent(new fixture.window.CustomEvent('wr-memory-changed')); await tick();
+  assert.equal(estimates, 2);
+  fixture.q('a[data-view="settings"]').click(); await fixture.settle(); await tick();
+  assert.match(fixture.q('#manage-storage-usage').textContent, /3 KiB/);
+});
+
+test('the inline first-run guide follows a real saved capture, unquoted search and successful saved reading before optional AI', async testContext => {
+  const backend = await recallFixture(testContext), fixture = await ui('sidepanel', {}, backend); testContext.after(fixture.close); await fixture.settle();
+  assert.match(fixture.q('.wr-empty-memory').textContent, /No model setup needed/);
+  assert.equal(fixture.q('#beta-optional-ai').hidden, true);
+  assert.ok(!fixture.requests.some(message => message.type === 'GET_PROVIDERS'));
+  const manual = fixture.q('#beta-keep-manual-capture'), capture = fixture.q('.wr-empty-memory .primary-button');
+  manual.focus(); manual.click(); await fixture.settle();
+  assert.equal(fixture.q('#beta-capture-setup').hidden, true);
+  assert.equal(fixture.window.document.activeElement, capture, 'Choosing manual saving moves focus to Capture current tab');
+  capture.click(); await fixture.settle(); await backend.drain();
+  assert.equal(fixture.q('#beta-recall-setup').hidden, false); assert.equal(fixture.q('#beta-recall-heading').textContent, 'Find your saved page');
+  assert.equal(fixture.window.document.activeElement, fixture.q('#beta-recall-next'), 'Replacing the empty library moves focus to Try a search');
+  fixture.q('#beta-recall-next').click(); assert.equal(fixture.window.document.activeElement.id, 'beta-search-input');
+  fixture.q('#beta-search-input').value = 'Copper terns'; fixture.submit('#beta-search-form'); await fixture.settle();
+  assert.equal(fixture.q('#beta-recall-heading').textContent, 'Read what you saved');
+  assert.equal(backend.stored.betaSettings.recallSetupComplete, false);
+  fixture.q('#beta-recall-next').click(); await fixture.settle(); await tick();
+  assert.equal(fixture.q('.saved-reader-text').textContent, recallPage.text);
+  assert.equal(fixture.q('.saved-reader-text mark').textContent, 'Copper terns');
+  assert.equal(backend.stored.betaSettings.recallSetupComplete, true); assert.equal(backend.stored.betaSettings.automaticAi, false);
+  assert.equal(fixture.q('#beta-recall-setup').hidden, true); assert.equal(fixture.q('#beta-optional-ai').hidden, false);
+  assert.equal(backend.requests.length, 0); assert.equal(backend.nativeCalls(), 0);
+  fixture.q('#beta-setup-ai').click(); await tick(); await fixture.settle();
+  await waitFor(() => fixture.requests.some(message => message.type === 'GET_PROVIDERS'), 'optional model discovery after opening Models'); await fixture.settle();
+  assert.equal(fixture.q('#beta-view-settings').hidden, false); assert.equal(fixture.q('#settings-models').open, true);
+  assert.ok(fixture.requests.some(message => message.type === 'GET_PROVIDERS'));
+  assert.equal(fixture.q('#beta-automatic-ai').checked, false);
+  assert.match(fixture.q('a[href="https://github.com/tauki/web-recall#setup"]').textContent, /Ollama setup/);
+  const reopened = await ui('sidepanel', {}, backend); testContext.after(reopened.close); await reopened.settle();
+  assert.equal(reopened.q('#beta-recall-setup').hidden, true); assert.equal(reopened.q('#beta-optional-ai').hidden, true);
+});
+
+test('delayed capture setup and first-save updates leave focus on work the user moved to', async testContext => {
+  const settings = { ...DEFAULT_SETTINGS, paused: true, captureSetupComplete: false, recallSetupComplete: false };
+  const choice = deferred(), capture = deferred();
+  let recents = [];
+  const fixture = await ui('sidepanel', {
+    GET_SETTINGS: () => ({ settings }), SET_SETTINGS: () => choice.promise,
+    GET_RECENT_PAGES: () => ({ pages: recents, nextCursor: null }), CAPTURE_ACTIVE_TAB: () => capture.promise
+  });
+  testContext.after(fixture.close);
+  await fixture.settle();
+  const input = fixture.q('#beta-search-input'), manual = fixture.q('#beta-keep-manual-capture');
+  manual.focus(); manual.click(); input.focus();
+  const savedSettings = { ...settings, captureSetupComplete: true };
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: savedSettings });
+  choice.resolve({ settings: savedSettings }); await fixture.settle();
+  assert.equal(fixture.q('#beta-capture-setup').hidden, true);
+  assert.equal(fixture.window.document.activeElement, input, 'Saving the capture choice does not reclaim focus');
+  const captureButton = fixture.q('.wr-empty-memory .primary-button');
+  captureButton.focus(); captureButton.click(); input.focus();
+  recents = pages;
+  fixture.emit({ type: 'CAPTURE_QUEUE_UPDATED' });
+  capture.resolve({ ok: true, received: true }); await fixture.settle();
+  assert.equal(fixture.q('.wr-empty-memory'), null);
+  assert.equal(fixture.q('#beta-recall-setup').hidden, false);
+  assert.equal(fixture.window.document.activeElement, input, 'Rendering the saved page does not reclaim focus');
+});
+
+test('an unavailable saved result cannot finish onboarding or prompt for AI setup', async testContext => {
+  const backend = await recallFixture(testContext), fixture = await ui('sidepanel', {}, backend); testContext.after(fixture.close); await fixture.settle();
+  fixture.q('.wr-empty-memory .primary-button').click(); await fixture.settle(); await backend.drain();
+  fixture.q('#beta-search-input').value = 'Copper terns'; fixture.submit('#beta-search-form'); await fixture.settle();
+  await backend.db.deletePages([recallPage.url]);
+  fixture.q('#beta-recall-next').click(); await fixture.settle();
+  assert.match(fixture.q('.saved-reader-host').textContent, /Saved capture unavailable/);
+  assert.equal(backend.stored.betaSettings.recallSetupComplete, false); assert.equal(fixture.q('#beta-optional-ai').hidden, true);
+});
+
+test('Skip guide persists without changing capture policy, contacting models or repeating on reopening', async testContext => {
+  const backend = await recallFixture(testContext), fixture = await ui('sidepanel', {}, backend); testContext.after(fixture.close); await fixture.settle();
+  backend.failNextWrite('betaSettings'); fixture.q('.wr-skip-recall').click(); await fixture.settle();
+  assert.match(fixture.q('#beta-search-status').textContent, /Unable to save guide progress/);
+  assert.equal(backend.stored.betaSettings.recallSetupComplete, false); assert.equal(fixture.q('.wr-skip-recall').hidden, false);
+  fixture.q('.wr-skip-recall').click(); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.recallSetupComplete, true); assert.equal(backend.stored.betaSettings.captureSetupComplete, false);
+  assert.equal(backend.stored.betaSettings.paused, true); assert.equal(backend.stored.betaSettings.automaticAi, false);
+  const reopened = await ui('sidepanel', {}, backend); testContext.after(reopened.close); await reopened.settle();
+  assert.equal(reopened.q('.wr-skip-recall').hidden, true); assert.equal(reopened.q('#beta-optional-ai').hidden, true); assert.equal(backend.requests.length, 0);
+});
+
+test('opening capture or appearance settings never discovers providers, and automatic AI is a separate explicit saved choice', async testContext => {
+  const backend = await recallFixture(testContext), fixture = await ui('sidepanel', {}, backend); testContext.after(fixture.close); await fixture.settle();
+  fixture.q('a[data-view="settings"]').click(); fixture.q('#settings-capture').open = true; await tick(); await fixture.settle();
+  fixture.q('#settings-appearance').open = true; await tick(); await fixture.settle();
+  assert.equal(backend.requests.length, 0); assert.ok(!fixture.requests.some(message => message.type === 'GET_PROVIDERS'));
+  await openModels(fixture); await fixture.settle();
+  assert.ok(fixture.requests.some(message => message.type === 'GET_PROVIDERS'));
+  assert.equal(backend.requests.length, 0, 'Listing provider choices must not probe the disabled chat provider');
+  fixture.q('#beta-automatic-ai').checked = true; fixture.change('#beta-automatic-ai', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.automaticAi, true); assert.equal(backend.requests.length, 0);
+  backend.failNextWrite('betaSettings'); fixture.q('#beta-automatic-ai').checked = false; fixture.change('#beta-automatic-ai', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.automaticAi, true); assert.equal(fixture.q('#beta-automatic-ai').checked, true);
+  assert.match(fixture.q('#beta-settings-status').textContent, /Unable to update automatic AI/);
+  fixture.q('#beta-automatic-ai').checked = false; fixture.change('#beta-automatic-ai', ''); await fixture.settle();
+  assert.equal(backend.stored.betaSettings.automaticAi, false); assert.equal(backend.stored.betaSettings.queryRewrite, true); assert.equal(backend.stored.betaSettings.searchRerank, true);
+  assert.equal(backend.requests.length, 0);
+  assert.ok(!fixture.requests.some(message => ['BACKFILL_EMBEDDINGS', 'DOWNLOAD_BROWSER_EMBED', 'REGENERATE_PAGE_SUMMARY'].includes(message.type)));
+});
+
+test('a failed optional-provider discovery is retryable when Models is reopened', async testContext => {
+  let attempts = 0;
+  const fixture = await ui('sidepanel', { GET_PROVIDERS: () => { if (++attempts === 1) throw Error('Worker temporarily unavailable'); return { providers: [{ id: 'ollama', name: 'Ollama', settings: [], actions: [], models: ['local-model'], status: { online: true }, selectedModel: 'local-model' }] }; } }); testContext.after(fixture.close);
+  await openModels(fixture); await fixture.settle();
+  assert.match(fixture.q('#beta-provider-status').textContent, /Worker temporarily unavailable/);
+  const models = fixture.q('#settings-models');
+  await new Promise(resolve => { models.addEventListener('toggle', resolve, { once: true }); models.open = false; });
+  await openModels(fixture); await fixture.settle();
+  assert.equal(fixture.q('#beta-chat-model').value, 'local-model'); assert.match(fixture.q('#beta-provider-status').textContent, /Ollama online/);
+});
+
+for (const view of ['sidepanel', 'manage']) {
+  for (const [status, expected] of [['queued', /Saved · waiting for indexing/], ['processing', /Saved · indexing/], ['failed', /Saved text is searchable · indexing failed: Model unavailable/]]) {
+    test(`${view} distinguishes ${status} indexing from safe saved text and offers Retry only on failure`, async t => {
+      const f = await ui(view, { GET_PROCESSING: () => ({ queue: [{ ...pages[0], status, textSaved: true, attempts: 1, error: status === 'failed' ? 'Model unavailable' : undefined }] }) }); t.after(f.close); await f.settle();
+      const queue = f.q(view === 'sidepanel' ? '#beta-capture-status' : '#manage-queue');
+      assert.match(queue.textContent, expected);
+      const retry = [...queue.querySelectorAll('button')].find(button => button.textContent === 'Retry');
+      assert.equal(retry.disabled, status !== 'failed');
+      if (view === 'manage') assert.match(f.q('#manage-rows').textContent, expected);
+    });
+  }
+}
+
+for (const view of ['sidepanel', 'manage']) test(`${view} does not promise searchable text for a legacy capture that failed its storage write`, async t => {
+  const f = await ui(view, { GET_PAGE_LIST: () => ({ pages: [] }), GET_PROCESSING: () => ({ queue: [{ ...pages[0], status: 'failed', error: 'Disk full while saving capture' }] }) }); t.after(f.close); await f.settle();
+  const queue = f.q(view === 'sidepanel' ? '#beta-capture-status' : '#manage-queue');
+  assert.match(queue.textContent, /Capture or indexing failed: Disk full/);
+  assert.doesNotMatch(queue.textContent, /Saved|searchable/);
+  assert.equal(queue.querySelector('button').disabled, false);
+});
+
+test('Memory Manager refreshes saved index facts when an admitted job completes', async t => {
+  let hasEmbeddings = false;
+  const f = await ui('manage', {
+    GET_PAGE_LIST: () => ({ pages: [{ ...pages[0], hasEmbeddings, embeddingStatus: '' }] }),
+    GET_PROCESSING: () => ({ queue: hasEmbeddings ? [] : [{ ...pages[0], status: 'processing', textSaved: true }] })
+  }); t.after(f.close); await f.settle();
+  assert.match(f.q('#manage-rows').textContent, /Saved · indexing/);
+  hasEmbeddings = true; f.emit({ type: 'CAPTURE_QUEUE_UPDATED' }); await f.settle();
+  assert.match(f.q('#manage-rows').textContent, /Indexed/);
+  assert.doesNotMatch(f.q('#manage-rows').textContent, /Missing|waiting for indexing/);
+});
+
+test('Memory Manager reads current queue status after an invalidation and ignores a late older result', async t => {
+  const running = { ...pages[0], status: 'processing', textSaved: true };
+  const failed = { ...running, status: 'failed', error: 'Model is offline.' };
+  const delayed = deferred();
+  let response = { queue: [running] };
+  const f = await ui('manage', { GET_PROCESSING: () => response });
+  t.after(f.close); await f.settle();
+  const queue = f.q('#manage-queue');
+  assert.match(queue.textContent, /Saved · indexing/);
+  response = delayed.promise;
+  f.emit({ type: 'CAPTURE_QUEUE_UPDATED' });
+  try {
+    assert.match(queue.textContent, /Saved · indexing/, 'A pending fetch must not clear the last known status');
+    response = { queue: [failed] };
+    f.emit({ type: 'CAPTURE_QUEUE_UPDATED' });
+    await waitFor(() => queue.textContent.includes('Model is offline.'), 'new queue failure to appear');
+  } finally { delayed.resolve({ queue: [running] }); }
+  await f.settle();
+  assert.match(queue.textContent, /Saved text is searchable · indexing failed: Model is offline/);
+  assert.equal([...queue.querySelectorAll('button')].find(button => button.textContent === 'Retry')?.disabled, false);
+});
+
+test('a hidden Memory view does not enumerate saved page bodies on indexing events and refreshes when reopened', async t => {
+  const f = await ui('sidepanel'); t.after(f.close);
+  f.q('a[data-view="manage"]').click(); await f.settle();
+  f.q('a[data-view="sidepanel"]').click(); await f.settle();
+  const reads = f.requests.filter(message => message.type === 'GET_PAGE_LIST').length;
+  f.emit({ type: 'CAPTURE_QUEUE_UPDATED', queue: [{ ...pages[0], status: 'processing' }] }); await f.settle();
+  assert.equal(f.requests.filter(message => message.type === 'GET_PAGE_LIST').length, reads);
+  f.q('a[data-view="manage"]').click(); await f.settle();
+  assert.ok(f.requests.filter(message => message.type === 'GET_PAGE_LIST').length > reads);
+});
+
+for (const failed of [false, true]) test(`manual saving shows its pending state and ${failed ? 'does not acknowledge a failed write' : 'confirms text only after acknowledgement'}`, async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { CAPTURE_ACTIVE_TAB: () => pending.promise }); t.after(f.close);
+  f.q('#beta-capture-now').click();
+  assert.match(f.q('#beta-search-status').textContent, /Saving page/);
+  assert.equal(f.q('#beta-capture-now').disabled, true);
+  await f.poll();
+  assert.match(f.q('#beta-search-status').textContent, /Saving page/, 'recents refresh must not hide an unacknowledged save');
+  pending.resolve(failed ? { error: 'Storage is unavailable' } : { ok: true }); await f.settle();
+  assert.match(f.q('#beta-search-status').textContent, failed ? /Request failed: Storage is unavailable/ : /Page saved · text-searchable/);
+  assert.equal(f.q('#beta-capture-now').disabled, false);
+});
+
+test('the first manual save visibly confirms durable text and later indexing refreshes do not erase the confirmation', async t => {
+  const pending = deferred();
+  let recents = [];
+  const f = await ui('sidepanel', {
+    CAPTURE_ACTIVE_TAB: () => pending.promise,
+    GET_RECENT_PAGES: () => ({ pages: recents, nextCursor: null }),
+    SEARCH_QUERY: () => ({ results: [] })
+  });
+  t.after(f.close);
+  await f.settle();
+  const feedback = f.q('#beta-search-status');
+  f.q('.wr-empty-memory button').click();
+  assert.match(feedback.textContent, /Saving page/);
+  assert.equal(feedback.closest('[hidden]'), null, 'An empty library must still announce a pending save');
+  pending.resolve({ ok: true, received: true });
+  await f.settle();
+  assert.match(feedback.textContent, /Page saved · text-searchable/);
+  assert.equal(feedback.closest('[hidden]'), null, 'Confirmation must be visible even before recents catch up');
+  recents = pages;
+  f.emit({ type: 'CAPTURE_QUEUE_UPDATED', queue: [] });
+  await f.settle();
+  assert.match(feedback.textContent, /Page saved · text-searchable/, 'Delayed indexing/recents updates are not user feedback');
+  f.q('#beta-search-input').value = 'Different work';
+  f.submit('#beta-search-form');
+  await f.settle();
+  assert.equal(feedback.textContent, '0 pages');
+});
+
+test('a first-save error is visible and survives an unrelated queue refresh', async t => {
+  const f = await ui('sidepanel', {
+    CAPTURE_ACTIVE_TAB: () => ({ error: 'Storage could not persist the page' }),
+    GET_RECENT_PAGES: () => ({ pages: [], nextCursor: null })
+  });
+  t.after(f.close);
+  await f.settle();
+  f.q('.wr-empty-memory button').click();
+  await f.settle();
+  f.emit({ type: 'CAPTURE_QUEUE_UPDATED', queue: [] });
+  await f.settle();
+  const feedback = f.q('#beta-search-status');
+  assert.equal(feedback.closest('[hidden]'), null);
+  assert.match(feedback.textContent, /Storage could not persist the page/);
+  assert.doesNotMatch(feedback.textContent, /Page saved/);
+});
+
+test('a late manual save does not replace a newer completed search message', async t => {
+  const capture = deferred();
+  const f = await ui('sidepanel', {
+    CAPTURE_ACTIVE_TAB: () => capture.promise,
+    SEARCH_QUERY: () => ({ results: [] })
+  });
+  t.after(f.close);
+  f.q('#beta-capture-now').click();
+  f.q('#beta-search-input').value = 'Different work';
+  f.submit('#beta-search-form');
+  await waitFor(() => f.q('#beta-search-stop').hidden, 'the newer search to finish');
+  capture.resolve({ ok: true, received: true });
+  await f.settle();
+  assert.equal(f.q('#beta-search-status').textContent, '0 pages');
+});
+
+test('background pagination retains capture feedback while appending older recents', async t => {
+  const next = deferred();
+  const oldPage = { ...pages[0], url: 'https://example.test/older', title: 'Earlier report', timestamp: 1 };
+  const cursor = { timestamp: pages[0].timestamp, url: pages[0].url, title: pages[0].title };
+  const f = await ui('sidepanel', {
+    CAPTURE_ACTIVE_TAB: () => ({ ok: true, received: true }),
+    GET_RECENT_PAGES: message => message.after ? next.promise : { pages, nextCursor: cursor }
+  });
+  t.after(f.close);
+  f.q('#beta-load-more-recents').click();
+  f.q('#beta-capture-now').click();
+  await waitFor(() => /Page saved/u.test(f.q('#beta-search-status').textContent), 'capture confirmation');
+  next.resolve({ pages: [oldPage], nextCursor: null });
+  await f.settle();
+  assert.match(f.q('#beta-recents-list').textContent, /Earlier report/u);
+  assert.match(f.q('#beta-search-status').textContent, /Page saved · text-searchable/u);
+});
+
+test('Manual only completes capture setup without enabling automatic collection or model inference', async t => {
+  const backend = providerFixture('http://localhost:11434'); backend.stored.betaSettings.captureSetupComplete = false; await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('#beta-keep-manual-capture').click(); await f.settle();
+  assert.equal(backend.stored.betaSettings.paused, true); assert.equal(backend.stored.betaSettings.captureSetupComplete, true);
+  assert.equal(f.q('#beta-capture-setup').hidden, true);
+  assert.equal(backend.requests.some(request => /\/api\/(chat|embed)$/.test(new URL(request.url).pathname)), false);
+});
+
+for (const selector of ['#beta-enable-broad-capture', '#settings-enable-broad-capture']) test(`${selector} enables all non-excluded sites rather than retaining a selected-site restriction`, async t => {
+  const backend = providerFixture('http://localhost:11434');
+  Object.assign(backend.stored.betaSettings, { allowlist: ['previous.test'], denylist: ['private.test'], captureSetupComplete: false }); await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  if (selector.startsWith('#settings-')) f.q('a[data-view="settings"]').click();
+  f.q(selector).click(); await f.settle();
+  assert.equal(backend.stored.betaSettings.paused, false);
+  assert.deepEqual(backend.stored.betaSettings.allowlist, []); assert.deepEqual(backend.stored.betaSettings.denylist, ['private.test']);
+});
+
+test('panel capture controls toggle current policy and exclude the active site without deleting existing pages', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect(); backend.setActiveTab(pages[0].url);
+  const db = await backend.load('src/shared/db/index.ts'); await db.savePageRecord({ ...pages[0], text: 'Saved evidence.', chunks: [] });
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('#beta-pause-capture-menu').click(); await f.settle(); assert.equal(backend.stored.betaSettings.paused, false);
+  f.q('.app-menu-button').click(); await tick(); assert.match(f.q('#beta-pause-capture-menu').textContent, /Pause automatic/);
+  [...f.window.document.querySelectorAll('.panel-menu button')].find(button => button.textContent === 'Never save current site').click(); await f.settle();
+  assert.deepEqual(backend.stored.betaSettings.denylist, ['example.test']); assert.ok(await db.getPageRecord(pages[0].url));
+  assert.match(f.q('#beta-search-status').textContent, /example.test excluded.*Existing saves remain/);
+});
+
+test('Memory reviews the full site-and-date scope, then forgets only the confirmed pages through the real handlers', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts');
+  const target = { ...pages[0], timestamp: new Date(2026, 0, 2, 12).getTime(), text: 'Saved evidence.', chunks: [] };
+  const later = { ...target, url: 'https://example.test/later', timestamp: new Date(2026, 0, 3, 12).getTime() };
+  const elsewhere = { ...target, url: 'https://notexample.test/elsewhere' };
+  for (const page of [target, later, elsewhere]) await db.savePageRecord(page);
+  const f = await ui('manage', {}, backend); t.after(f.close); await f.settle();
+  f.change('#manage-forget-site', 'example.test'); f.change('#manage-forget-from', '2026-01-02'); f.change('#manage-forget-through', '2026-01-02');
+  f.submit('#manage-forget-form'); await f.settle();
+  assert.equal(f.q('#manage-forget-confirmation').hidden, false);
+  assert.match(f.q('#manage-forget-review').textContent, /1 saved version across 1 page.*example.test.*2026-01-02.*cannot be undone/);
+  assert.ok(await db.getPageRecord(target.url), 'Review must not delete anything');
+  f.q('#manage-forget-confirm').click(); await f.settle();
+  assert.equal(await db.getPageRecord(target.url), undefined); assert.ok(await db.getPageRecord(later.url)); assert.ok(await db.getPageRecord(elsewhere.url));
+  assert.match(f.q('#manage-forget-status').textContent, /Forgot 1 saved version across 1 page/);
+  assert.equal(f.q('#manage-forget-confirmation').hidden, true);
+});
+
+test('changing or cancelling a forget scope invalidates both ready and late confirmations', async t => {
+  const pending = deferred(); let reads = 0;
+  const f = await ui('manage', { PREVIEW_FORGET_PAGES: () => ++reads <= 2 ? { selection: [{ url: pages[0].url, versionIds: ['reviewed'] }] } : pending.promise }); t.after(f.close);
+  f.change('#manage-forget-site', 'example.test'); f.submit('#manage-forget-form'); await f.settle();
+  assert.equal(f.q('#manage-forget-confirmation').hidden, false);
+  f.q('#manage-forget-cancel').click(); assert.equal(f.q('#manage-forget-confirmation').hidden, true);
+  f.submit('#manage-forget-form'); await f.settle();
+  f.change('#manage-forget-site', 'other.test'); assert.equal(f.q('#manage-forget-confirmation').hidden, true);
+  f.q('#manage-forget-confirm').click(); assert.equal(f.requests.some(message => message.type === 'FORGET_PAGES'), false);
+  f.submit('#manage-forget-form'); await tick(); f.change('#manage-forget-site', 'third.test');
+  pending.resolve({ selection: [{ url: 'https://other.test/page', versionIds: ['other'] }] }); await f.settle();
+  assert.equal(f.q('#manage-forget-confirmation').hidden, true);
+  assert.equal(f.q('#manage-forget-preview').disabled, false);
+});
+
+test('Memory date forgetting preserves another version of the same page and refreshes its promoted content', async testContext => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts');
+  const recent = new Date(2026, 0, 3, 12).getTime(), earlier = new Date(2026, 0, 2, 12).getTime();
+  await db.savePageRecord({ ...pages[0], title: 'Current removed article', versionId: 'remove-current', text: 'Current content.', chunks: [], timestamp: recent, versions: [{ versionId: 'keep-earlier', title: 'Earlier preserved article', text: 'Earlier evidence.', chunks: [], timestamp: earlier, kept: true }] });
+  await backend.connect();
+  const f = await ui('manage', {}, backend); testContext.after(f.close); await f.settle();
+  f.change('#manage-forget-site', 'example.test'); f.change('#manage-forget-from', '2026-01-03'); f.change('#manage-forget-through', '2026-01-03');
+  f.submit('#manage-forget-form'); await f.settle();
+  assert.match(f.q('#manage-forget-review').textContent, /1 saved version across 1 page/);
+  assert.match(f.q('#manage-forget-review').textContent, /Only these matching versions.*Others stay/);
+  assert.equal((await db.getPageRecord(pages[0].url)).versionId, 'remove-current');
+  f.q('#manage-forget-confirm').click(); await f.settle();
+  const request = f.requests.find(message => message.type === 'FORGET_PAGES');
+  assert.deepEqual(Array.from(request.selection, page => ({ url: page.url, versionIds: Array.from(page.versionIds) })), [{ url: pages[0].url, versionIds: ['remove-current'] }]);
+  assert.equal((await db.getPageRecord(pages[0].url)).versionId, 'keep-earlier');
+  assert.match(f.q('#manage-rows').textContent, /Earlier preserved article/);
+  assert.doesNotMatch(f.q('#manage-rows').textContent, /Current removed article/);
+  assert.match(f.q('#manage-forget-status').textContent, /Forgot 1 saved version across 1 page/);
+});
+
+test('a confirmed forget is submitted once and cannot change its scope while the transaction is pending', async t => {
+  const pending = deferred();
+  const f = await ui('manage', { PREVIEW_FORGET_PAGES: () => ({ selection: [{ url: pages[0].url, versionIds: ['reviewed'] }] }), FORGET_PAGES: () => pending.promise }); t.after(f.close);
+  f.change('#manage-forget-site', 'example.test'); f.submit('#manage-forget-form'); await f.settle();
+  f.q('#manage-forget-confirm').click(); f.q('#manage-forget-confirm').click();
+  assert.equal(f.requests.filter(message => message.type === 'FORGET_PAGES').length, 1);
+  assert.equal(f.q('#manage-forget-site').disabled, true); assert.equal(f.q('#manage-forget-cancel').disabled, true);
+  pending.resolve({ pages: 1, versions: 1 }); await f.settle();
+  assert.equal(f.q('#manage-forget-site').disabled, false); assert.equal(f.q('#manage-forget-cancel').disabled, false);
+});
+
+test('forget requires a scope, handles no matches, and retains its retryable confirmation after a storage failure', async t => {
+  let matching = false;
+  const f = await ui('manage', { PREVIEW_FORGET_PAGES: () => ({ selection: matching ? [{ url: pages[0].url, versionIds: ['reviewed'] }] : [] }), FORGET_PAGES: () => ({ error: 'Storage write aborted' }) }); t.after(f.close);
+  f.submit('#manage-forget-form'); await f.settle(); assert.match(f.q('#manage-forget-status').textContent, /Choose a site or capture date/);
+  assert.equal(f.requests.some(message => message.type === 'PREVIEW_FORGET_PAGES'), false);
+  f.change('#manage-forget-site', 'example.test'); f.submit('#manage-forget-form'); await f.settle();
+  assert.match(f.q('#manage-forget-status').textContent, /No saved versions match/); assert.equal(f.q('#manage-forget-confirmation').hidden, true);
+  matching = true; f.submit('#manage-forget-form'); await f.settle(); f.q('#manage-forget-confirm').click(); await f.settle();
+  assert.match(f.q('#manage-forget-status').textContent, /Forget failed: Storage write aborted/);
+  assert.equal(f.q('#manage-forget-confirmation').hidden, false); assert.equal(f.q('#manage-forget-confirm').disabled, false);
+  assert.ok(f.q('#manage-rows').textContent.includes('Cats'));
+});
+
+test('successful individual re-embedding clears a retired capture failure from Memory immediately', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts');
+  const page = { ...pages[0], text: 'Saved evidence.', summary: 'Saved overview.', chunks: [{ text: 'Saved evidence.', embedding: [] }] };
+  await db.savePageRecord(page); await db.appendProcessing({ url: page.url, title: page.title, status: 'failed', textSaved: true, attempts: 1, updatedAt: 10, createdAt: 1, lastAttemptAt: 1, error: 'Original indexing failure', payload: { ...page, chunks: ['Saved evidence.'], captureId: 'captured-page' } });
+  const f = await ui('manage', {}, backend); t.after(f.close); await f.settle();
+  assert.match(f.q('#manage-queue').textContent, /Original indexing failure/);
+  [...f.window.document.querySelectorAll('#manage-rows button')].find(button => button.textContent === 'Re-embed').click(); await f.settle();
+  assert.equal(await db.getProcessingEntry(page.url), undefined);
+  assert.doesNotMatch(f.q('#manage-queue').textContent, /Original indexing failure/); assert.match(f.q('#manage-rows').textContent, /Indexed/);
+});
+
+test('Memory opens saved history without a model and can keep or explicitly remove an earlier version', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'), processing = await backend.load('src/background/processing/index.ts');
+  const base = { url: pages[0].url, title: 'A saved guide', manual: true };
+  await processing.markQueued({ ...base, text: 'Original evidence.', chunks: ['Original evidence.'], timestamp: 10, captureId: 'first' }, 0);
+  const first = await db.getPageRecord(base.url);
+  await processing.markQueued({ ...base, text: 'Current evidence.', chunks: ['Current evidence.'], timestamp: 20, captureId: 'second' }, 0); await processing.markDone(base.url);
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('a[data-view="manage"]').click(); await f.settle();
+  f.q('#manage-rows a[href*="#history="]').click();
+  await waitFor(() => f.q('select[aria-label="Saved version"]'), 'saved history to open from Memory'); await f.settle();
+  assert.equal(f.q('.saved-reader-text').textContent, 'Current evidence.');
+  f.change('select[aria-label="Saved version"]', first.versionId); await f.settle();
+  await waitFor(() => f.q('.saved-reader-text')?.textContent === 'Original evidence.', 'earlier saved evidence');
+  await waitFor(() => [...f.window.document.querySelectorAll('.saved-reader-history button')].some(button => button.textContent === 'Keep this version'), 'earlier version tools');
+  const button = text => [...f.window.document.querySelectorAll('.saved-reader-history button')].find(control => control.textContent === text);
+  button('Keep this version').click(); await f.settle();
+  assert.equal((await db.getPageRecord(base.url)).versions.find(version => version.versionId === first.versionId).kept, true);
+  button('Remove this version').click(); assert.equal(f.q('.saved-version-confirm').hidden, false);
+  button('Cancel').click(); assert.equal(f.q('.saved-version-confirm').hidden, true);
+  assert.equal((await db.getPageRecord(base.url)).versions.length, 1);
+  button('Remove this version').click(); button('Remove version').click(); await f.settle();
+  await waitFor(() => f.q('.saved-reader-text')?.textContent === 'Current evidence.', 'current capture after removing earlier version');
+  assert.equal((await db.getPageRecord(base.url)).versions.length, 0);
+  assert.equal(backend.requests.some(request => /\/api\/(chat|embed)$/.test(new URL(request.url).pathname)), false);
+});
+
+test('partial capture warnings stay visible and inert in Memory, previews and the saved reader', async t => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts');
+  const warning = 'Embedded content is not included. <img src=x onerror="alert(1)">';
+  await db.savePageRecord({ ...pages[0], text: 'Visible saved evidence.', chunks: [], captureInfo: { source: 'main', warnings: [warning] } });
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  f.q('#beta-recents-list details').open = true; await waitFor(() => f.q('#beta-recents-list .capture-notice'), 'capture limitation preview');
+  assert.ok(f.q('#beta-recents-list .capture-notice').textContent.includes(warning));
+  f.q('#beta-recents-list .read-saved-page').click(); await f.settle();
+  assert.ok(f.q('.saved-reader-host .capture-notice').textContent.includes(warning));
+  f.q('a[data-view="manage"]').click(); await f.settle();
+  assert.ok(f.q('#manage-rows .capture-notice').textContent.includes(warning));
+  assert.equal(f.window.document.querySelector('img'), null);
+});
+
+test('recent-page reading explicitly opens the latest saved text even if cached metadata predates an unchanged revisit', async t => {
+  const f = await ui('sidepanel', { GET_SAVED_PAGE: () => ({ page: { ...pages[0], timestamp: 30, firstCapturedAt: 10, text: 'Current saved evidence.', current: true } }) }); t.after(f.close);
+  f.q('#beta-recents-list details').open = true; f.q('#beta-recents-list .read-saved-page').click(); await f.settle();
+  const request = f.requests.find(message => message.type === 'GET_SAVED_PAGE');
+  assert.equal(request.timestamp, undefined); assert.equal(f.q('.saved-reader-text').textContent, 'Current saved evidence.');
+});
+
+test('search navigation carries the matched version identity instead of substituting the current recapture', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts'), processing = await backend.load('src/background/processing/index.ts');
+  const base = { url: pages[0].url, title: 'Saved guide', manual: true };
+  await processing.markQueued({ ...base, text: 'Original copper tern evidence.', chunks: ['Original copper tern evidence.'], timestamp: 10, captureId: 'first', captureInfo: { source: 'main', warnings: ['Collapsed replies were not captured.'] } }, 0);
+  const first = await db.getPageRecord(base.url);
+  await db.savePageRecord({ ...first, summary: 'Overview of the earlier copper tern evidence.' });
+  await processing.markQueued({ ...base, text: 'Unrelated replacement.', chunks: ['Unrelated replacement.'], timestamp: 10, captureId: 'second' }, 0); await processing.markDone(base.url);
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close); await f.settle();
+  const beforeSearch = backend.requests.length;
+  f.q('#beta-search-input').value = '"copper tern"'; f.submit('#beta-search-form'); await f.settle();
+  f.q('#beta-search-results details').open = true;
+  await waitFor(() => f.requests.some(message => message.type === 'GET_PAGE_PREVIEW'), 'matched version preview'); await f.settle();
+  assert.equal(f.q('#beta-search-results .content-entry-body > p').textContent, 'Overview of the earlier copper tern evidence.');
+  assert.match(f.q('#beta-search-results .capture-notice').textContent, /Collapsed replies/);
+  f.q('#beta-search-results .read-saved-page').click(); await f.settle();
+  assert.equal(f.requests.find(message => message.type === 'GET_SAVED_PAGE').versionId, first.versionId);
+  assert.equal(f.q('.saved-reader-text').textContent, first.text);
+  assert.deepEqual(backend.requests.slice(beforeSearch).map(request => new URL(request.url).pathname), []);
+});
+
+test('a late Keep response cannot replace another selected version or mislabel its retention', async t => {
+  const pending = deferred(), first = { ...pages[0], versionId: 'one', timestamp: 10, firstCapturedAt: 10, text: 'First evidence.', current: true, kept: false };
+  const second = { ...first, versionId: 'two', timestamp: 5, text: 'Second evidence.', current: false };
+  const f = await ui('sidepanel', {
+    GET_SAVED_PAGE: message => ({ page: message.versionId === 'two' ? second : first }),
+    GET_SAVED_HISTORY: () => ({ versions: [first, second] }), UPDATE_SAVED_VERSION: () => pending.promise
+  }); t.after(f.close);
+  f.q('#beta-recents-list details').open = true; f.q('#beta-recents-list .read-saved-page').click(); await f.settle();
+  f.q('.saved-reader-history').open = true; await waitFor(() => f.q('select[aria-label="Saved version"]'), 'history controls');
+  [...f.window.document.querySelectorAll('.saved-reader-history button')].find(button => button.textContent === 'Keep this version').click();
+  f.change('select[aria-label="Saved version"]', 'two'); await waitFor(() => f.q('.saved-reader-text')?.textContent === second.text, 'another version while Keep is pending');
+  pending.resolve({ ok: true }); await f.settle();
+  assert.equal(f.q('.saved-reader-text').textContent, second.text);
+  assert.ok([...f.window.document.querySelectorAll('.saved-reader-history button')].some(button => button.textContent === 'Keep this version'));
+  assert.doesNotMatch(f.q('.saved-reader-history').textContent, /Kept until you release/);
+});
 
 test('repeated sidepanel banner refreshes read configuration without health or model probes', async t => {
   const f = await ui('sidepanel', { GET_PROVIDER_CONFIG: () => ({ baseUrl: 'https://provider.example.test' }) });
@@ -77,6 +787,7 @@ test('chat provider cancellation preserves settings and accepting consent makes 
   const backend = providerFixture(origin);
   await backend.connect();
   const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  await openModels(f);
   await waitFor(() => f.q('#beta-provider-base')?.value === origin, 'the saved remote provider to appear in Settings');
   const initial = JSON.stringify(backend.stored);
   f.window.confirm = () => { confirmations++; return false; };
@@ -101,6 +812,7 @@ test('embedding consent cancellation preserves the endpoint and acceptance persi
   const backend = providerFixture('http://localhost:11434');
   await backend.connect();
   const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  await openModels(f);
   await waitFor(() => f.q('#beta-provider-base')?.value === 'http://localhost:11434', 'initial Settings to load');
   f.q('#beta-embedding-base').value = origin;
   const initial = JSON.stringify(backend.stored);
@@ -119,6 +831,7 @@ test('backend save and restore errors reach UI failure states rather than succes
   const backend = providerFixture('http://localhost:11434');
   await backend.connect();
   const settings = await ui('sidepanel', {}, backend); t.after(settings.close);
+  await openModels(settings);
   await waitFor(() => settings.q('#beta-provider-base')?.value === 'http://localhost:11434', 'Settings to load');
   backend.failNextWrite('betaProviderSettings');
   settings.q('#beta-provider-save').click();
@@ -128,13 +841,14 @@ test('backend save and restore errors reach UI failure states rather than succes
   const db = await backend.load('src/shared/db/index.ts');
   t.after(async () => (await db.openDatabase()).close());
   await db.savePageRecord({ ...pages[0], text: 'Saved text', chunks: [{ text: 'Saved text', embedding: [1, 0] }] });
-  const memory = await ui('manage', {}, backend); t.after(memory.close);
+  const memory = await ui('sidepanel', {}, backend); t.after(memory.close);
+  await openStorage(memory);
   const input = memory.q('#manage-import');
   const invalid = new File([JSON.stringify({ schemaVersion: 1, pages: [{ url: pages[0].url, title: 'No supported content' }] })], 'invalid.json');
   Object.defineProperty(input, 'files', { value: [invalid] });
   input.dispatchEvent(new memory.window.Event('change'));
   await waitFor(() => !input.disabled, 'failed import to finish');
-  assert.match(memory.q('#manage-status').textContent, /Import failed:.*content/i);
+  assert.match(memory.q('#settings-backup-status').textContent, /Import failed:.*content/i);
   assert.equal((await db.getPageRecord(pages[0].url)).text, 'Saved text');
 });
 
@@ -145,6 +859,156 @@ test('text retrieval results do not display term scores as semantic similarity',
   f.submit('#beta-search-form'); await tick();
   assert.match(f.q('#beta-search-results').textContent, /Text match/);
   assert.doesNotMatch(f.q('#beta-search-results').textContent, /sim .*%/);
+});
+
+test('Search renders early text results and retains them when refinement is stopped', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => pending.promise }); t.after(f.close);
+  f.q('#beta-search-input').value = 'cats'; f.submit('#beta-search-form');
+  const request = f.requests.find(message => message.type === 'SEARCH_QUERY');
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId: request.requestId, results: [{ ...pages[0], snippet: 'Saved feline observation', score: 2, textMatch: true }] });
+  assert.match(f.q('#beta-search-results').textContent, /Saved feline observation/);
+  assert.match(f.q('#beta-search-status').textContent, /Refining/);
+  f.q('#beta-search-stop').click();
+  pending.resolve({ results: [] }); await tick(); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /Saved feline observation/);
+  assert.match(f.q('#beta-search-status').textContent, /Stopped/);
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId: request.requestId, results: [] });
+  assert.match(f.q('#beta-search-results').textContent, /Saved feline observation/);
+});
+
+test('finishing search refinement preserves a page conversation and its working Stop control', async t => {
+  const search = deferred(), answer = deferred();
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => search.promise, ASK_QUESTION: () => answer.promise }); t.after(f.close);
+  f.q('#beta-search-input').value = 'cats'; f.submit('#beta-search-form');
+  const request = f.requests.find(message => message.type === 'SEARCH_QUERY');
+  const hit = { ...pages[0], snippet: 'A saved cat fact', score: 2, textMatch: true };
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId: request.requestId, results: [hit] });
+  f.q('#beta-search-results details').open = true;
+  f.q('#beta-search-results .ask-this-page').click();
+  f.q('#beta-ask-input').value = 'Explain the saved observation'; f.submit('#beta-ask-form');
+  const askId = f.requests.find(message => message.type === 'ASK_QUESTION').options.requestId;
+  f.emit({ type: 'ASK_ANSWER_UPDATE', requestId: askId, chunk: 'Answer survives refinement.' });
+  search.resolve({ results: [] }); await tick(); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /Explain the saved observation/);
+  assert.match(f.q('#beta-ask-answer').textContent, /Answer survives refinement/);
+  assert.equal(f.q('#beta-ask-stop').hidden, false);
+  f.q('#beta-ask-stop').click();
+  assert.equal(f.requests.find(message => message.type === 'CANCEL_ASK').requestId, askId);
+  answer.resolve({ answer: 'Late reply', sources: [] }); await tick();
+});
+
+test('site and local-day filters browse only matching saved records without a model or keywords', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts');
+  const selectedDay = new Date(2026, 10, 1, 12).getTime();
+  for (const page of [
+    { url: 'https://archive.test/wanted', title: 'Selected article', timestamp: selectedDay },
+    { url: 'https://archive.test/old', title: 'Outside the date range', timestamp: new Date(2026, 9, 31, 23, 59).getTime() },
+    { url: 'https://other.test/wrong', title: 'Outside the site', timestamp: selectedDay },
+    { url: 'https://archive.test/next', title: 'After the selected day', timestamp: new Date(2026, 10, 2, 0).getTime() }
+  ]) await db.savePageRecord({ ...page, text: 'Saved reading.', chunks: [], manual: true });
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  f.q('#beta-filter-domain').value = 'archive.test';
+  f.q('#beta-filter-from').value = '2026-11-01'; f.q('#beta-filter-to').value = '2026-11-01';
+  f.submit('#beta-search-filter-form');
+  await waitFor(() => f.q('#beta-search-results').textContent.includes('Selected article'), 'the filtered saved record');
+  assert.doesNotMatch(f.q('#beta-search-results').textContent, /Outside|After the selected day/);
+  assert.equal(backend.requests.filter(request => /\/api\/(chat|embed)$/.test(new URL(request.url).pathname)).length, 0, 'Filtered browsing must not run model inference');
+  f.q('#beta-filter-from').value = '2026-11-03'; f.submit('#beta-search-filter-form');
+  assert.match(f.q('#beta-search-status').textContent, /end date/);
+  assert.match(f.q('#beta-search-results').textContent, /Selected article/);
+  f.q('#beta-filter-clear').click();
+  assert.equal(f.q('#beta-recents-section').hidden, false);
+});
+
+test('saved search results open complete stored evidence and return to the same search without a model', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts');
+  const text = 'Opening paragraph.\n'.repeat(160) + 'The copper tern breeds on the shore.\nIts saved context is still here.';
+  await db.savePageRecord({ ...pages[0], text, summary: 'A compact overview.', chunks: [], manual: true });
+  await backend.connect();
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  f.q('#beta-search-input').value = '"copper tern"'; f.submit('#beta-search-form');
+  await waitFor(() => f.q('#beta-search-results .read-saved-page'), 'the saved search result');
+  f.q('#beta-search-results details').open = true;
+  f.q('#beta-search-results .read-saved-page').click();
+  await waitFor(() => f.q('.saved-reader-text'), 'the full saved capture');
+  assert.equal(f.q('.saved-reader-text').textContent, text);
+  assert.equal(f.q('.saved-reader-text mark').textContent, 'copper tern');
+  assert.match(f.q('.saved-reader-text').textContent, /Its saved context is still here/);
+  assert.equal(backend.requests.filter(request => /\/api\/(chat|embed)$/.test(new URL(request.url).pathname)).length, 0);
+  f.q('.saved-reader-back').click();
+  assert.equal(f.q('#beta-search-input').value, '"copper tern"');
+  assert.equal(f.q('#beta-search-results details').open, true);
+  assert.equal(f.q('.saved-reader-host').hidden, true);
+});
+
+test('invalid filter Apply cancels an active broader search and retains the visible text results', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => pending.promise }); t.after(f.close);
+  f.q('#beta-search-input').value = 'cats'; f.submit('#beta-search-form');
+  const requestId = f.requests.find(message => message.type === 'SEARCH_QUERY').requestId;
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId, results: [{ ...pages[0], score: 2, snippet: 'Already visible evidence', textMatch: true }] });
+  f.q('#beta-filter-domain').value = '.'; f.submit('#beta-search-filter-form');
+  assert.equal(f.requests.find(message => message.type === 'CANCEL_SEARCH').requestId, requestId);
+  pending.resolve({ results: [{ ...pages[0], title: 'A broader result', score: 1 }] }); await tick(); await tick();
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId, results: [] });
+  assert.match(f.q('#beta-search-results').textContent, /Already visible evidence/);
+  assert.doesNotMatch(f.q('#beta-search-results').textContent, /A broader result/);
+  assert.match(f.q('#beta-search-status').textContent, /site domain/);
+});
+
+test('invalid filter Apply also prevents a queued typing debounce from dispatching a broader search', async t => {
+  const timers = new Map(); let next = 0;
+  const f = await ui('sidepanel', {}, undefined, { setTimeout: callback => { timers.set(++next, callback); return next; }, clearTimeout: id => timers.delete(id) }); t.after(f.close);
+  f.q('#beta-search-input').value = 'cats'; f.q('#beta-search-input').dispatchEvent(new f.window.Event('input'));
+  f.q('#beta-filter-domain').value = '.'; f.submit('#beta-search-filter-form');
+  for (const callback of [...timers.values()]) callback();
+  assert.equal(f.requests.filter(message => message.type === 'SEARCH_QUERY').length, 0);
+  assert.match(f.q('#beta-search-status').textContent, /site domain/);
+});
+
+test('a semantic result forwards its stored passage so the reader reaches evidence absent from the query words', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  const db = await backend.load('src/shared/db/index.ts');
+  const opening = 'Unrelated background.\n'.repeat(180), evidence = 'The birds stay on remote islands throughout the colder months.';
+  await db.savePageRecord({ ...pages[0], text: opening + '\n' + evidence, chunks: [{ text: opening.trim().replace(/\s+/g, ' '), embedding: [] }, { text: evidence, embedding: [] }], manual: true });
+  await backend.connect();
+  const send = backend.send;
+  const f = await ui('sidepanel', {}, { ...backend, send: message => message.type === 'SEARCH_QUERY' ? Promise.resolve({ results: [{ ...pages[0], snippet: evidence, score: 0.9, chunkIndex: 1 }] }) : send(message) }); t.after(f.close);
+  f.q('#beta-search-input').value = 'wintering habitat'; f.submit('#beta-search-form');
+  await waitFor(() => f.q('#beta-search-results .read-saved-page'), 'a semantic-only result');
+  f.q('#beta-search-results details').open = true; f.q('#beta-search-results .read-saved-page').click();
+  await waitFor(() => f.q('.saved-reader-text'), 'semantic evidence in the saved reader');
+  assert.equal(f.q('.saved-reader-text mark')?.textContent, evidence);
+});
+
+test('Search does not announce no results while semantic retrieval is pending', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => pending.promise }); t.after(f.close);
+  f.q('#beta-search-input').value = 'a vague recollection'; f.submit('#beta-search-form');
+  const request = f.requests.find(message => message.type === 'SEARCH_QUERY');
+  f.emit({ type: 'SEARCH_RESULTS_UPDATE', requestId: request.requestId, results: [] });
+  assert.doesNotMatch(f.q('#beta-search-results').textContent, /No matching pages/);
+  assert.match(f.q('#beta-search-status').textContent, /Searching by meaning/);
+  pending.resolve({ results: [] }); await tick(); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /No matching pages/);
+});
+
+test('Search preserves early matches after refinement fails and ignores updates after Clear', async t => {
+  const pending = deferred();
+  const f = await ui('sidepanel', { SEARCH_QUERY: () => pending.promise }); t.after(f.close);
+  f.q('#beta-search-input').value = 'cats'; f.submit('#beta-search-form');
+  const request = f.requests.find(message => message.type === 'SEARCH_QUERY');
+  const update = { type: 'SEARCH_RESULTS_UPDATE', requestId: request.requestId, results: [{ ...pages[0], snippet: 'Evidence retained after failure', score: 2, textMatch: true }] };
+  f.emit(update);
+  pending.resolve({ error: 'Provider disconnected' }); await tick(); await tick();
+  assert.match(f.q('#beta-search-results').textContent, /Evidence retained after failure/);
+  assert.match(f.q('#beta-search-status').textContent, /Showing text matches.*Provider disconnected/);
+  f.q('#beta-search-clear').click(); f.emit(update);
+  assert.equal(f.q('#beta-search-results').children.length, 0);
 });
 
 test('sidepanel menu preserves unique IDs and keyboard focus across Settings and Ask', async t => {
@@ -181,6 +1045,26 @@ test('browser model selection saves the chosen pin without downloading or re-emb
   f.change('#beta-browser-model-select', DEFAULT_EMBEDDING_CONFIG.browserModel);
   f.q('#beta-save-embedding').click(); await tick();
   assert.equal(config.browserRevision, DEFAULT_EMBEDDING_CONFIG.browserRevision);
+});
+
+test('cached browser files do not claim inference readiness or silently start downloads', async t => {
+  const f = await ui('sidepanel', {
+    GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG, provider: 'browser' } }),
+    GET_BROWSER_EMBED_STATUS: () => ({ status: { ready: false, runtimeAvailable: true, state: 'cached', model: DEFAULT_EMBEDDING_CONFIG.browserModel, revision: DEFAULT_EMBEDDING_CONFIG.browserRevision } })
+  }); t.after(f.close);
+  assert.match(f.q('#beta-embedding-browser-status').textContent, /cached model files/i);
+  assert.match(f.q('#beta-embedding-browser-status').textContent, /verified when next used/i);
+  assert.doesNotMatch(f.q('#beta-embedding-browser-status').textContent, /model ready|ready to download/i);
+  assert.ok(!f.requests.some(message => ['DOWNLOAD_BROWSER_EMBED', 'BACKFILL_EMBEDDINGS'].includes(message.type)));
+});
+
+test('a pending browser capability check is not reported as a runtime failure', async t => {
+  const f = await ui('sidepanel', {
+    GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG, provider: 'browser' } }),
+    GET_BROWSER_EMBED_STATUS: () => ({ status: { ready: false, runtimeAvailable: false, state: 'checking', model: DEFAULT_EMBEDDING_CONFIG.browserModel, revision: DEFAULT_EMBEDDING_CONFIG.browserRevision } })
+  }); t.after(f.close);
+  assert.match(f.q('#beta-embedding-browser-status').textContent, /checking browser embedding runtime/i);
+  assert.doesNotMatch(f.q('#beta-embedding-browser-status').textContent, /unavailable|failed/i);
 });
 
 test('custom browser revisions remain selectable and stale model status is ignored', async t => {
@@ -369,7 +1253,30 @@ test('Logs exact Debug filter excludes higher levels and counts visible entries'
   assert.match(f.q('#logs-settings-link').href, /#settings-logging$/);
 });
 
-test('Memory streams a backup through registered messages and validates it before restoring any pages', async t => {
+test('Memory exports the current filter as portable JSON through the saved-page transfer', async t => {
+  const backend = providerFixture('http://localhost:11434');
+  await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts');
+  t.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ url: 'https://export.test/cats', title: 'Cat notes', text: 'Saved cat evidence', timestamp: 10, chunks: [] });
+  await db.savePageRecord({ url: 'https://export.test/dogs', title: 'Dog notes', text: 'Saved dog evidence', timestamp: 20, chunks: [] });
+  const view = await ui('manage', {}, backend);
+  t.after(view.close);
+  await waitFor(() => /2 pages/.test(view.q('#manage-count').textContent), 'saved page list');
+  view.q('#manage-search').value = 'cat';
+  view.q('#manage-search').dispatchEvent(new view.window.Event('input'));
+  view.change('#manage-export-scope', 'filtered');
+  view.change('#manage-export-format', 'json');
+  let output = '', done = false;
+  view.window.showSaveFilePicker = async () => ({
+    createWritable: async () => ({ write: async part => { output += part; }, close: async () => { done = true; }, abort: async () => {} })
+  });
+  view.submit('#manage-export-pages');
+  await waitFor(() => done, 'portable export to close');
+  assert.deepEqual(JSON.parse(output).pages.map(item => [item.title, item.text]), [['Cat notes', 'Saved cat evidence']]);
+});
+
+test('Settings streams a backup through registered messages and validates it before restoring any pages', async t => {
   const backend = providerFixture('http://localhost:11434');
   await backend.connect();
   const db = await backend.load('src/shared/db/index.ts');
@@ -379,17 +1286,17 @@ test('Memory streams a backup through registered messages and validates it befor
     { url: 'https://backup.test/b', title: 'Second', text: 'Second passage', timestamp: 20, manual: false, chunks: [] }
   ];
   for (const page of captured) await db.savePageRecord(page);
-  const f = await ui('manage', {}, backend); t.after(f.close);
+  const f = await ui('sidepanel', {}, backend); t.after(f.close);
+  await openStorage(f);
   const writes = [];
   let closed = false, aborted = false;
   f.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async part => { writes.push(part); }, close: async () => { closed = true; }, abort: async () => { aborted = true; } }) });
   f.q('#manage-export').click();
   await waitFor(() => closed, 'the backup file to close');
   assert.equal(aborted, false);
-  assert.equal(f.q('#manage-status').textContent, 'Export complete: 2 pages');
+  assert.equal(f.q('#settings-backup-status').textContent, 'Export complete: 2 pages');
   assert.ok(!f.requests.some(request => request.type === 'GET_ALL_PAGES'));
-  assert.equal(f.requests.filter(request => request.type === 'GET_BACKUP_PAGE').length, 3);
-  assert.deepEqual(writes.slice(1, -1).map(part => JSON.parse(part).page.url), captured.map(page => page.url));
+  assert.deepEqual(writes.map(part => JSON.parse(part)).filter(record => record.type === 'page').map(record => record.page.url), captured.map(page => page.url));
   assert.deepEqual(JSON.parse(writes.at(-1)), { type: 'end', pages: 2 });
   await db.deletePages(captured.map(page => page.url));
   const input = f.q('#manage-import');
@@ -399,11 +1306,13 @@ test('Memory streams a backup through registered messages and validates it befor
     await waitFor(() => !input.disabled, 'the import to finish');
   };
   await importFile(new File(writes.slice(0, -1), 'truncated.jsonl'));
-  assert.match(f.q('#manage-status').textContent, /incomplete/i);
+  assert.match(f.q('#settings-backup-status').textContent, /incomplete/i);
   assert.equal((await db.listAllPages()).length, 0);
-  assert.ok(!f.requests.some(request => request.type === 'IMPORT_BACKUP_PAGE'));
+  await importFile(new File([...writes.slice(0, -1), '{"type":"page-end","url":"https://wrong.test/","versionCount":0}\n', writes.at(-1)], 'late-corruption.jsonl'));
+  assert.match(f.q('#settings-backup-status').textContent, /backup|frame/i);
+  assert.equal((await db.listAllPages()).length, 0, 'A corrupt late frame must not restore even an earlier valid page');
   await importFile(new File(writes, 'backup.jsonl'));
-  assert.equal(f.q('#manage-status').textContent, 'Import complete: 2 pages');
+  assert.equal(f.q('#settings-backup-status').textContent, 'Import complete: 2 pages');
   for (const page of captured) {
     const restored = await db.getPageRecord(page.url);
     assert.equal(restored.text, page.text);
@@ -416,7 +1325,87 @@ test('Memory streams a backup through registered messages and validates it befor
   f.q('#manage-export').click();
   await waitFor(() => !f.q('#manage-export').disabled, 'the failed save to release controls');
   assert.equal(aborted, true);
-  assert.match(f.q('#manage-status').textContent, /Disk full/);
+  assert.match(f.q('#settings-backup-status').textContent, /Disk full/);
+});
+
+test('Settings Stop aborts an unfinished backup file and leaves Export available for a fresh transfer', async testContext => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); testContext.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ url: 'https://backup.test/page', title: 'Evidence', text: 'Saved text', chunks: [], timestamp: 1 });
+  const state = await ui('sidepanel', {}, backend); testContext.after(state.close);
+  await openStorage(state);
+  const blocked = deferred(), started = deferred(); let aborted = false, closed = false;
+  state.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async line => { if (JSON.parse(line).type === 'page') { started.resolve(); await blocked.promise; } }, abort: async () => { aborted = true; }, close: async () => { closed = true; } }) });
+  state.q('#manage-export').click(); await started.promise;
+  try {
+    assert.equal(state.q('#settings-transfer-stop').hidden, false);
+    state.q('#settings-transfer-stop').click();
+    await waitFor(() => aborted, 'Stop to abort the writable file');
+  } finally { blocked.resolve(); }
+  await waitFor(() => !state.q('#manage-export').disabled, 'cancelled export controls');
+  assert.equal(closed, false); assert.equal(state.q('#settings-backup-status').textContent, 'Export cancelled');
+  assert.equal(state.q('#settings-transfer-stop').hidden, true);
+  state.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async () => {}, abort: async () => {}, close: async () => { closed = true; } }) });
+  state.q('#manage-export').click(); await waitFor(() => closed && !state.q('#manage-export').disabled, 'fresh export completion');
+  assert.match(state.q('#settings-backup-status').textContent, /Export complete: 1 pages/);
+});
+
+test('a lost backup worker aborts the output instead of closing a plausible incomplete file', async testContext => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); testContext.after(async () => (await db.openDatabase()).close());
+  await db.savePageRecord({ url: 'https://backup.test/page', title: 'Evidence', text: 'Saved text', chunks: [], timestamp: 1 });
+  const state = await ui('sidepanel', {}, backend); testContext.after(state.close);
+  await openStorage(state);
+  let aborted = false, closed = false;
+  state.window.showSaveFilePicker = async () => ({ createWritable: async () => ({ write: async line => { if (JSON.parse(line).type === 'page') backend.ports.at(-1).worker.disconnect(); }, abort: async () => { aborted = true; }, close: async () => { closed = true; } }) });
+  state.q('#manage-export').click();
+  await waitFor(() => aborted && !state.q('#manage-export').disabled, 'worker loss to abort output and release controls');
+  assert.equal(closed, false);
+  assert.match(state.q('#settings-backup-status').textContent, /Export failed: Backup connection (lost|closed)/);
+  assert.doesNotMatch(state.q('#settings-backup-status').textContent, /Export complete/);
+});
+
+test('Settings Stop restores only complete acknowledged pages and releases a stalled file reader', async testContext => {
+  const backend = providerFixture('http://localhost:11434'); await backend.connect();
+  const db = await backend.load('src/shared/db/index.ts'); testContext.after(async () => (await db.openDatabase()).close());
+  const send = backend.send;
+  const pendingRefresh = deferred();
+  let holdRefresh = false, refreshReads = 0;
+  backend.send = message => {
+    if (message.type !== 'GET_PAGE_LIST' || !holdRefresh) return send(message);
+    refreshReads++;
+    return pendingRefresh.promise.then(() => send(message));
+  };
+  const state = await ui('sidepanel', {}, backend); testContext.after(state.close);
+  await openStorage(state);
+  const first = { url: 'https://backup.test/a', title: 'First', text: 'First evidence', chunks: [], timestamp: 1 };
+  const second = { ...first, url: 'https://backup.test/b', title: 'Second', text: 'Second evidence' };
+  const frames = [{ format: 'web-recall', schemaVersion: 3 }, { type: 'page', page: first, versionCount: 0 }, { type: 'page-end', url: first.url, versionCount: 0 }, { type: 'page', page: second, versionCount: 0 }, { type: 'page-end', url: second.url, versionCount: 0 }, { type: 'end', pages: 2 }].map(frame => JSON.stringify(frame) + '\n');
+  const file = new File(frames, 'stoppable.jsonl'); let passes = 0, readerCancelled = false;
+  const initialStream = file.stream.bind(file);
+  Object.defineProperty(file, 'stream', { value: () => ++passes === 1 ? initialStream() : new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(frames.slice(0, 4).join(''))); }, cancel() { readerCancelled = true; } }) });
+  Object.defineProperty(state.q('#manage-import'), 'files', { configurable: true, value: [file] });
+  state.q('#manage-import').dispatchEvent(new state.window.Event('change'));
+  await waitFor(() => state.q('#settings-backup-status').textContent === 'Importing… 1 of 2 pages', 'first complete page acknowledgement');
+  state.q('a[data-view="manage"]').click(); await state.settle();
+  holdRefresh = true;
+  try {
+    state.q('a[data-view="settings"]').click();
+    state.q('#settings-transfer-stop').click();
+    state.q('a[data-view="manage"]').click();
+    const readsOnNavigation = refreshReads;
+    await waitFor(() => refreshReads > readsOnNavigation, 'a new list read after Stop, beyond switching views');
+    await waitFor(() => !state.q('#manage-import').disabled, 'stopped import controls to release before the list read returns');
+    assert.equal(readerCancelled, true);
+    assert.equal(state.q('#settings-backup-status').textContent, 'Import stopped: 1 pages restored');
+  } finally { pendingRefresh.resolve(); }
+  await state.settle();
+  assert.equal(state.q('#settings-backup-status').textContent, 'Import stopped: 1 pages restored', 'Refreshing the list does not replace the confirmed outcome');
+  assert.equal((await db.getPageRecord(first.url)).text, first.text);
+  assert.equal(await db.getPageRecord(second.url), undefined);
+  assert.equal(state.q('#manage-count').textContent, '1 page', 'The list must reflect the committed page without reopening Memory');
+  assert.match(state.q('#manage-rows').textContent, /First/);
+  assert.doesNotMatch(state.q('#manage-rows').textContent, /Second/);
 });
 
 test('Memory targets one page, reports progress there, and makes replacement opt-in', async t => {
@@ -701,9 +1690,12 @@ test('open previews update when background summaries finish and backfill summari
   await waitFor(() => fixture.q('#beta-recents-list .content-entry-body > p').textContent === 'New saved summary.', 'summary preview');
   assert.equal(fixture.q('#beta-recents-list .content-entry-body > span').hidden, false);
   fixture.q('a[data-view="manage"]').click(); await tick();
-  const choice = fixture.q('#manage-backfill-summaries'); assert.equal(choice.checked, false);
-  assert.equal(fixture.q('#manage-backfill-regenerate-summaries').checked, false);
-  choice.checked = true; fixture.q('#manage-backfill-run').click(); await tick();
+  const maintenance = [...fixture.q('#beta-view-manage').querySelectorAll('summary')].find(summary => summary.textContent.trim() === 'Maintenance');
+  maintenance.click();
+  const controls = maintenance.closest('details[open]');
+  const choice = controls.querySelector('#manage-backfill-summaries'); assert.equal(choice.checked, false);
+  assert.equal(controls.querySelector('#manage-backfill-regenerate-summaries').checked, false);
+  choice.checked = true; controls.querySelector('#manage-backfill-run').click(); await tick();
   assert.equal(fixture.requests.find(message => message.type === 'BACKFILL_EMBEDDINGS').createSummaries, true);
   assert.match(fixture.q('#manage-backfill-status').textContent, /Summaries: 1 created/);
 });
@@ -837,6 +1829,98 @@ test('an honest insufficient answer finishes without an error and a failed answe
   assert.equal(f.q('#beta-ask-input').value, 'Try another question');
 });
 
+test('page Ask explains that automatic AI is off and keeps retrieved pages when a chat request fails', async testContext => {
+  const requests = [];
+  const backend = await recallFixture(testContext, { fetch: async input => {
+    const endpoint = new URL(input).pathname;
+    requests.push(endpoint);
+    if (endpoint === '/api/tags') return Response.json({ models: [{ name: 'local-model' }] });
+    if (endpoint === '/api/ps') return Response.json({ models: [{ name: 'local-model', context_length: 4096 }] });
+    if (endpoint === '/api/embed') return Response.json({ embeddings: [[1, 0]] });
+    throw new TypeError('Failed to connect to the chat server');
+  } });
+  await backend.send({ type: 'CAPTURE_ACTIVE_TAB' }); await backend.drain();
+  await backend.send({ type: 'SET_SETTINGS', payload: { activeProviderId: 'ollama', captureSetupComplete: true, queryRewrite: false, askRerank: false, enableTools: false } });
+  const fixture = await ui('sidepanel', {}, backend);
+  testContext.after(fixture.close);
+  await fixture.settle();
+  fixture.q('#beta-recents-list details > summary').click();
+  fixture.q('.ask-this-page').click();
+  await fixture.settle();
+  const note = () => [...fixture.q('#beta-ask-host').querySelectorAll('p:not([hidden])')].find(paragraph => /Automatic AI is off/i.test(paragraph.textContent));
+  assert.match(note()?.textContent || '', /Automatic AI is off.*Ask.*chat model/i);
+  assert.deepEqual(requests, [], 'Opening Ask does not contact a model');
+  fixture.q('#beta-ask-input').value = 'Where do copper terns migrate?';
+  fixture.submit('#beta-ask-form'); await fixture.settle();
+  assert.ok(requests.includes('/api/chat'), 'Explicit Ask still attempts the selected chat model');
+  assert.match(fixture.q('#beta-ask-answer').textContent, /could not generate an AI answer.*chat model.*Settings/i);
+  assert.doesNotMatch(fixture.q('#beta-ask-answer').textContent, /returned an empty answer/i);
+  assert.equal(fixture.q('#beta-ask-sources article').hidden, false);
+  assert.match(fixture.q('#beta-ask-sources article').textContent, /Coastal field notes/);
+  const { settings } = await backend.send({ type: 'SET_SETTINGS', payload: { automaticAi: true } });
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings });
+  assert.equal(note(), undefined, 'An open Ask view must not still say automatic AI is off');
+});
+
+test('disabling chat hides every Ask entry point and keeps saved-page actions usable without reloading', async testContext => {
+  const settings = { ...DEFAULT_SETTINGS, captureSetupComplete: true, recallSetupComplete: true, activeProviderId: 'disabled' };
+  const fixture = await ui('sidepanel', {
+    GET_SETTINGS: () => ({ settings }),
+    GET_PROVIDERS: () => ({ providers: [{ id: 'ollama', name: 'Ollama', settings: [], actions: [], models: [] }] }),
+    SET_SETTINGS: message => ({ settings: { ...settings, ...message.payload } })
+  });
+  testContext.after(fixture.close);
+  const entry = fixture.q('#beta-recents-list details > summary');
+  entry.click();
+  assert.equal(fixture.q('#beta-ask-memory').hidden, true);
+  assert.equal(fixture.q('#beta-ask-results').hidden, true);
+  assert.equal(fixture.q('.ask-this-page').hidden, true);
+  assert.equal(fixture.q('.read-saved-page').hidden, false);
+  const live = fixture.q('#beta-recents-list .preview-actions a');
+  assert.equal(live.href, pages[0].url);
+  assert.match(live.textContent, /Open live page/);
+  fixture.q('.ask-this-page').click();
+  fixture.q('#beta-ask-results').click();
+  fixture.q('#beta-ask-memory').click();
+  assert.equal(fixture.q('#beta-ask-host'), null);
+  assert.ok(!fixture.requests.some(message => message.type === 'ASK_QUESTION'));
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: { ...settings, activeProviderId: 'ollama' } });
+  assert.equal(fixture.q('#beta-ask-memory').hidden, false);
+  assert.equal(fixture.q('#beta-ask-results').hidden, false);
+  fixture.q('.ask-this-page').click();
+  assert.ok(fixture.q('#beta-ask-host:not([hidden])'));
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings });
+  assert.equal(fixture.q('#beta-ask-host'), null);
+  assert.equal(fixture.window.document.activeElement, fixture.q('#beta-search-input'));
+  assert.equal(fixture.q('#beta-ask-memory').hidden, true);
+  assert.equal(fixture.q('#beta-ask-results').hidden, true);
+  assert.equal(fixture.q('.ask-this-page').hidden, true);
+  await openModels(fixture);
+  assert.equal(fixture.q('#beta-provider-select').selectedOptions[0].textContent, 'Disabled');
+  assert.equal(fixture.q('#beta-chat-provider-fields').hidden, true);
+  assert.match(fixture.q('#beta-chat-disabled').textContent, /Choose a provider/);
+});
+
+test('an earlier Apple permission prompt cannot undo a later chat disable', async testContext => {
+  const settings = { ...DEFAULT_SETTINGS, activeProviderId: 'ollama' };
+  const permission = deferred();
+  const fixture = await ui('sidepanel', {
+    GET_SETTINGS: () => ({ settings }),
+    GET_PROVIDERS: () => ({ providers: ['ollama', 'apple'].map(id => ({ id, name: id, settings: [], actions: [], models: [] })) })
+  });
+  testContext.after(fixture.close);
+  let asked = false;
+  fixture.permissions.request = () => { asked = true; return permission.promise; };
+  await openModels(fixture);
+  fixture.change('#beta-provider-select', 'apple');
+  assert.equal(asked, true);
+  fixture.emit({ type: 'BETA_SETTINGS_UPDATED', settings: { ...settings, activeProviderId: 'disabled' } });
+  permission.resolve(true);
+  await tick(); await fixture.settle();
+  assert.equal(fixture.q('#beta-provider-select').value, 'disabled');
+  assert.ok(!fixture.requests.some(message => message.type === 'SET_SETTINGS' && message.payload.activeProviderId === 'apple'));
+});
+
 test('an Apple safety block survives Ask and runtime messaging with actionable provider-specific UI', async t => {
   const backend = providerFixture('http://localhost:11434');
   Object.assign(backend.stored.betaSettings, { activeProviderId: 'apple', queryRewrite: false, askRerank: false, enableTools: false });
@@ -901,12 +1985,12 @@ test('capture queue hides when idle, opens from Menu and follows active and fail
   assert.equal(details.hidden, false); assert.equal(details.open, true);
   details.open = false; await waitFor(() => details.hidden, 'the idle queue to hide after its native toggle event');
   assert.equal(details.hidden, true);
-  queue = [{ ...pages[0], status: 'processing', attempts: 1 }]; await f.poll();
+  queue = [{ ...pages[0], status: 'processing', textSaved: true, attempts: 1 }]; await f.poll();
   assert.equal(details.hidden, false); assert.equal(details.open, false);
-  assert.match(f.q('#beta-queue-label').textContent, /1 capture in progress/);
+  assert.match(f.q('#beta-queue-label').textContent, /1 saved page.*indexing/);
   assert.equal(f.q('#beta-capture-status button').disabled, true);
   queue[0].status = 'failed'; await f.poll();
-  assert.match(f.q('#beta-queue-label').textContent, /1 failed/);
+  assert.match(f.q('#beta-queue-label').textContent, /1 indexing failed/);
   f.q('#beta-capture-status button').click(); await f.settle();
   assert.equal(f.requests.find(message => message.type === 'RETRY_PROCESSING').url, pages[0].url);
   queue = []; await f.poll(); assert.equal(details.hidden, true);
@@ -914,7 +1998,7 @@ test('capture queue hides when idle, opens from Menu and follows active and fail
 
 for (const delayed of ['providers', 'settings']) test(`Models summary reflects the saved Apple provider when ${delayed} loads last`, async t => {
   const pending = deferred();
-  const settings = { ...DEFAULT_SETTINGS, activeProviderId: 'apple', captureSetupComplete: true };
+  const settings = { ...DEFAULT_SETTINGS, activeProviderId: 'apple', captureSetupComplete: true, automaticAi: true, recallSetupComplete: true };
   const providers = [
     { id: 'ollama', name: 'Ollama', settings: [], models: [], actions: [], status: { online: false } },
     { id: 'apple', name: 'Apple Foundation Models', settings: [], models: [], actions: [], status: { online: true } }
@@ -925,6 +2009,7 @@ for (const delayed of ['providers', 'settings']) test(`Models summary reflects t
     GET_EMBEDDING_CONFIG: () => ({ config: { ...DEFAULT_EMBEDDING_CONFIG, provider: 'browser' } })
   });
   t.after(fixture.close);
+  await openModels(fixture);
   if (delayed === 'providers') assert.doesNotMatch(fixture.q('#settings-models-summary').textContent, /Ollama chat/, 'Pending provider metadata must not claim a different active provider');
   pending.resolve(delayed === 'providers' ? { providers } : { settings });
   await fixture.settle();
@@ -940,6 +2025,7 @@ for (const delayed of ['providers', 'settings']) test(`Models summary reflects t
 test('Apple provider selection requests native access, keeps embeddings and requires explicit cloud confirmation', async t => {
   const backend = providerFixture('http://localhost:11434'); await backend.connect();
   const fixture = await ui('sidepanel', {}, backend); t.after(fixture.close); await fixture.settle();
+  await openModels(fixture); await fixture.settle();
   const previousEmbedding = JSON.stringify(backend.stored.betaEmbeddingConfig);
   fixture.permissions.allowed = false;
   fixture.change('#beta-provider-select', 'apple'); await fixture.settle(); await tick();
@@ -948,9 +2034,12 @@ test('Apple provider selection requests native access, keeps embeddings and requ
   assert.match(fixture.q('#settings-models-summary').textContent, /Ollama chat/);
   fixture.permissions.allowed = true;
   backend.failNextWrite('betaSettings');
-  fixture.change('#beta-provider-select', 'apple'); await fixture.settle();
+  fixture.change('#beta-provider-select', 'apple');
+  await waitFor(() => /Unable to change provider/.test(fixture.q('#beta-settings-status').textContent), 'failed provider save');
   assert.match(fixture.q('#settings-models-summary').textContent, /Ollama chat/, 'A failed provider save must retain the persisted provider label');
-  fixture.change('#beta-provider-select', 'apple'); await fixture.settle(); await tick();
+  fixture.change('#beta-provider-select', 'apple');
+  await waitFor(() => /Apple Foundation Models chat/.test(fixture.q('#settings-models-summary').textContent), 'updated provider label');
+  await fixture.settle();
   assert.equal(backend.stored.betaSettings.activeProviderId, 'apple');
   assert.match(fixture.q('#settings-models-summary').textContent, /Apple Foundation Models chat/);
   assert.equal(fixture.permissions.requests.at(-1).permissions[0], 'nativeMessaging');

@@ -1,11 +1,11 @@
 import { normalizeBackupPage } from './db/records';
 import type { PageRecord } from './db/index';
 
-const MAX_RECORD_BYTES = 16 * 1024 * 1024;
+export const MAX_BACKUP_RECORD_BYTES = 16 * 1024 * 1024;
 export const BACKUP_HEADER = '{"format":"web-recall","schemaVersion":2}\n';
 
-function checkRecordSize(bytes: number): void {
-  if (bytes > MAX_RECORD_BYTES) throw new Error('Backup record exceeds the maximum size of 16 MB.');
+export function checkRecordSize(bytes: number): void {
+  if (bytes > MAX_BACKUP_RECORD_BYTES) throw new Error('Backup record exceeds the maximum size of 16 MB.');
 }
 
 export function encodeBackupPage(page: PageRecord): string {
@@ -24,17 +24,22 @@ export function decodeBackupPage(line: string): PageRecord {
   return normalizeBackupPage(record.page);
 }
 
-async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+export async function* readBackupLines(stream: ReadableStream<Uint8Array>, signal?: AbortSignal): AsyncGenerator<string> {
+  signal?.throwIfAborted();
   const reader = stream.getReader();
+  const stop = (): void => { void reader.cancel(signal?.reason).catch(() => {}); };
+  signal?.addEventListener('abort', stop, { once: true });
   const decoder = new TextDecoder('utf-8', { fatal: true });
   let pending = '';
   let bytes = 0;
   try {
     while (true) {
       const { value, done } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       let start = 0;
       while (start < value.length) {
+        signal?.throwIfAborted();
         const newline = value.indexOf(10, start);
         const end = newline < 0 ? value.length : newline;
         bytes += end - start;
@@ -51,6 +56,7 @@ async function* readLines(stream: ReadableStream<Uint8Array>): AsyncGenerator<st
     pending += decoder.decode();
     if (pending) yield pending;
   } finally {
+    signal?.removeEventListener('abort', stop);
     await reader.cancel().catch(() => {});
     reader.releaseLock();
   }
@@ -60,7 +66,7 @@ export async function* readBackupPages(stream: ReadableStream<Uint8Array>): Asyn
   let headerSeen = false;
   let ended = false;
   let pages = 0;
-  for await (const line of readLines(stream)) {
+  for await (const line of readBackupLines(stream)) {
     if (ended) throw new Error('Unexpected data after the backup end record.');
     const record = JSON.parse(line);
     if (!headerSeen) {

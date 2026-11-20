@@ -1,8 +1,11 @@
 const SETTINGS_KEY = 'betaSettings';
+const SETTINGS_SCHEMA_KEY = 'betaSettingsSchema';
 
-import { DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
+import { CHAT_PROVIDER_DISABLED, DEFAULT_SETTINGS, type BetaSettings } from '../../shared/config/index';
 import { setLogLevel } from '../../shared/logger/index';
 import { getNormalizedOrigin } from '../../shared/providerOrigin';
+import { stopAutomaticAi } from '../processing/automaticAi';
+import { stopChatWork } from '../providers/chatWork';
 
 let cachedSettings: BetaSettings = { ...DEFAULT_SETTINGS };
 let pendingSettingsOperation: Promise<unknown> = Promise.resolve();
@@ -24,7 +27,7 @@ function normalizeDomains(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   const normalized = new Set<string>();
   for (const value of input) {
-    const text = String(value || '').trim().toLowerCase();
+    const text = String(value || '').trim().toLowerCase().replace(/\.$/, '');
     if (text) normalized.add(text);
   }
   return Array.from(normalized);
@@ -63,6 +66,8 @@ function hydrateSettings(payload: Partial<BetaSettings> | undefined): BetaSettin
       typeof payload.captureSetupComplete === 'boolean'
         ? payload.captureSetupComplete
         : hasLegacyCaptureChoice,
+    recallSetupComplete: typeof payload.recallSetupComplete === 'boolean' ? payload.recallSetupComplete : DEFAULT_SETTINGS.recallSetupComplete,
+    automaticAi: typeof payload.automaticAi === 'boolean' ? payload.automaticAi : DEFAULT_SETTINGS.automaticAi,
     acknowledgedRemoteProviderOrigins: normalizeOrigins(payload.acknowledgedRemoteProviderOrigins),
     allowlist: normalizeDomains(payload.allowlist),
     denylist: normalizeDomains(payload.denylist),
@@ -93,36 +98,39 @@ export function getCachedSettingsSnapshot(): BetaSettings {
 
 async function readSettingsFromStorage(): Promise<BetaSettings> {
   const result = await new Promise<Record<string, unknown>>((resolve, reject) => {
-    chrome.storage.local.get([SETTINGS_KEY, 'paused', 'whitelistDomains', 'blacklistDomains'], (stored: Record<string, unknown>) => {
+    chrome.storage.local.get([SETTINGS_KEY, SETTINGS_SCHEMA_KEY, 'paused', 'whitelistDomains', 'blacklistDomains', 'embeddingConfig', 'betaProviderSettings', 'betaModelSettings'], (stored: Record<string, unknown>) => {
       if (chrome.runtime?.lastError) reject(chrome.runtime.lastError);
       else resolve(stored);
     });
   });
   const current = result[SETTINGS_KEY];
-  if (current && typeof current === 'object' && !Array.isArray(current)) {
-    return setCached(hydrateSettings(current as Partial<BetaSettings>));
+  const existing = current && typeof current === 'object' && !Array.isArray(current) ? current as Partial<BetaSettings> : undefined;
+  if (result[SETTINGS_SCHEMA_KEY] === 1) {
+    const settings = hydrateSettings(existing);
+    if (!existing) await writeSettingsToStorage(settings);
+    return setCached(settings);
   }
   const hasLegacyPolicy = typeof result.paused === 'boolean' ||
     Array.isArray(result.whitelistDomains) || Array.isArray(result.blacklistDomains);
-  if (hasLegacyPolicy) {
-    const migrated = hydrateSettings({
+  const upgraded = Boolean(existing || hasLegacyPolicy || result.embeddingConfig || result.betaProviderSettings || result.betaModelSettings);
+  const migrated = hydrateSettings({
       ...DEFAULT_SETTINGS,
-      paused: typeof result.paused === 'boolean' ? result.paused : DEFAULT_SETTINGS.paused,
-      allowlist: normalizeDomains(result.whitelistDomains),
-      denylist: normalizeDomains(result.blacklistDomains),
-      captureSetupComplete: true
+      paused: !existing && typeof result.paused === 'boolean' ? result.paused : DEFAULT_SETTINGS.paused,
+      allowlist: existing ? DEFAULT_SETTINGS.allowlist : normalizeDomains(result.whitelistDomains),
+      denylist: existing ? DEFAULT_SETTINGS.denylist : normalizeDomains(result.blacklistDomains),
+      activeProviderId: upgraded ? 'ollama' : DEFAULT_SETTINGS.activeProviderId,
+      ...existing,
+      captureSetupComplete: typeof existing?.captureSetupComplete === 'boolean' ? existing.captureSetupComplete : existing ? typeof existing.paused === 'boolean' || Array.isArray(existing.allowlist) || Array.isArray(existing.denylist) : hasLegacyPolicy,
+      automaticAi: typeof existing?.automaticAi === 'boolean' ? existing.automaticAi : upgraded,
+      recallSetupComplete: typeof existing?.recallSetupComplete === 'boolean' ? existing.recallSetupComplete : upgraded
     });
-    // Persist once and keep the legacy keys as a backup. Existing beta settings
-    // always win, including intentionally cleared domain lists.
-    await writeSettingsToStorage(migrated);
-    return setCached(migrated);
-  }
-  return setCached({ ...DEFAULT_SETTINGS });
+  await writeSettingsToStorage(migrated);
+  return setCached(migrated);
 }
 
 function writeSettingsToStorage(settings: BetaSettings): Promise<void> {
   return new Promise((resolve, reject) => {
-    chrome.storage.local.set({ [SETTINGS_KEY]: settings }, () => {
+    chrome.storage.local.set({ [SETTINGS_KEY]: settings, [SETTINGS_SCHEMA_KEY]: 1 }, () => {
       if (chrome.runtime?.lastError) {
         reject(chrome.runtime.lastError);
       } else {
@@ -158,6 +166,24 @@ export async function updateSettings(partial: Partial<BetaSettings>): Promise<Be
   return serializeSettings(() => updateStoredSettings(partial));
 }
 
+export async function toggleCapturePause(): Promise<BetaSettings> {
+  return serializeSettings(async () => {
+    const current = await readSettingsFromStorage();
+    return updateStoredSettings({ paused: !current.paused, captureSetupComplete: true });
+  });
+}
+
+export async function excludeCaptureSite(url: string): Promise<{ settings: BetaSettings; domain: string }> {
+  const parsed = new URL(url);
+  if (!['http:', 'https:'].includes(parsed.protocol) || !parsed.hostname) throw new Error('Choose a regular web page to exclude its site.');
+  const domain = parsed.hostname.toLowerCase().replace(/\.$/, '');
+  return serializeSettings(async () => {
+    const current = await readSettingsFromStorage();
+    const settings = await updateStoredSettings({ denylist: [...new Set([...current.denylist, domain])], captureSetupComplete: true });
+    return { settings, domain };
+  });
+}
+
 export async function acknowledgeRemoteProviderOrigin(origin: string): Promise<BetaSettings> {
   return serializeSettings(async () => {
     const current = await readSettingsFromStorage();
@@ -176,6 +202,8 @@ async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<Bet
       typeof partial.captureSetupComplete === 'boolean'
         ? partial.captureSetupComplete
         : current.captureSetupComplete,
+    recallSetupComplete: typeof partial.recallSetupComplete === 'boolean' ? partial.recallSetupComplete : current.recallSetupComplete,
+    automaticAi: typeof partial.automaticAi === 'boolean' ? partial.automaticAi : current.automaticAi,
     acknowledgedRemoteProviderOrigins: Array.isArray(partial.acknowledgedRemoteProviderOrigins)
       ? normalizeOrigins(partial.acknowledgedRemoteProviderOrigins)
       : current.acknowledgedRemoteProviderOrigins,
@@ -197,6 +225,8 @@ async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<Bet
   };
   await writeSettingsToStorage(next);
   setCached(next);
+  if (!next.automaticAi) stopAutomaticAi();
+  if (current.activeProviderId !== CHAT_PROVIDER_DISABLED && next.activeProviderId === CHAT_PROVIDER_DISABLED) stopChatWork();
   try {
     setLogLevel(next.logLevel);
   } catch (err) {
@@ -209,7 +239,7 @@ async function updateStoredSettings(partial: Partial<BetaSettings>): Promise<Bet
 
 function getHostname(url: string): string {
   try {
-    return new URL(url).hostname.toLowerCase();
+    return new URL(url).hostname.toLowerCase().replace(/\.$/, '');
   } catch {
     return '';
   }
@@ -240,11 +270,12 @@ export async function shouldCaptureUrl(
     return false;
   }
   const host = getHostname(url);
-  if (settings.allowlist.length > 0) {
-    return matchesDomain(host, settings.allowlist);
-  }
+  try { if (!host || !['http:', 'https:'].includes(new URL(url).protocol)) return false; } catch { return false; }
   if (matchesDomain(host, settings.denylist)) {
     return false;
+  }
+  if (settings.allowlist.length > 0) {
+    return matchesDomain(host, settings.allowlist);
   }
   return true;
 }
@@ -255,6 +286,7 @@ try {
     const entry = changes[SETTINGS_KEY];
     if (!entry || typeof entry.newValue !== 'object') return;
     setCached(hydrateSettings(entry.newValue as Partial<BetaSettings>));
+    if (!cachedSettings.automaticAi) stopAutomaticAi();
     try {
       setLogLevel(cachedSettings.logLevel);
     } catch (err) {

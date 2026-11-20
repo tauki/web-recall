@@ -10,6 +10,7 @@ export type ToolSearchHit = {
   hitsFromPage?: number;
   partial?: boolean;
   timestamp?: number;
+  versionId?: string;
 };
 
 export type ToolsRuntimeOptions = {
@@ -17,7 +18,7 @@ export type ToolsRuntimeOptions = {
   pageText: Map<string, string>;
   pages: PageRecord[];
   maxSlice?: number;
-  recordEvidence?: (url: string, text: string, metadata?: { timestamp?: number; title?: string }) => number;
+  recordEvidence?: (url: string, text: string, metadata?: { timestamp?: number; title?: string; versionId?: string }) => number;
   loadPage?: (url: string) => Promise<PageRecord | undefined>;
   maxCalls?: number;
   signal?: AbortSignal;

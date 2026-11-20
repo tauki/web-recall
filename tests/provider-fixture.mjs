@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb';
 import { loadSource, plain } from './helpers.mjs';
+import { installRuntimePorts } from './runtime-ports.mjs';
 
 export function providerFixture(baseUrl = 'https://models.example.test', acknowledged = [], offscreenOverrides = {}) {
   const stored = {
@@ -9,12 +10,18 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
   };
   const requests = [], listeners = [];
   const failingWrites = new Set();
+  let activeTabUrl = 'https://example.test/article';
   const chrome = {
+    tabs: { query: async () => [{ id: 7, url: activeTabUrl }] },
     runtime: { id: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', sendMessage() {}, getURL: path => `chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/${path}`, onMessage: { addListener: listener => listeners.push(listener) } },
     storage: {
       onChanged: { addListener() {} },
       local: {
-        get(keys, callback) { callback(Object.fromEntries(keys.map(key => [key, stored[key]]))); },
+        get(keys, callback) {
+          const names = typeof keys === 'string' ? [keys] : keys;
+          const values = Object.fromEntries(names.filter(key => Object.hasOwn(stored, key)).map(key => [key, stored[key]]));
+          return callback ? callback(values) : Promise.resolve(values);
+        },
         set(values, callback) {
           const key = Object.keys(values).find(key => failingWrites.has(key));
           if (key) {
@@ -32,6 +39,7 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
     '../models/index': { getModelSettings: async () => ({ chatModel: 'chosen-model' }), updateModelSettings: async () => assert.fail('Consent must not change model selection') },
     '../offscreen/index': { ensureOffscreenDocument: async () => {}, sendOffscreenMessage: async () => ({}), invalidateOffscreenIndex: async () => {}, ...offscreenOverrides }
   };
+  const ports = installRuntimePorts(chrome.runtime);
   const context = {
     chrome, indexedDB: new IDBFactory(), IDBKeyRange,
     fetch: async (url, options = {}) => {
@@ -61,5 +69,5 @@ export function providerFixture(baseUrl = 'https://models.example.test', acknowl
       throw Error(`No listener handles ${message.type}`);
     } catch (error) { clearTimeout(timer); reject(error); }
   });
-  return { stored, requests, load, send, runtime: chrome.runtime, failNextWrite: key => failingWrites.add(key), connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
+  return { stored, requests, load, send, chrome, runtime: chrome.runtime, ports, setActiveTab: url => { activeTabUrl = url; }, failNextWrite: key => failingWrites.add(key), connect: async () => (await load('src/background/orchestration/index.ts')).orchestrateLifecycle() };
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource, chromeFixture, tick, plain } from './helpers.mjs';
+import { loadSource, chromeFixture, tick, plain, waitFor, scanFixturePages } from './helpers.mjs';
 
 function lifetimeContext() {
   const timers = new Map(); let ticks = 0, serial = 0;
@@ -108,11 +108,12 @@ test('explicit cancellation targets only its operation and prevents duplicate re
 
 test('stopping backfill aborts inference, preserves existing vectors and skips later pages', async () => {
   const controller=new AbortController(); let requests=0, writes=0, signal;
-  const page={url:'https://a.test',chunks:[{text:'saved',embedding:[9,9]},{text:'missing',embedding:[]}],updatedAt:1};
+  const page={url:'https://a.test',title:'Saved page',versionId:'saved-a',timestamp:1,text:'saved\n\nmissing',manual:true,chunks:[{text:'saved',embedding:[9,9]},{text:'missing',embedding:[]}],createdAt:1,updatedAt:1};
+  const pages=[page,{...page,url:'https://b.test'}];
   const mod=await loadSource('src/background/embeddings/backfill.ts','',{
     '../summaries/index': { queuePageSummary: async () => false },
     './index':{getEmbeddingConfig:()=>({provider:'ollama',model:'test',baseUrl:'http://localhost'}),computeEmbeddingsForChunks:async(_text,s)=>{requests++;signal=s;return new Promise((_resolve,reject)=>s.addEventListener('abort',()=>reject(s.reason),{once:true}));}},
-    '../storage/manager':{storageManager:{listAllPages:async()=>[page,{...page,url:'https://b.test'}],savePageRecord:async()=>{writes++;}}},
+    '../storage/manager':{storageManager:{listAllPages:async()=>pages,getPageRecord:async url=>pages.find(page=>page.url===url),getProcessingEntry:async()=>undefined,savePageRecord:async()=>{writes++;}}},
     '../offscreen/index':{invalidateOffscreenIndex:async()=>{}},'../../shared/logger/index':{log:async()=>{}}
   });
   const pending=mod.backfillMissingEmbeddings(2,false,undefined,undefined,controller.signal);
@@ -124,21 +125,26 @@ test('stopping backfill aborts inference, preserves existing vectors and skips l
 
 test('Search passes cancellation to query rewriting and reranking without starting more inference', async () => {
   for (const stage of ['rewrite','rerank']) {
-    let requestSignal, calls=0;
+    let requestSignal, calls=0, embeddings=0;
+    const page={url:'https://example.test',title:'Saved report',text:'Coastal observations.',timestamp:1,versionId:'saved-version',chunks:[{text:'Coastal observations.',embedding:[1,0]}]};
     const chat=async(config)=>{requestSignal=config.signal;calls++;return new Promise((_resolve,reject)=>config.signal.addEventListener('abort',()=>reject(config.signal.reason),{once:true}));};
-    const mod=await loadSource('src/background/search/index.ts','generateQueryVariations, rerankWithCrossEncoder',{
-      '../providers/chat':{getChatConfig:async()=>({model:'test'}),callChat:chat,callChatJson:chat},
-      '../settings/index':{getSettings:async()=>({})},
-      '../storage/manager':{storageManager:{getPageRecord:async()=>undefined}},
-      '../embeddings/index':{computeEmbeddingsForQueries:async()=>{throw Error('Unexpected embedding call');},getEmbeddingConfig:()=>({})},
-      '../offscreen/index':{ensureOffscreenDocument:async()=>{},sendOffscreenMessage:async()=>({})}
+    const mod=await loadSource('src/background/search/index.ts','',{
+      '../providers/chat':{getChatConfig:async signal=>({model:'test',signal}),callChat:chat,callChatJson:chat},
+      '../settings/index':{getSettings:async()=>({queryRewrite:stage==='rewrite',searchRerank:stage==='rerank'})},
+      '../storage/manager':{storageManager:{scanSearchPages:scanFixturePages([page]),getPageRecord:async()=>page}},
+      '../embeddings/index':{computeEmbeddingsForQueries:async()=>{embeddings++;return [[1,0]];},getEmbeddingConfig:()=>({})},
+      '../offscreen/index':{ensureOffscreenDocument:async()=>{},sendOffscreenMessage:async message=>message.type==='OFFSCREEN_TOP_PAGES'?{pages:[{url:page.url}]}:{candidates:[{...page,snippet:page.text,score:1,chunkIndex:0}]}}
     });
     const controller=new AbortController();
-    const pending=stage==='rewrite'
-      ?mod.generateQueryVariations('query',3,{signal:controller.signal})
-      :mod.rerankWithCrossEncoder('query',[{url:'https://example.test',title:'Title',snippet:'Passage'}],{signal:controller.signal});
-    await tick(); assert.equal(requestSignal,controller.signal);
-    controller.abort(Error('Stopped by user'));
-    await assert.rejects(pending,/Stopped by user/); assert.equal(calls,1);
+    const pending=mod.searchStoredPages('ocean flight',10,{signal:controller.signal});
+    try {
+      await waitFor(()=>requestSignal,`${stage} inference to start`);
+      assert.equal(requestSignal.aborted,false);
+    } finally { controller.abort(Error('Stopped by user')); await pending.catch(()=>{}); }
+    await assert.rejects(pending,/Stopped by user/);
+    assert.equal(requestSignal.aborted,true);
+    assert.match(requestSignal.reason.message,/Stopped by user/);
+    assert.equal(calls,1);
+    assert.equal(embeddings,stage==='rewrite'?0:1);
   }
 });

@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSource, chromeFixture, plain, waitFor } from './helpers.mjs';
+import { loadSource, chromeFixture, plain, waitFor, scanFixturePages } from './helpers.mjs';
 
 const selected = { url: 'https://inside.test/a#saved', title: 'Selected', text: 'Selected evidence', timestamp: 1, chunks: [{ text: 'Selected evidence', embedding: [] }] };
 const other = { ...selected, url: 'https://outside.test/private', title: 'Unselected', text: 'OUTSIDE SECRET' };
 function mocks(extra = {}) {
   return {
-    '../storage/manager': { storageManager: { getPageRecord: async url => url === selected.url ? selected : url === other.url ? other : undefined, listAllPages: async () => [selected, other], listRecentPages: async () => [other] } },
+    '../storage/manager': { storageManager: { getPageRecord: async url => url === selected.url ? selected : url === other.url ? other : undefined, scanSearchPages: scanFixturePages([selected, other]), listAllPages: async () => [selected, other], listRecentPages: async () => [other] } },
     '../search/index': { searchStoredPages: async (_query, _limit, options) => [selected, other].filter(page => !options?.scopeUrls || options.scopeUrls.includes(page.url)).map(page => ({ ...page, snippet: page.text, score: 1 })) },
     '../settings/index': { getSettings: async () => ({ queryRewrite: false, askRerank: false, enableTools: false }) },
     '../providers/chat': { getChatConfig: async () => ({}), callChat: async () => ({}), callChatJson: async () => null, streamChat: async () => 'Selected fact [1]', normalizeToolArguments: value => value },

@@ -2,6 +2,7 @@ import { installSharedStyles, createBackLink, icon, navigateTo } from '../../sha
 import {
   DEFAULT_EMBEDDING_CONFIG as DEFAULT_EMBEDDING,
   BROWSER_EMBEDDING_MODELS,
+  CHAT_PROVIDER_DISABLED,
   DEFAULT_SETTINGS,
   type BetaSettings,
   type EmbeddingConfig
@@ -9,19 +10,9 @@ import {
 import { getProviderOriginInfo } from '../../../shared/providerOrigin';
 import { sendRuntimeMessage as runtimeMessage } from '../../shared/runtime';
 import { applyTheme, bindSystemThemeListener, type ThemeChoice } from '../../shared/theme';
-import type { BrowserModelDownload } from '../../../shared/browserModels';
+import type { BrowserEmbedStatus, BrowserModelDownload } from '../../../shared/browserModels';
 import { bindBrowserDownload, createBrowserDownloadControls } from './browserDownload';
-
-type BrowserEmbedStatus = {
-  ready: boolean;
-  runtimeAvailable: boolean;
-  model: string;
-  revision: string;
-  state: 'idle' | 'checking' | 'downloading' | 'ready' | 'error';
-  code?: string;
-  lastError?: string;
-  checkedAt?: string;
-};
+import { mountStorageAndBackups } from './storage';
 
 function formatDomainList(list: string[]): string {
   return list.join('\n');
@@ -79,6 +70,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
         <h2 id="domain-heading">Domain allowlist / denylist</h2>
         <p id="domain-help" class="beta-help">
           List one domain per line. Wildcards like <code>*.example.com</code> are supported. Empty allowlist captures every domain not on the denylist.
+          Exclusions override included sites, even for manual saves. Existing saves remain; use Memory’s Forget saved pages tool to remove them.
         </p>
         <div class="beta-field">
           <label for="beta-allowlist-input">Allowlist</label>
@@ -101,6 +93,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           </select>
         </div>
         <div id="embedding-ollama-fields">
+        <details id="beta-ollama-embedding-advanced"><summary>Connection &amp; model</summary>
         <div class="beta-field">
           <label for="beta-embedding-base">Base URL</label>
           <input id="beta-embedding-base" type="url" placeholder="http://localhost:11434" />
@@ -109,6 +102,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-embedding-model">Model name</label>
           <input id="beta-embedding-model" type="text" placeholder="embeddinggemma" />
         </div>
+        </details>
         </div>
         <div id="embedding-browser-fields" hidden>
         <p class="beta-help">Download EmbeddingGemma once from Hugging Face. It stays cached on this device; page text is processed locally. The initial download may take several minutes.</p>
@@ -151,6 +145,8 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <label for="beta-provider-select">Provider</label>
           <select id="beta-provider-select"></select>
         </div>
+        <p id="beta-chat-disabled" class="beta-help" hidden>Ask is hidden while chat is disabled. Choose a provider to use Ask. Saving, search and reading still work.</p>
+        <div id="beta-chat-provider-fields" hidden>
         <div class="beta-field">
           <label for="beta-provider-base">Base URL</label>
           <input id="beta-provider-base" type="url" placeholder="http://localhost:11434" />
@@ -171,6 +167,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
           <p class="beta-help">Open the Web Recall companion from Applications. Its menu bar shows status and controls native work. Inference stays on this Mac unless you enable Private Cloud Compute below. Model context size is detected at runtime; embeddings are unchanged.</p>
           <label class="beta-toggle"><span>Use Apple Private Cloud Compute (optional)</span><input type="checkbox" id="beta-apple-cloud" /></label>
           <p class="beta-help">PCC sends prompts and selected saved passages to Apple's servers. Requires macOS 27, network access, eligibility and a companion signed with Apple's managed PCC entitlement. It never activates automatically.</p>
+        </div>
         </div>
       </section>
 
@@ -251,6 +248,7 @@ export function renderSettingsPanel(target: HTMLElement): void {
   const groups = [
     ['capture', 'Capture', ['capture-heading', 'domain-heading', 'capture-setup-heading']],
     ['models', 'Models', ['embed-heading', 'provider-heading', 'downloaded-models-heading']],
+    ['storage', 'Storage & backups', []],
     ['appearance', 'Appearance', ['theme-heading']],
     ['advanced', 'Advanced', ['tools-heading']]
   ] as const;
@@ -258,9 +256,16 @@ export function renderSettingsPanel(target: HTMLElement): void {
     const details = document.createElement('details'); details.id = `settings-${id}`; details.className = 'settings-group'; details.name = 'settings-groups';
     const summary = document.createElement('summary');
     const labelWrap = document.createElement('span'); labelWrap.append(document.createTextNode(label));
-    const description = document.createElement('small'); description.className = 'wr-setting-summary'; description.id = `settings-${id}-summary`; labelWrap.append(description);
+    const description = document.createElement('small'); description.className = 'wr-setting-summary'; description.id = `settings-${id}-summary`;
+    if (id === 'storage') description.textContent = 'Disk usage, retention & recovery';
+    labelWrap.append(description);
     summary.append(labelWrap, icon('caret-down')); details.append(summary);
     const content = document.createElement('div'); content.className = 'wr-settings-group'; details.append(content);
+    if (id === 'models') {
+      const introduction = document.createElement('section'); introduction.className = 'beta-card';
+      introduction.innerHTML = '<label class="beta-toggle"><input type="checkbox" id="beta-automatic-ai" disabled /><span>Use AI automatically</span></label><p class="beta-help">Index new captures and enhance Search. With a chat provider, also summarize new captures. Saving, text search and reading work without AI. Ask needs a chat provider and runs only when requested.</p><a class="text-button" href="https://github.com/tauki/web-recall#setup" target="_blank" rel="noopener noreferrer">Ollama setup guide</a>';
+      content.append(introduction);
+    }
     if (id === 'advanced') content.append(retrieval, tools, logging);
     for (const heading of headings) {
       const card = target.querySelector<HTMLElement>(`#${heading}`)?.closest<HTMLElement>('section');
@@ -274,11 +279,14 @@ export function renderSettingsPanel(target: HTMLElement): void {
   askCard.remove();
   shell.append(status);
   target.querySelectorAll<HTMLButtonElement>('button').forEach(button => button.classList.add(['beta-save-rules', 'beta-save-embedding', 'beta-provider-save'].includes(button.id) ? 'primary-button' : 'secondary-button'));
+  const storage = target.querySelector<HTMLDetailsElement>('#settings-storage')!;
+  mountStorageAndBackups(target, storage, storage.querySelector<HTMLElement>('.wr-settings-group')!);
   installSharedStyles();
   attachBehavior(target);
 }
 
 function attachBehavior(root: HTMLElement): void {
+  const automaticAi = root.querySelector<HTMLInputElement>('#beta-automatic-ai')!;
   const pauseToggle = root.querySelector<HTMLInputElement>('#beta-pause-toggle');
   const captureSetupCard = root.querySelector<HTMLElement>('#beta-capture-setup-card');
   const enableBroadCaptureBtn = root.querySelector<HTMLButtonElement>('#settings-enable-broad-capture');
@@ -434,7 +442,7 @@ function attachBehavior(root: HTMLElement): void {
   type ProviderView = {
     id: string;
     name: string;
-    status?: { online: boolean; lastError?: string };
+    status?: { online: boolean; lastChecked?: string; lastError?: string };
     settings: Array<{ key: string; value: string }>;
     models: string[];
     selectedModel: string;
@@ -442,6 +450,7 @@ function attachBehavior(root: HTMLElement): void {
   };
 
   let providerCache: ProviderView[] = [];
+  let providerChoiceRevision = 0;
 
   function getAcknowledgedRemoteOrigins(): string[] {
     return Array.isArray(currentSettings.acknowledgedRemoteProviderOrigins)
@@ -515,8 +524,9 @@ function attachBehavior(root: HTMLElement): void {
       chatModelSelect.disabled = apple || models.length === 0;
     }
     if (providerStatus) {
-      providerStatus.textContent = provider.status?.online ? `${provider.name} online` : `Offline: ${provider.status?.lastError || 'unknown error'}`;
-      providerStatus.style.color = provider.status?.online ? 'var(--text)' : 'var(--error)';
+      const unchecked = provider.status?.lastChecked === '';
+      providerStatus.textContent = unchecked ? 'Connection not checked' : provider.status?.online ? `${provider.name} online` : `Offline: ${provider.status?.lastError || 'unknown error'}`;
+      providerStatus.style.color = unchecked || provider.status?.online ? 'var(--text)' : 'var(--error)';
     }
     syncSummaries();
   }
@@ -529,16 +539,17 @@ function attachBehavior(root: HTMLElement): void {
       if (providerSelect) {
         replaceSelectOptions(
           providerSelect,
-          providers.map((provider) => ({ value: provider.id, label: provider.name }))
+          [{ value: CHAT_PROVIDER_DISABLED, label: 'Disabled' }, ...providers.map((provider) => ({ value: provider.id, label: provider.name }))]
         );
+        providerSelect.value = currentSettings.activeProviderId;
       }
-      const activeId = currentSettings.activeProviderId || 'ollama';
-      const active = providers.find((provider) => provider.id === activeId) || providers[0];
+      const active = providers.find((provider) => provider.id === currentSettings.activeProviderId);
       if (active) {
         applyProvider(active);
       }
     } catch (err) {
       if (providerStatus) {
+        providersLoaded = false;
         providerStatus.textContent = `Unable to load provider: ${err instanceof Error ? err.message : String(err)}`;
         providerStatus.style.color = 'var(--error)';
       }
@@ -547,9 +558,10 @@ function attachBehavior(root: HTMLElement): void {
 
   function syncSummaries(): void {
     const chatProvider = providerCache.find((provider) => provider.id === currentSettings.activeProviderId);
+    const chatDescription = currentSettings.activeProviderId === CHAT_PROVIDER_DISABLED ? 'Chat disabled' : chatProvider ? `${chatProvider.name} chat` : 'Chat provider not loaded';
     const descriptions: Record<string, string> = {
       capture: `${currentSettings.paused ? 'Paused' : 'Automatic'} · ${currentSettings.allowlist.length ? `${currentSettings.allowlist.length} allowed domains` : 'All sites'}`,
-      models: `${embeddingProviderSelect?.value === 'browser' ? 'In-browser' : 'Ollama'} embeddings · ${chatProvider ? `${chatProvider.name} chat` : 'Chat provider not loaded'}`,
+      models: currentSettings.automaticAi === false ? `Automatic AI off · ${chatDescription}` : `${embeddingProviderSelect?.value === 'browser' ? 'In-browser' : 'Ollama'} embeddings · ${chatDescription}`,
       appearance: themeSelect?.selectedOptions[0]?.textContent || 'Light', advanced: 'Retrieval, answers & tools'
     };
     for (const [id, text] of Object.entries(descriptions)) { const line = root.querySelector('#settings-' + id + '-summary'); if (line) line.textContent = text; }
@@ -557,10 +569,13 @@ function attachBehavior(root: HTMLElement): void {
 
   function applySettings(settings: BetaSettings): void {
     const previousProviderId = currentSettings.activeProviderId;
+    if (previousProviderId !== settings.activeProviderId) providerChoiceRevision++;
     currentSettings = settings;
+    automaticAi.checked = settings.automaticAi === true;
+    automaticAi.disabled = false;
     appleCloud.checked = settings.applePrivateCloud === true;
     const captureNote = root.querySelector('#beta-capture-policy-note');
-    if (captureNote) captureNote.textContent = settings.paused ? 'Automatic capture is paused. Manual capture still follows your domain rules.' : 'Automatic capture is on and follows your domain rules.';
+    if (captureNote) captureNote.textContent = settings.paused ? 'Automatic capture is paused. Manual capture still follows your domain rules. Already-saved pages may continue indexing.' : 'Automatic capture is on and follows your domain rules. Excluding a site stops future saves, not existing ones.';
     if (captureSetupCard) {
       captureSetupCard.hidden = settings.captureSetupComplete;
       const wrapper = captureSetupCard.closest('details'); if (wrapper) wrapper.hidden = settings.captureSetupComplete;
@@ -586,6 +601,9 @@ function attachBehavior(root: HTMLElement): void {
     if (providerSelect) {
       providerSelect.value = settings.activeProviderId || DEFAULT_SETTINGS.activeProviderId;
     }
+    const chatDisabled = settings.activeProviderId === CHAT_PROVIDER_DISABLED;
+    root.querySelector<HTMLElement>('#beta-chat-provider-fields')!.hidden = chatDisabled;
+    root.querySelector<HTMLElement>('#beta-chat-disabled')!.hidden = !chatDisabled;
     if (answerModeSelect) {
       answerModeSelect.value = settings.answerMode || DEFAULT_SETTINGS.answerMode;
     }
@@ -676,12 +694,12 @@ function attachBehavior(root: HTMLElement): void {
       updateBrowserStatus('Save settings to use the selected model. Existing pages will not be re-embedded.');
       return;
     }
-    if (!status.runtimeAvailable) {
-      updateBrowserStatus(status.lastError || 'Browser embedding runtime is unavailable on this machine.', true);
-      return;
-    }
     if (status.state === 'checking') {
       updateBrowserStatus('Checking browser embedding runtime…');
+      return;
+    }
+    if (!status.runtimeAvailable) {
+      updateBrowserStatus(status.lastError || 'Browser embedding runtime is unavailable on this machine.', true);
       return;
     }
     if (status.state === 'downloading') {
@@ -690,6 +708,10 @@ function attachBehavior(root: HTMLElement): void {
     }
     if (status.ready) {
       updateBrowserStatus('Model ready — embeddings run on this device.');
+      return;
+    }
+    if (status.state === 'cached') {
+      updateBrowserStatus('Cached model files found — verified when next used. Save & download checks or completes the download.');
       return;
     }
     if (status.state === 'error') {
@@ -770,9 +792,9 @@ function attachBehavior(root: HTMLElement): void {
     try {
       const response = await runtimeMessage<{ settings: BetaSettings }>({
         type: 'SET_SETTINGS',
-        payload: { paused: false, captureSetupComplete: true }
+        payload: { paused: false, captureSetupComplete: true, allowlist: [] }
       });
-      applySettings(response.settings || { ...currentSettings, paused: false, captureSetupComplete: true });
+      applySettings(response.settings || { ...currentSettings, paused: false, captureSetupComplete: true, allowlist: [] });
       setStatus('Broad capture enabled');
     } catch (err) {
       setStatus(`Unable to enable broad capture: ${err instanceof Error ? err.message : String(err)}`, true);
@@ -932,11 +954,17 @@ function attachBehavior(root: HTMLElement): void {
   });
 
   providerSelect?.addEventListener('change', async () => {
-    const selectedId = providerSelect.value || 'ollama';
+    const selectedId = providerSelect.value;
+    if (!selectedId) return;
+    const revision = ++providerChoiceRevision;
     try {
-      if (selectedId === 'apple' && !(await chrome.permissions.request({ permissions: ['nativeMessaging'] }))) {
-        providerSelect.value = currentSettings.activeProviderId;
-        setStatus('Apple helper access was not granted. Your previous provider is unchanged.'); return;
+      if (selectedId === 'apple') {
+        const allowed = await chrome.permissions.request({ permissions: ['nativeMessaging'] });
+        if (revision !== providerChoiceRevision) return;
+        if (!allowed) {
+          providerSelect.value = currentSettings.activeProviderId;
+          setStatus('Apple helper access was not granted. Your previous provider is unchanged.'); return;
+        }
       }
       const response = await runtimeMessage<{ settings: BetaSettings }>({
         type: 'SET_SETTINGS',
@@ -1170,5 +1198,15 @@ function attachBehavior(root: HTMLElement): void {
   }
 
   void refreshData();
-  void refreshProvider();
+  let providersLoaded = false;
+  root.querySelector<HTMLDetailsElement>('#settings-models')!.addEventListener('toggle', event => {
+    if ((event.currentTarget as HTMLDetailsElement).open && !providersLoaded) { providersLoaded = true; void refreshProvider(); }
+  });
+  automaticAi.addEventListener('change', () => {
+    automaticAi.disabled = true;
+    void runtimeMessage<{ settings: BetaSettings }>({ type: 'SET_SETTINGS', payload: { automaticAi: automaticAi.checked } }).then(response => {
+      applySettings(response.settings);
+      setStatus(response.settings.automaticAi ? 'Automatic AI enabled for new captures and searches. Existing pages are unchanged.' : 'Automatic AI off. Saved text remains searchable. This does not change your chat provider.');
+    }).catch(error => { automaticAi.checked = currentSettings.automaticAi; setStatus(`Unable to update automatic AI: ${error instanceof Error ? error.message : String(error)}`, true); }).finally(() => { automaticAi.disabled = false; });
+  });
 }

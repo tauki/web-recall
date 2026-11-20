@@ -108,16 +108,31 @@ default and is not required for on-device use.
 Protecting your library
 -----------------------
 
-Saved pages, summaries and embeddings live in IndexedDB in your Chrome profile.
+Saved pages, summaries, embeddings and the capture queue live together in a
+SQLite database in the extension's private storage in your Chrome profile.
 The extension requests `unlimitedStorage` to exempt its library and browser-model
-cache from Chrome's storage eviction. Library and capture-queue writes request
-strict durability and report success only after the transaction completes.
-Logs and generated Highlights retain the browser's default write durability.
+cache from Chrome's storage eviction. Saving reports success only after the
+library transaction commits. Local diagnostic logs still use IndexedDB.
+Browser-model files use Cache Storage, which has no equivalent strict-durability
+option. Eviction protection is not a guarantee against losing cached files in a
+crash. Missing files require an explicit download; saved pages remain independent.
 
 This is not a backup: uninstalling the extension, removing the Chrome profile,
-storage corruption or disk failure can still lose data. Periodically use
-**Memory → Export** to save a backup outside Chrome, especially before removing
-or reinstalling the extension. Export does not run automatically or upload data.
+storage corruption or disk failure can still lose data. Use **Settings →
+Storage & backups** to set up a recovery key, save an encrypted `.wrbackup`
+file, or restore a backup. Keep the recovery key separate from the backup
+folder: you'll need it to restore the encrypted file in another profile.
+Legacy JSON and JSONL backups can still be restored.
+
+For automatic encrypted backups, choose a folder in the updated Mac companion
+dashboard, then enable daily backups in **Mac companion folder**. Chrome and
+the companion must be running. Web Recall skips unchanged libraries and keeps
+the last three successful encrypted backups by default. It encrypts files
+before writing them to the folder and never uploads them. If you sync the
+folder yourself, move older unencrypted `.jsonl` backups out of it first.
+
+Use **Memory Manager → Page actions → Export pages** to save readable, unencrypted copies of all, filtered, or
+selected pages as Markdown or JSON.
 
 Directory contents
 ------------------
@@ -133,11 +148,25 @@ Directory contents
   inside the panel and available as standalone pages.
 - `src/ui/shared/`: shared design, navigation, answer rendering and runtime helpers.
 - `src/assets/fonts/`, `src/assets/ui/`: bundled Inter and Phosphor assets and licenses.
-- `src/shared/`: shared config, IndexedDB helpers, logging, vector math, tools,
+- `src/shared/`: shared config, local storage, logging, vector math, tools,
   and wasm/offscreen support.
 
 Setup
 -----
+
+Saving, text search and saved-page reading do not require a model, account or
+Mac companion. After loading Web Recall, capture a page, search a few words
+from its title or text, then choose **Read saved page**. The inline guide can
+be skipped and does not repeat after completion.
+
+New installations keep **Settings → Models → Use AI automatically** off.
+Enable it when you want summaries and indexing for new captures and model-based
+Search refinement. Enabling this does not backfill existing pages or download models.
+On new installations the chat provider is also **Disabled**. Choose a provider
+under **Settings → Models → Chat provider** to show Ask. This is separate from
+automatic AI and embeddings. Ask, manual re-embedding, summary regeneration and
+model downloads remain explicit actions. Upgrades preserve existing model choices
+and retrieval preferences.
 
 0. Install Node.js + pnpm
 
@@ -170,10 +199,10 @@ Setup
    pnpm test
    ```
 
-2. Install and start Ollama
+2. Install and start Ollama (optional)
 
-   The default runtime uses Ollama for embeddings and local chat/summarisation.
-   Install Ollama on your machine and start the server:
+   Ollama is an optional provider for embeddings and local chat/summarisation.
+   If you want these AI features, install Ollama and start the server:
 
    ```bash
    # Install Ollama (see https://ollama.com/download for instructions)
@@ -232,6 +261,10 @@ Setup
      Download progress appears under **Embedding provider** in Models, with the
      current file's bytes and percentage when its size is known. **Preparing model**
      follows file transfer; 100% of a file does not mean the model is ready yet.
+     Preparation releases the downloaded model and loads it again from cache
+     without network access before reporting success. After a browser restart,
+     cached files are shown as unverified until the model is next used; a previous
+     ready flag does not prove the files are still present or complete.
      **Cancel download** stops active requests. **Retry download** reuses completed
      cached files; an unfinished file is fetched again. Reopening Models restores
      the current transfer while the extension's offscreen document remains open.
@@ -272,7 +305,7 @@ Setup
    provider and model. Unchanged pages reuse their saved summary; changed text
    invalidates it. Previews show the summary when ready, otherwise saved text.
    Capture and embeddings remain saved even if the chat model is unavailable.
-   In **Memory → Tools → Embeddings**, select **Create missing summaries after
+   In **Memory Manager → Maintenance**, select **Create missing summaries after
    embeddings** to summarize older pages after backfill. This also includes pages
    whose embeddings are already complete and never replaces existing summaries.
    To replace an older or poor summary, select **Regenerate existing summaries
@@ -290,8 +323,9 @@ Setup
 6. Manage & inspect captures
 
    - **Menu → Memory Manager**: search and expand saved pages, preview and ask,
-     re-embed, or delete. **Select** enables bulk selection. **Tools** contains
-     backup import/export, capture queue and embedding maintenance.
+     re-embed, or delete. **Select** enables bulk selection. **Page actions**
+     contains export and the capture queue; **Maintenance** contains bulk model work.
+     **Backups** opens Storage & backups in Settings.
      See [Export/Import](#exportimport) for the backup format.
    - **Menu → Highlights**: browse days and expand their highlighted page links.
      Open **All dates** for a date range and page size.
@@ -310,7 +344,7 @@ Setup
    latest 20 titles, URLs and timestamps are cached—not saved text or vectors.
    Older pages load in batches as you scroll, with **Load more** available for
    keyboard use. Deletion and imports invalidate the snapshot. The session
-   cache clears on browser restart or extension reload; your IndexedDB library
+   cache clears on browser restart or extension reload; your saved library
    remains saved. These refreshes do not run models or regenerate embeddings.
 
    Chrome's **Extension options** still opens Memory Manager. Standalone
@@ -432,22 +466,87 @@ Setup
 
 9. Capture rules and pause
 
+   - Choose **Manual only**, **Selected sites**, or **Enable broad capture** at
+     first setup. Broad capture includes all non-excluded sites; manual saving
+     does not require model setup.
+   - **Menu → Pause automatic capture / Resume automatic capture** changes
+     automatic collection without stopping indexing of already-saved pages.
+     **Never save current site** adds the current site's domain to exclusions,
+     including subdomains. This keeps existing saves.
    - Configure allowlist/denylist domain rules in Settings. When the allowlist
-     is non-empty, only listed domains are captured. Use the Pause toggle to
-     temporarily stop auto-capture.
+     is non-empty, only listed domains are captured. Exclusions always win,
+     including manual saves. Pause stops automatic collection; explicit saving
+     still works, and already-saved pages may continue indexing.
+   - Automatic capture waits for 1.5 seconds of DOM quiet in a visible, focused
+     page. A continuously changing page is attempted after 20 seconds; empty or
+     failed attempts remain eligible for later content. Switching away resets
+     the wait. A background tab alone is not saved.
+     Navigation starts a new wait; after a successful automatic save, use
+     **Capture current tab** to refresh later content changes at the same URL.
+   - Capture confirmation means the text and indexing job have been durably
+     saved. Text search and the saved reader work while model indexing waits
+     or fails. The capture queue distinguishes waiting, indexing and failure;
+     check model settings and choose **Retry** for failed indexing.
+     With automatic AI off, the saved text stays usable without starting model
+     work. Turning it off stops pending automatic enrichment and Search refinement;
+     it does not remove existing vectors or summaries, or cancel explicit Ask and
+     manual maintenance requests.
+   - **Memory Manager → Page actions → Forget saved pages** reviews pages by site,
+     capture dates, or both. Confirm the displayed version and page counts to
+     remove only reviewed matching versions, including versions marked Keep.
+     Other versions remain. If the current version is removed, the newest
+     remaining version becomes current; a page disappears only when no versions
+     remain. Changed scope requires another review, newly captured versions are
+     not silently included, and capture dates are rechecked at deletion.
+     Matching indexing and summary work is cancelled after the removal commits;
+     unrelated versions and newer jobs continue. A failed transaction retains
+     both the saved versions and their active work, so the same review can retry.
+     Forgetting affects this library, not exported or retained legacy backups,
+     and does not prevent future saves. Exclude the site separately if needed.
+   - Successful Memory re-embedding clears an obsolete capture-indexing error
+     for that saved capture. A newer job or a failed backfill is not discarded.
 
-Upgrading from 0.1.0
---------------------
+### Saved content and versions
 
-The first storage read copies the previous IndexedDB library into the 0.2.0 database,
-including captured passages, existing vectors, summaries, and version history.
-Existing 0.2.0 captures take precedence, and the old versions remain available in
-exports. Migration completes atomically and is recorded once, so deleted pages are
-not imported again after a restart. No embeddings are regenerated during migration.
+Saved text remains readable and searchable without a model. Extraction preserves
+headings, lists, code blocks and table cell text; the saved reader does not run
+the original page's scripts or load its images.
 
-The original `webMemoryDB` database is retained as a local upgrade backup. Memory
-Manager deletions affect the active 0.2.0 library, not this retained backup. Legacy
-schema-version-1 JSON backups can also be imported without dropping their passages.
+| Page type | What is saved | Limitations |
+| --- | --- | --- |
+| Articles | Visible article text and reading structure | Surrounding navigation, ads and unrelated sidebars are omitted. |
+| Documentation | Visible main content, code, lists and tables | Interactive examples and embedded documents are not executed or read. |
+| Forums | Visible discussion text, including multiple posts | Only loaded posts are captured; pagination and collapsed replies are not opened automatically. |
+| Dynamic pages | Useful text visible after the capture dwell | Later same-URL changes require another manual capture. Hidden content is not expanded. |
+| PDF or embedded-only pages | Not supported by this text extractor | Open a supported HTML page instead. Mixed pages show a partial-capture notice when embedded or collapsed content is omitted. |
+
+Recapturing changed text or a changed title creates a saved version. An unchanged
+capture records another observation without duplicating the content; re-embedding
+only updates the existing saved text's index. Memory shows first save and latest
+capture times. **Saved versions** opens retained text in the saved reader.
+Text search includes retained earlier versions and shows the best matching version
+per page, preferring the current version when matches are equivalent. Site and
+capture-date filters apply to that snapshot's recorded capture time. These times
+are not a complete browsing history. Historical text does not need re-embedding
+to become searchable.
+
+Automatic retention keeps the latest five versions, including the current one,
+plus older versions explicitly marked **Keep**. Imported and pre-existing history
+starts kept so upgrading does not silently remove it. **Release kept version**
+makes it eligible for pruning on a later changed capture. Earlier versions can
+also be removed individually; references to a removed version become unavailable
+rather than opening replacement content. Deleting a page removes all its versions.
+Successful removal stops matching summary and embedding work; other saved versions
+and newer work are unaffected. Keep and Release do not stop processing.
+
+Upgrading your library
+----------------------
+
+Web Recall verifies a local copy of the old library—including saved versions,
+summaries, vectors and pending capture work—before switching to SQLite. It then
+removes the superseded library records. It does not regenerate embeddings or
+reuse an older copy if the active database is missing. Export a separate backup
+before upgrading. Legacy JSON backups remain importable.
 
 Development preview
 -------------------
@@ -492,10 +591,12 @@ Limitations
 
 Export/Import
 -------------
-- Restore waits for pending capture admissions and cancels existing work for each restored URL, so an older capture cannot overwrite the restored text and embeddings. New captures requested afterward can update the page normally.
-- Restores replace the saved page, including its summary, history and embedding timestamp. Optional fields omitted from a backup are cleared rather than inherited from the destination; the last-modified timestamp records the restore itself.
-- **Export backup** saves one `.jsonl` file using Chrome's native save dialog. Records stream from IndexedDB to disk one page at a time, so the whole library is not assembled in memory. Keep the library unchanged during export for a consistent backup.
-- **Import backup or JSON** accepts the streaming backup and legacy JSON files. Backups are validated completely before any pages are restored; malformed or truncated files are rejected. A storage failure during restore can leave already imported pages in place; the error reports how many finished.
-- Streaming backups use a `{"format":"web-recall","schemaVersion":2}` header, one `{"type":"page","page":{...}}` record per line, and a `{"type":"end","pages":N}` footer. Total file size and page count are not capped. Each UTF-8 record is limited to 16 MiB to bound memory and stay within Chrome's messaging limits. Export rejects oversized records without committing an incomplete file.
+- Restore waits for pending capture admissions and fences older capture, summary and embedding work for each restored URL, even when a backup restores the same version identity. New work requested afterward can update the page normally.
+- Normal imports replace the saved page, including its summary, history and embedding timestamp. Optional fields omitted from a backup are cleared rather than inherited from the destination; the last-modified timestamp records the import itself.
+- **Export backup** saves one `.jsonl` file using Chrome's native save dialog. Each page is one consistent snapshot, streamed as current content and retained-version frames without assembling the whole library. Keep the library unchanged during export if you need a consistent whole-library snapshot.
+- **Import backup or JSON** accepts new and previous streaming backups and legacy JSON files. The complete file is validated before any pages are restored. Each complete page, including its history, replaces the destination atomically; malformed or truncated files are rejected before restore begins.
+- If Web Recall reports that its saved library file is missing, use **Restore from backup** and choose a file in **Settings → Storage & backups**. Web Recall verifies the entire backup before opening the recovered library. A cancelled or incomplete recovery does not become the active library, and recovery never replaces an existing database file.
+- **Stop** aborts an unfinished export file or discards an unfinished imported page. Completed restores remain and their count is shown. If a connection is lost before a restore acknowledgement, the error explains that the last page may have completed; it never silently retries or reports success.
+- New backups use a `{"format":"web-recall","schemaVersion":3}` header, current-page and historical-version frames, a `page-end` record per page, and a `{"type":"end","pages":N}` footer. Schema-2 files remain readable. Total file size and page count are not capped; each UTF-8 frame is limited to 16 MiB, and one page with its full history to 128 MiB. Oversized pages are rejected explicitly, never pruned to fit. Backups retain summaries, vectors, model identities, Keep flags and optional metadata.
 - Legacy JSON imports retain their 10 MiB file and 2,000-page limits and per-field validation. They accept page arrays or an object with a `pages` array; a numeric `schemaVersion`, when provided, must be `1`. Use streaming backups for larger libraries and historical captures beyond legacy field limits.
 - Imported vectors are preserved. Pages with missing embeddings or a different/unknown embedding model need to be re-embedded before semantic search can use them.

@@ -1,30 +1,7 @@
-import { openDatabase, PAGES_STORE, type PageRecord } from '../shared/db/index';
-import { computeCentroid, cosineSimilarity, recencyWeight } from '../shared/vectors';
 import { browserEmbeddingRuntime, DEFAULT_EMBEDDING_CONFIG } from '../shared/config/index';
 import { BROWSER_MODEL_CACHE, type BrowserModelTransfer } from '../shared/browserModels';
 import { listBrowserModelDownloads, removeBrowserModelFiles } from './modelCache';
-
-type CentroidEntry = {
-  url: string;
-  centroid: number[];
-  embeddingKey: string;
-  timestamp: number;
-};
-
-type ScoreCandidate = {
-  url: string;
-  title: string;
-  snippet: string;
-  chunkIndex?: number;
-  score: number;
-  weightedScore: number;
-  recencyWeight: number;
-  containsExact: boolean;
-  timestamp: number;
-};
-
-const DISPLAY_SNIPPET_MAX = 200;
-let centroidIndex: CentroidEntry[] | null = null;
+import { bindSavedLibraryTransfer, forwardSavedLibraryRequest, type SavedLibrarySender } from './libraryHost';
 
 type BrowserEmbedder = {
   tokenizer: (inputs: string[], options: Record<string, unknown>) => Promise<Record<string, unknown>>;
@@ -81,9 +58,13 @@ async function downloadBrowserModel(requestId: string, model: string, revision: 
         reportDownload(job, { state: 'downloading', file: info.file, loadedBytes: 0, totalBytes: undefined });
       } else if (info.status === 'preparing' || (info.status === 'done' && info.file && /\.onnx(?:$|_data)/.test(info.file))) reportDownload(job, { state: 'preparing' }, true);
     } };
-    const vectors = await computeBrowserEmbeddingsNow(['prefetch'], 'title: none | text: ', model, revision, true, context);
-    signal.throwIfAborted();
-    if (vectors.length !== 1 || !vectors[0]?.length || !vectors[0].every(Number.isFinite)) throw new Error('Browser model returned incomplete embeddings');
+    for (const allowDownload of [true, false]) {
+      await releaseBrowserEmbedder();
+      signal.throwIfAborted();
+      const vectors = await computeBrowserEmbeddingsNow(['prefetch'], 'title: none | text: ', model, revision, allowDownload, context);
+      signal.throwIfAborted();
+      if (vectors.length !== 1 || !vectors[0]?.length || !vectors[0].every(Number.isFinite)) throw new Error('Browser model returned incomplete embeddings');
+    }
     reportDownload(job, { state: 'ready' }, true);
   });
   embeddingQueue = pending.catch(() => {});
@@ -95,7 +76,7 @@ async function downloadBrowserModel(requestId: string, model: string, revision: 
   } finally { if (downloadJob === job) downloadJob = null; }
 }
 
-async function getEmbeddingCapabilities(model?: string): Promise<{ runtimeAvailable: boolean; backend: 'onnx-wasm' | 'onnx-webgpu'; dtype: string }> {
+async function getEmbeddingCapabilities(model?: string, revision?: string): Promise<{ runtimeAvailable: boolean; backend: 'onnx-wasm' | 'onnx-webgpu'; dtype: string; cachedFiles: boolean }> {
   const runtime = browserEmbeddingRuntime(model);
   if (runtime.device === 'webgpu') {
     const gpu = (navigator as Navigator & { gpu?: { requestAdapter(): Promise<unknown> } }).gpu;
@@ -111,8 +92,17 @@ async function getEmbeddingCapabilities(model?: string): Promise<{ runtimeAvaila
   return {
     runtimeAvailable: true,
     backend: runtime.device === 'webgpu' ? 'onnx-webgpu' : 'onnx-wasm',
-    dtype: runtime.dtype
+    dtype: runtime.dtype,
+    cachedFiles: Boolean(revision && (await listBrowserModelDownloads()).some(download => download.model === model && download.revision === revision && download.fileCount > 0))
   };
+}
+
+async function releaseBrowserEmbedder(): Promise<void> {
+  const previous = embedderPromise;
+  embedderPromise = null;
+  embedderKey = '';
+  const loaded = await previous?.catch(() => null);
+  if (loaded) await loaded.dispose();
 }
 
 async function getBrowserEmbedder(model: string, revision: string, allowDownload = false, download?: DownloadContext): Promise<BrowserEmbedder> {
@@ -209,9 +199,7 @@ function removeBrowserModel(model: string, revision: string): Promise<number> {
   // Wait for model loading/inference to finish before disposal or cache deletion.
   const pending = embeddingQueue.then(async () => {
     if (embedderKey === `${model}@${revision}`) {
-      const loaded = await embedderPromise?.catch(() => null);
-      if (loaded) await loaded.dispose();
-      embedderPromise = null; embedderKey = '';
+      await releaseBrowserEmbedder();
     }
     return removeBrowserModelFiles(model, revision);
   });
@@ -219,126 +207,22 @@ function removeBrowserModel(model: string, revision: string): Promise<number> {
   return pending;
 }
 
-async function readAllPages(): Promise<PageRecord[]> {
-  const db = await openDatabase();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(PAGES_STORE, 'readonly');
-    const req = tx.objectStore(PAGES_STORE).getAll();
-    req.onsuccess = () => resolve((req.result as PageRecord[]) || []);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function buildSnippet(text: string): string {
-  const trimmed = text.trim();
-  if (trimmed.length <= DISPLAY_SNIPPET_MAX) return trimmed;
-  const cut = trimmed.slice(0, DISPLAY_SNIPPET_MAX);
-  const lastSpace = cut.lastIndexOf(' ');
-  const safe = lastSpace > 120 ? cut.slice(0, lastSpace) : cut;
-  return `${safe.replace(/[\s.,;:!-]+$/, '')}…`;
-}
-
-async function ensureCentroidIndex(): Promise<CentroidEntry[]> {
-  if (centroidIndex) return centroidIndex;
-  const pages = await readAllPages();
-  const index: CentroidEntry[] = [];
-  for (const page of pages) {
-    const keys = new Set(page.chunks.map((chunk) => chunk.embeddingKey).filter((key): key is string => Boolean(key)));
-    for (const embeddingKey of keys) {
-      const centroid = computeCentroid(page.chunks.filter((chunk) => chunk.embeddingKey === embeddingKey));
-      if (centroid) index.push({ url: page.url, centroid, embeddingKey, timestamp: page.timestamp });
-    }
-  }
-  centroidIndex = index;
-  return centroidIndex;
-}
-
-async function topPagesByCentroid(variationEmbeddings: number[][], topN: number, embeddingKey: string): Promise<Array<{ url: string }>> {
-  if (!Array.isArray(variationEmbeddings) || !variationEmbeddings.length) return [];
-  const idx = await ensureCentroidIndex();
-  const scored = idx.filter((entry) => entry.embeddingKey === embeddingKey).map((entry) => {
-    let maxSim = -Infinity;
-    for (const ve of variationEmbeddings) {
-      const sim = cosineSimilarity(ve, entry.centroid);
-      if (sim > maxSim) maxSim = sim;
-    }
-    const weightedScore = maxSim * recencyWeight(entry.timestamp);
-    return { url: entry.url, score: maxSim, weightedScore, timestamp: entry.timestamp };
-  });
-  scored.sort((a, b) => b.weightedScore - a.weightedScore);
-  return scored.slice(0, Math.min(topN, scored.length));
-}
-
-async function scoreChunksInPages(pageUrls: string[], variationEmbeddings: number[][], originalQuery: string, embeddingKey: string): Promise<ScoreCandidate[]> {
-  if (!variationEmbeddings.length) return [];
-  const db = await openDatabase();
-  const pages = await Promise.all([...new Set(pageUrls)].map(url => new Promise<PageRecord | undefined>((resolve, reject) => {
-    const request = db.transaction(PAGES_STORE, 'readonly').objectStore(PAGES_STORE).get(url);
-    request.onsuccess = () => resolve(request.result as PageRecord | undefined);
-    request.onerror = () => reject(request.error);
-  })));
-  const candidates: ScoreCandidate[] = [];
-  const normalizedQuery = (originalQuery || '').toLowerCase().trim();
-  const tokens = normalizedQuery.split(/\W+/).filter((t) => t.length >= 3);
-
-  for (const page of pages) {
-    if (!page) continue;
-    const titleLower = (page.title || '').toLowerCase();
-    page.chunks.forEach((chunk, idx) => {
-      if (chunk.embeddingKey !== embeddingKey) return;
-      const emb = chunk.embedding;
-      if (!Array.isArray(emb) || emb.length === 0) return;
-      let maxSim = -Infinity;
-      for (const ve of variationEmbeddings) {
-        const sim = cosineSimilarity(ve, emb);
-        if (sim > maxSim) maxSim = sim;
-      }
-      const rec = recencyWeight(page.timestamp);
-      const snippetLower = (chunk.text || '').toLowerCase();
-      const hasExact = normalizedQuery.length >= 3 && snippetLower.includes(normalizedQuery);
-      let hasToken = false;
-      if (!hasExact && tokens.length) {
-        hasToken = tokens.some((tok) => snippetLower.includes(tok));
-      }
-      if (!hasToken && tokens.length) {
-        hasToken = tokens.some((tok) => titleLower.includes(tok));
-      }
-      const weightedScore = maxSim * 0.75 + (hasExact ? 0.12 : 0) + (hasToken ? 0.05 : 0) + rec * 0.05;
-      candidates.push({
-        url: page.url,
-        title: page.title || page.url,
-        snippet: buildSnippet(chunk.text || ''),
-        chunkIndex: idx,
-        score: maxSim,
-        weightedScore,
-        recencyWeight: rec,
-        containsExact: hasExact,
-        timestamp: page.timestamp
-      });
-    });
-  }
-  return candidates;
-}
+bindSavedLibraryTransfer();
 
 chrome.runtime.onMessage.addListener(
-  (message: { type?: string; [key: string]: unknown }, _sender: unknown, sendResponse: (response?: unknown) => void) => {
+  (message: { type?: string; [key: string]: unknown }, sender: SavedLibrarySender, sendResponse: (response?: unknown) => void) => {
   if (!message || typeof message.type !== 'string') return false;
-  if (message.type === 'OFFSCREEN_TOP_PAGES') {
-    const variationEmbeddings = Array.isArray(message.variationEmbeddings) ? (message.variationEmbeddings as number[][]) : [];
-    const topN = typeof message.topN === 'number' ? message.topN : 20;
-    topPagesByCentroid(variationEmbeddings, topN, String(message.embeddingKey || ''))
-      .then((pages) => sendResponse({ pages }))
-      .catch((err) => sendResponse({ error: err?.message || String(err) }));
-    return true;
-  }
-  if (message.type === 'OFFSCREEN_SCORE_CHUNKS') {
-    const pageUrls = Array.isArray(message.pageUrls) ? (message.pageUrls as string[]) : [];
-    const variationEmbeddings = Array.isArray(message.variationEmbeddings) ? (message.variationEmbeddings as number[][]) : [];
-    const originalQuery = typeof message.originalQuery === 'string' ? message.originalQuery : '';
-    scoreChunksInPages(pageUrls, variationEmbeddings, originalQuery, String(message.embeddingKey || ''))
-      .then((candidates) => sendResponse({ candidates }))
-      .catch((err) => sendResponse({ error: err?.message || String(err) }));
-    return true;
+  if (message.type === 'OFFSCREEN_SAVED_LIBRARY') return forwardSavedLibraryRequest(message.request, sender, sendResponse);
+  if (message.type === 'OFFSCREEN_TOP_PAGES' || message.type === 'OFFSCREEN_SCORE_CHUNKS' || message.type === 'OFFSCREEN_INVALIDATE_INDEX') {
+    const action = message.type === 'OFFSCREEN_TOP_PAGES' ? {
+      op: 'semanticTop', queries: message.variationEmbeddings, key: message.embeddingKey, limit: message.topN
+    } : message.type === 'OFFSCREEN_SCORE_CHUNKS' ? {
+      op: 'semanticChunks', queries: message.variationEmbeddings, key: message.embeddingKey, question: message.originalQuery, urls: message.pageUrls
+    } : { op: 'invalidateSemantic' };
+    return forwardSavedLibraryRequest({ kind: 'operate', id: message.libraryId, replacement: message.libraryReplacement, action }, sender, response => {
+      const envelope = response as { value?: unknown; error?: string };
+      sendResponse(envelope?.error ? envelope : envelope?.value);
+    });
   }
   if (message.type === 'OFFSCREEN_EMBED') {
     const inputs = Array.isArray(message.inputs) ? (message.inputs as string[]) : [];
@@ -368,14 +252,9 @@ chrome.runtime.onMessage.addListener(
     return true;
   }
   if (message.type === 'OFFSCREEN_EMBED_CAPABILITIES') {
-    getEmbeddingCapabilities(typeof message.model === 'string' ? message.model : undefined)
+    getEmbeddingCapabilities(typeof message.model === 'string' ? message.model : undefined, typeof message.revision === 'string' ? message.revision : undefined)
       .then((capabilities) => sendResponse(capabilities))
       .catch((err) => sendResponse({ error: err?.message || String(err) }));
-    return true;
-  }
-  if (message.type === 'OFFSCREEN_INVALIDATE_INDEX') {
-    centroidIndex = null;
-    sendResponse({ ok: true });
     return true;
   }
   return false;

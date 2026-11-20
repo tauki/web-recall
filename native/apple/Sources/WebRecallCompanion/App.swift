@@ -29,6 +29,7 @@ import UpdateCore
   @ObservedObject var controller: CompanionController
   @ObservedObject var login: LoginPreference
   @ObservedObject var updater: CompanionUpdater
+  @AppStorage(ManagedBackups.folderKey) private var backupFolder = ""
   @Environment(\.colorScheme) private var colorScheme
   let refresh: () -> Void
   let quit: () -> Void
@@ -99,6 +100,16 @@ import UpdateCore
             Toggle("Automatic updates", isOn: Binding(get: { updater.automatic }, set: updater.setAutomatic))
         }.foregroundStyle(muted)
         Rectangle().fill(line).frame(height: 1)
+        VStack(alignment: .leading, spacing: 6) {
+          Text("Encrypted backups").fontWeight(.semibold)
+          Text(backupFolder.isEmpty ? "No folder selected" : backupFolder)
+            .foregroundStyle(muted).lineLimit(1).truncationMode(.middle)
+          HStack {
+            Button(backupFolder.isEmpty ? "Choose folder" : "Change folder", action: chooseBackupFolder).buttonStyle(.bordered)
+            if !backupFolder.isEmpty { Button("Disconnect folder") { backupFolder = "" }.buttonStyle(.link) }
+          }.controlSize(.small)
+        }
+        Rectangle().fill(line).frame(height: 1)
         HStack {
           Toggle("Launch at login", isOn: Binding(get: { login.enabled }, set: login.setEnabled))
             .toggleStyle(.checkbox).accessibilityIdentifier("launch-at-login")
@@ -111,6 +122,17 @@ import UpdateCore
         }
       }.font(.system(size: 12)).foregroundStyle(ink).padding(20)
     }.frame(minWidth: 360, minHeight: 240).background(color(dark ? 0x18181c : 0xfbfbfa)).tint(accent)
+  }
+
+  private func chooseBackupFolder() {
+    let panel = NSOpenPanel()
+    panel.canChooseFiles = false
+    panel.canChooseDirectories = true
+    panel.canCreateDirectories = true
+    panel.prompt = "Use folder"
+    if panel.runModal() == .OK, let folder = panel.url {
+      backupFolder = folder.resolvingSymlinksInPath().path
+    }
   }
 }
 
@@ -140,7 +162,7 @@ import UpdateCore
     if let resource = Bundle.main.url(forResource: "MenuIcon", withExtension: "png") {
       menuIcon = NSImage(contentsOf: resource)
       menuIcon?.size = NSSize(width: 18, height: 18)
-      menuIcon?.isTemplate = true
+      menuIcon?.isTemplate = false
     }
     changes = controller.objectWillChange.sink { [weak self] _ in DispatchQueue.main.async { self?.updateMenu() } }
     if let index = CommandLine.arguments.firstIndex(of: "--update-startup"), CommandLine.arguments.count == index + 3 {
